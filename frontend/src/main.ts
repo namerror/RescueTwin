@@ -11,7 +11,7 @@ type Cell = [number, number];
 type Mode = 'adaptive' | 'baseline';
 type Perception = 'image-yolo' | 'analytic-development';
 type Tool = 'inspect' | 'survivor' | 'immobile' | 'fire' | 'remove';
-interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string; immobile?: Cell[]; comms_outages?: [number, number][] }
+interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string; immobile?: Cell[]; comms_outages?: [number, number][]; room_risk?: Record<string, string> }
 interface CostarField { key: string; label: string; value: unknown; units: string | null; field_path: string; source_id: number; dataset: string; derivation: string; note?: string }
 interface SceneData {
   id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
@@ -69,7 +69,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const number = (value: number, digits = 1): string => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 const same = (a: Cell, b: Cell): boolean => a[0] === b[0] && a[1] === b[1];
-const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}), ...(value.immobile?.length ? { immobile: value.immobile.map(p => [...p] as Cell) } : {}), ...(value.comms_outages?.length ? { comms_outages: value.comms_outages.map(o => [...o] as [number, number]) } : {}) });
+const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}), ...(value.immobile?.length ? { immobile: value.immobile.map(p => [...p] as Cell) } : {}), ...(value.comms_outages?.length ? { comms_outages: value.comms_outages.map(o => [...o] as [number, number]) } : {}), ...(value.room_risk && Object.keys(value.room_risk).length ? { room_risk: { ...value.room_risk } } : {}) });
 const key = (p: Cell): string => `${p[0]},${p[1]}`;
 
 $('app').innerHTML = `
@@ -100,6 +100,7 @@ $('app').innerHTML = `
           <div class="layer-controls" aria-label="Scene layers">
             <label><input type="checkbox" id="walls-layer" checked />Walls</label>
             <label id="cutaway-control" hidden title="Operator view clips the scanned mesh above this height; robot camera always sees full geometry">Cutaway <select id="cutaway-height"><option value="1.0">1.0 m</option><option value="1.6" selected>1.6 m</option><option value="2.2">2.2 m</option><option value="off">Off</option></select></label>
+            <label title="Room fire-risk map: gas heater (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
             <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
             <label><input type="checkbox" id="heat-layer" checked /><span class="swatch heat"></span>Fire / heat</label>
             <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
@@ -108,7 +109,7 @@ $('app').innerHTML = `
           </div>
         </div>
         <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
-        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas heater</span><span><i class="legend-risk sprinkler"></i>Sprinkler</span><span><i class="legend-risk both"></i>Both</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates are grid cells; the scene's origin and resolution convert them to metres in the scan frame. Choose an editing tool in Scenario setup, then apply it here or click the map.</p></details>
       </section>
       <aside class="sidebar">
@@ -133,6 +134,7 @@ $('app').innerHTML = `
         <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Place the conditions</h2></div></div>
           <label class="seed-label" for="building-use" title="Static building information only; it changes where the robot searches first, never what it knows about people">Building use <select id="building-use"><option value="">Auto</option></select></label>
           <p id="building-use-hint" class="field-hint"></p>
+          <div class="room-risk"><span class="seed-label" title="Pre-incident fixture tags per room. Gas heater 1.5x search priority, sprinkler 0.8x, neither/unknown 1x">Room fire risk</span><div id="room-risk-list"></div><p id="room-risk-hint" class="field-hint"></p></div>
           <div id="presets" class="preset-list"></div>
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label title="Mark or unmark a placed survivor as unable to follow the robot (checked on contact)"><input name="tool" type="radio" value="immobile" /><span><b aria-hidden="true">♿</b>Can't walk</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
@@ -201,6 +203,8 @@ const layers = { heat: true, smoke: true, observed: false, route: true };
 const wallLayer = new THREE.Group();
 const obstacleLayer = new THREE.Group();  // operator-only furniture/source-wall cells
 world.add(obstacleLayer);
+const riskLayer = new THREE.Group();  // operator-only room fire-risk tint
+world.add(riskLayer);
 function createField(order: number) {
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d')!;
@@ -371,6 +375,7 @@ async function loadScene(): Promise<void> {
   recenter();
   renderSceneInfo();
   await loadBuildingUses();
+  await loadRiskMap();
   await loadPresets();
   const list = await api<{ id: string; name: string; source: string; checks_passed: boolean | null }[]>('scenes');
   ($('scene-select') as HTMLSelectElement).innerHTML = list.map(s => `<option value="${escape(s.id)}"${s.id === scene!.id ? ' selected' : ''}>${escape(s.name)}${s.source === 'synthetic' ? ' (synthetic)' : ''}</option>`).join('');
@@ -398,6 +403,52 @@ function syncBuildingUse(): void {
     : '';
 }
 
+interface RiskRoom { id: string; name: string; tag: string; tag_label: string; factor: number; source: string; provenance: string | null }
+interface RiskMap { rooms: RiskRoom[]; building_default: string; building_source: string; tags: { id: string; label: string; factor: number }[]; note: string }
+let riskMap: RiskMap | null = null;
+const RISK_COLORS: Record<string, string> = { gas_heater: '#ff8a3d', sprinkler: '#4aa8ff', both: '#b07cff' };
+const RISK_LABELS: Record<string, string> = { gas_heater: 'Gas heater', sprinkler: 'Fire sprinkler', both: 'Gas heater + sprinkler', neither: 'Neither', unknown: 'Unknown' };
+
+async function loadRiskMap(): Promise<void> {
+  riskMap = await api<RiskMap>('risk-map');
+  const fallback = RISK_LABELS[riskMap.building_default] ?? riskMap.building_default;
+  $('room-risk-list').innerHTML = riskMap.rooms.map(r => `<label class="room-risk-row"><span>${escape(r.name)}</span><select data-room="${escape(r.id)}"><option value="">Default (kit: ${escape(fallback)})</option>` +
+    riskMap!.tags.map(t => `<option value="${escape(t.id)}">${escape(t.label)} · ${t.factor}×</option>`).join('') + '</select></label>').join('');
+  syncRoomRisk();
+}
+
+/** Effective tag per room: the draft's operator override, else the CoStar building default. */
+function roomRiskTag(roomId: string): string {
+  return draft?.room_risk?.[roomId] ?? riskMap?.building_default ?? 'unknown';
+}
+
+function syncRoomRisk(): void {
+  if (!riskMap) return;
+  document.querySelectorAll<HTMLSelectElement>('#room-risk-list select').forEach(select => {
+    if (document.activeElement !== select) select.value = draft?.room_risk?.[select.dataset.room!] ?? '';
+    select.disabled = !idle() || busy;
+  });
+  const tagged = Object.keys(draft?.room_risk ?? {}).length;
+  $('room-risk-hint').textContent = `Default for untagged rooms: ${RISK_LABELS[riskMap.building_default] ?? riskMap.building_default} (${riskMap.building_source}). ` +
+    `${tagged ? `${tagged} operator tag${tagged > 1 ? 's' : ''}. ` : ''}Gas heater rooms are searched first, sprinklered rooms slightly later. Fixture tags, not sensor data.`;
+  drawRiskLayer();
+}
+
+function drawRiskLayer(): void {
+  clearGroup(riskLayer);
+  if (!scene) return;
+  const r = scene.resolution;
+  for (const room of scene.rooms) {
+    const color = RISK_COLORS[roomRiskTag(room.id)];
+    if (!color || !room.cells.length) continue;
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(r, 0.02, r), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.28, depthWrite: false }), room.cells.length);
+    const matrix = new THREE.Matrix4();
+    room.cells.forEach((cell, i) => mesh.setMatrixAt(i, matrix.makeTranslation(position(cell, 0.03))));
+    riskLayer.add(operatorOnly(mesh));
+  }
+  riskLayer.visible = ($('risk-layer') as HTMLInputElement).checked;
+}
+
 async function loadPresets(): Promise<void> {
   const use = draft?.building_use ? `&building_use=${encodeURIComponent(draft.building_use)}` : '';
   const presets = await api<Preset[]>(`presets?seed=${draft?.seed ?? 7}${use}`);
@@ -406,7 +457,7 @@ async function loadPresets(): Promise<void> {
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => b.addEventListener('click', () => {
     const preset = presets[Number(b.dataset.index)];
     if (!preset.scenario || !idle()) return;
-    draft = validateScenario(preset.scenario);
+    draft = validateScenario({ ...preset.scenario, ...(draft?.room_risk ? { room_risk: draft.room_risk } : {}) });
     ($('seed') as HTMLInputElement).value = String(draft.seed);
     dirty = JSON.stringify(draft) !== JSON.stringify({ ...state!.scenario, scene_id: scene!.id });
     drawDynamic();
@@ -486,6 +537,7 @@ function acceptState(next: SimState, newSceneSelection = false): void {
     (next.metrics.assistance_requests ? ` · ${next.metrics.assistance_requests} assistance request${next.metrics.assistance_requests > 1 ? 's' : ''}` : '') +
     (next.metrics.inference_pause_s ? ` · clock paused ${number(next.metrics.inference_pause_s, 1)} s for Gemini (not real time)` : '');
   syncBuildingUse();
+  syncRoomRisk();
   const image = next.perception_mode === 'image-yolo';
   $('perception-label').textContent = image ? 'YOLO · RGB-D' : 'Analytic fixture';
   $('perception-dot').classList.toggle('warning', !image || next.degraded);
@@ -1346,6 +1398,7 @@ $('discard').addEventListener('click', () => {
   dirty = false;
   ($('seed') as HTMLInputElement).value = String(draft.seed);
   drawDynamic();
+  syncRoomRisk();
   syncUI();
   notify('Local changes discarded.');
 });
@@ -1375,6 +1428,7 @@ $('scenario-file').addEventListener('change', async () => {
     dirty = true;
     ($('seed') as HTMLInputElement).value = String(draft.seed);
     drawDynamic();
+    syncRoomRisk();
     syncUI();
     notify(`Loaded ${file.name}. Review the map, then apply the scenario.`);
   } catch (error) { notify(`Could not load scenario: ${(error as Error).message}`, true); }
@@ -1432,6 +1486,17 @@ $('building-use').addEventListener('change', async () => {
   await loadPresets();
   notify('Building use changed. Pick a preset or Apply to use it; presets now place people for this use.');
 });
+$('room-risk-list').addEventListener('change', event => {
+  const select = event.target as HTMLSelectElement;
+  if (!select.dataset.room || !draft || !idle() || busy || !state || !scene) return;
+  const next = { ...(draft.room_risk ?? {}) };
+  if (select.value) next[select.dataset.room] = select.value; else delete next[select.dataset.room];
+  if (Object.keys(next).length) draft.room_risk = next; else delete draft.room_risk;
+  dirty = JSON.stringify(draft) !== JSON.stringify({ ...state.scenario, scene_id: scene.id });
+  syncRoomRisk(); syncUI();
+  notify('Room fire-risk tag changed. Apply to use it; the robot searches gas-heater rooms first and sprinklered rooms slightly later.');
+});
+$('risk-layer').addEventListener('change', () => { riskLayer.visible = ($('risk-layer') as HTMLInputElement).checked; });
 $('furniture-layer').addEventListener('change', () => { obstacleLayer.visible = ($('furniture-layer') as HTMLInputElement).checked; });
 $('cutaway-height').addEventListener('change', () => {
   const value = ($('cutaway-height') as HTMLSelectElement).value;

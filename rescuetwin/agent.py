@@ -37,6 +37,9 @@ BASE_INSTRUCTION = ('You supervise a simulated rescue. Choose a select_goal tool
                     'Your goal is kept until the robot reaches it, so pick one target and commit; do not alternate. '
                     'Rooms list travel_cost_m (risk-weighted, from the robot) and likelihood_weight (building-use prior): '
                     'prefer high likelihood per metre, skip rooms already inspected or with no remaining observation points. '
+                    'Each room also has risk_tag/risk_factor from the room fire-risk map (pre-incident fixture tags, not sensor data): '
+                    'search gas-heater rooms earlier, sprinklered rooms slightly later; multiply likelihood_weight by risk_factor. '
+                    'A risk_tag of unknown means not recorded, not absent. '
                     'Unknown occupants are not absent. Never infer actual occupancy from capacity. Explain briefly.')
 
 
@@ -111,7 +114,9 @@ def decision_options(sim):
         reach=[costs[p] for p in points if p in costs]
         rooms.append(dict(id=room['id'],name=room['name'],label=room.get('label'),state=st['status'],observed_fraction=st['observed_fraction'],
                           remaining_observation_points=len(points),travel_cost_m=round(min(reach)*sim.scene.resolution,1) if reach else None,
-                          likelihood_weight=sim.prior['weights'].get(room['id'],1.)))
+                          likelihood_weight=sim.prior['weights'].get(room['id'],1.),
+                          risk_tag=sim.risk[room['id']]['tag'],risk_factor=sim.risk[room['id']]['factor'],
+                          risk_source=sim.risk[room['id']]['source']))
     survivors=[dict(id=d['id'],travel_cost_m=round(costs[tuple(d['cell'])]*sim.scene.resolution,1) if tuple(d['cell']) in costs else None)
                for d in sim.detections if d['status']=='confirmed']
     return dict(rooms=rooms,survivors=survivors,building_use=sim.prior['use'])

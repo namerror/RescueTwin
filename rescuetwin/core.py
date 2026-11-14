@@ -14,7 +14,7 @@ import os
 
 import numpy as np
 
-from . import occupancy
+from . import occupancy, risk
 
 Cell = tuple[int, int]
 
@@ -245,6 +245,9 @@ class Simulation:
         # Search prior from static building information only (never from survivor placements).
         self.prior=occupancy.weights(self.scene,self.scenario.get('building_use'))
         self.log(occupancy.describe(self.scene,self.prior))
+        # Room fire-risk map (gas heater / sprinkler fixture tags): static building information, multiplies the prior.
+        self.risk=risk.room_map(self.scene,self.scenario.get('room_risk'))
+        self.log(risk.describe(self.scene,self.risk))
         if HAZARD_TIME_SCALE!=1:self.log(f'Demo pacing: fire and smoke advance at {HAZARD_TIME_SCALE:g}x mission time.')
         self.rooms_state={r['id']:dict(id=r['id'],name=r['name'],label=r.get('label'),status='unvisited',observed_fraction=0.,
                                         viewpoints_tried=0,reason=None) for r in self.scene.rooms}
@@ -277,6 +280,7 @@ class Simulation:
                 seen.add(tuple(p))
         if set(map(tuple,scenario['survivors'])) & set(map(tuple,scenario['ignitions'])): raise ValueError('Survivor and ignition overlap')
         if scenario.get('building_use') is not None and scenario['building_use'] not in occupancy.PROFILES: raise ValueError('Unknown building use')
+        risk.validate(self.scene,scenario.get('room_risk'))
         immobile=scenario.get('immobile',[])
         if not isinstance(immobile,list) or not {tuple(p) for p in immobile if isinstance(p,(list,tuple))}<=set(map(tuple,scenario['survivors'])) or len(immobile)!=len({tuple(p) for p in immobile}):
             raise ValueError('immobile: list distinct cells that are also survivor placements')
@@ -533,6 +537,7 @@ class Simulation:
                     survivors=[deepcopy(d) for d in self.detections if d['status'] in ('confirmed','escorting')],
                     possible=[deepcopy(d) for d in self.detections if d['status'] in ('candidate','possible')],
                     rooms_state=deepcopy(list(self.rooms_state.values())),
+                    risk_map=deepcopy(list(self.risk.values())),
                     reports=[{k:r[k] for k in ('id','kind','status','time','room','action')} for r in self.reports],
                     perception=self.perception_mode,events=self.events[-8:])
 
@@ -553,6 +558,10 @@ class Simulation:
     def tree(self,escort=False):
         heat,smoke=self.planning_fields()
         return route_tree(self.scene,self.robot,heat.tolist(),smoke.tolist(),self.observed.tolist(),self.mode=='adaptive',escort)
+
+    def search_weight(self,room_id):
+        """Search priority of a room: building-use likelihood times the fire-risk fixture factor."""
+        return self.prior['weights'].get(room_id,1.)*(self.risk.get(room_id) or {}).get('factor',1.)
 
     def observe_points(self,room):
         return [tuple(p) for p in room.get('observe',room['cells'])]
@@ -607,13 +616,13 @@ class Simulation:
         # Prior-weighted coverage: likelihood of people in the room over travel cost. With a uniform prior
         # (residential) this is nearest-first.
         smooth=SEARCH_PRIOR_SMOOTHING_M/self.scene.resolution
-        remaining=[(self.prior['weights'].get(room['id'],1.),p) for room in self.scene.rooms for p in self.observe_points(room) if p not in self.searched_points]
-        remaining+=[(self.prior['weights'].get(rid,1.),c) for rid,c in self.extra_views if c not in self.visited]
+        remaining=[(self.search_weight(room['id']),p) for room in self.scene.rooms for p in self.observe_points(room) if p not in self.searched_points]
+        remaining+=[(self.search_weight(rid),c) for rid,c in self.extra_views if c not in self.visited]
         options=[(-w/(costs[p]+smooth),costs[p],p) for w,p in remaining if p in costs]
         if options:
             best=min(options);room=self.room_of.get(best[2])
             self.decide('inspect-room',best[2],[(c,p) for _,c,p in options],
-                        f"{(self.rooms_state.get(room) or {}).get('name','room')}: best likelihood/travel ({self.prior['use']} prior)",'coverage')
+                        f"{(self.rooms_state.get(room) or {}).get('name','room')}: best likelihood/travel ({self.prior['use']} prior, risk {(self.risk.get(room) or {}).get('tag','unknown')})",'coverage')
             return extract(prev,self.robot,best[2])
         remaining=[p for _,p in remaining]
         retry=[(costs[tuple(d['cell'])],tuple(d['cell'])) for d in self.detections
@@ -863,7 +872,7 @@ class Simulation:
                     searched_rooms=self.searched_rooms(),
                     frame_request=self.frame_request,degraded=self.degraded,scanning=self.scan_remaining>0,holding=self.holding,last_frame=self.last_frame,
                     reports=self.reports,rooms_state=list(self.rooms_state.values()),decisions=self.decisions[-30:],
-                    withdraw_reason=self.withdraw_reason,comms_up=self.comms_up)
+                    withdraw_reason=self.withdraw_reason,comms_up=self.comms_up,risk_map=list(self.risk.values()))
 
 
 def compare(scene,scenario,perception='analytic-development'):
