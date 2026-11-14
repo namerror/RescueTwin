@@ -87,7 +87,10 @@ class Simulation:
         self.survivors=[dict(id=f'person-{i}',position=tuple(p),status='unobserved') for i,p in enumerate(self.scenario['survivors'])]
         self.rng=random.Random(self.scenario['seed']);self.steps=0
         self.perception_mode='analytic-development';self.log('Synthetic fixture; analytic development sensing. Not a validated property rehearsal.')
-        for x,y in self.scenario['ignitions']: self.heat[y][x]=.9
+        self.ignition_cells = set(map(tuple, self.scenario['ignitions']))
+        self.hazard_time = 0.0
+        self.hazards_running = False
+        for x,y in self.ignition_cells: self.heat[y][x]=.9
 
     def grid(self,value=0.): return [[value for _ in range(self.scene.width)] for _ in range(self.scene.height)]
 
@@ -109,15 +112,18 @@ class Simulation:
         self.events.append(dict(time=round(self.time,2),message=message));self.events=self.events[-100:]
 
     def hazards(self,dt):
+        self.hazard_time += dt
         h=self.grid();s=self.grid()
         for y in range(self.scene.height):
             for x in range(self.scene.width):
                 p=(x,y)
                 if not self.scene.free(p): continue
                 ns=self.scene.neighbors(p);heat=self.heat[y][x];smoke=self.smoke[y][x]
-                burn=max(0.,heat-.18)*self.fuel[y][x]*.5
+                # A short sustained ignition seeds adjacent fuel in the demo model.
+                source = 0.9 if self.hazard_time <= 45 and p in self.ignition_cells else 0.0
+                burn=max(0.,heat-.14)*self.fuel[y][x]*.85
                 self.fuel[y][x]=max(0.,self.fuel[y][x]-burn*dt*.2)
-                h[y][x]=max(0.,min(1.,heat+dt*(.3*sum(self.heat[b][a]-heat for a,b in ns)+burn-.025*heat)))
+                h[y][x]=max(source,min(1.,heat+dt*(.3*sum(self.heat[b][a]-heat for a,b in ns)+burn-.025*heat)))
                 s[y][x]=max(0.,min(1.,smoke+dt*(.5*sum(self.smoke[b][a]-smoke for a,b in ns)+burn*.6-.015*smoke)))
         self.heat,self.smoke=h,s
 
@@ -209,6 +215,7 @@ class Simulation:
 
     def state(self):
         return dict(scene=self.scene.public(),scenario=self.scenario,time=round(self.time,2),status=self.status,
+                    hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,
                     robot=self.robot,survivors=self.survivors,heat=self.heat,smoke=self.smoke,observed=self.observed,
                     route=self.route,events=self.events,metrics=self.metrics,mode=self.mode,perception_mode=self.perception_mode)
 

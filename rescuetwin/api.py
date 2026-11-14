@@ -13,7 +13,13 @@ sim=Simulation()
 async def lifespan(app):
     async def clock():
         while True:
-            sim.tick();await asyncio.sleep(.2)
+            if sim.status == 'running':
+                sim.tick()
+            elif sim.hazards_running:
+                sim.hazards(.2)
+            if sim.status != 'running' and sim.hazard_time >= 600 - 1e-8:
+                sim.hazards_running = False
+            await asyncio.sleep(.2)
     async def reason():
         if not os.environ.get('GEMINI_API_KEY'):return
         from .agent import MissionAgent,apply_decision
@@ -29,7 +35,7 @@ async def lifespan(app):
                 decision=await asyncio.wait_for(asyncio.to_thread(agent.decide,observation,current.scene),timeout=8)
                 if current is sim:apply_decision(current,decision,observation['time'])
             except Exception:
-                if current is sim:current.log('Hosted decision failed/rejected; pausing for operator review.');current.status='paused'
+                if current is sim:current.log('Hosted decision failed/rejected; pausing for operator review.');current.status='paused';current.hazards_running=False
     agent_task=asyncio.create_task(reason())
     task=asyncio.create_task(clock())
     yield
@@ -61,7 +67,7 @@ def scenes():return [sim.scene.public()]
 @app.post('/api/scenario')
 def scenario(body:Scenario):
     global sim
-    if sim.status!='idle':raise HTTPException(409,'Reset before editing a scenario')
+    if sim.status!='idle' or sim.hazards_running:raise HTTPException(409,'Reset before editing a scenario')
     try:sim=Simulation(sim.scene,body.model_dump(),sim.mode)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     return sim.state()
@@ -71,13 +77,22 @@ def control(body:Control):
     global sim
     if body.mode is not None and body.mode not in ('adaptive','baseline'):raise HTTPException(422,'Invalid mode')
     if body.action=='reset':sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode)
+    elif body.action=='toggle_hazards':
+        if sim.status == 'running':
+            raise HTTPException(409, 'Pause the robot mission before previewing hazards separately')
+        if sim.hazard_time >= 600 - 1e-8:
+            raise HTTPException(409, 'Reset before previewing hazards again')
+        sim.hazards_running = not sim.hazards_running
+        if sim.status == 'idle':
+            sim.status = 'paused'
     elif body.action=='start':
         if sim.status not in ('idle','paused'):raise HTTPException(409,'Reset a finished run first')
         if body.mode and body.mode!=sim.mode and sim.status!='idle':raise HTTPException(409,'Reset before changing policy')
-        sim.mode=body.mode or sim.mode;sim.status='running'
+        sim.mode=body.mode or sim.mode;sim.status='running';sim.hazards_running=True
     elif body.action=='pause':
         if sim.status!='running':raise HTTPException(409,'No active run')
         sim.status='paused'
+        sim.hazards_running=False
     else:raise HTTPException(422,'Unknown control action')
     return sim.state()
 
