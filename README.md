@@ -23,7 +23,12 @@ Instead of relying on predefined evacuation routes, RescueTwin enables autonomou
 Beyond emergency response, the underlying platform could support robotic facility inspection, autonomous navigation benchmarking, and pre-deployment planning for commercial buildings.
 ## Development baseline
 
-This repository now includes a **synthetic, illustrative development simulator** and a local scenario editor. It is not yet a validated real-property rehearsal. The runtime uses analytic development sensing; the optional YOLO adapter is not connected to a robot-camera pipeline yet. Hosted Gemini decisions are optional; without credentials the mission uses a deterministic policy.
+This repository runs a search-and-evacuation rehearsal on one scanned sponsor property: Floor 1 of
+Matterport model `9A46aT7FCPg` (1276 W 38th St, unit 2), joined to its CoStar record and floor plan.
+Real: the property record and scan-derived floor geometry. Synthetic: fire, smoke, people, robot. The unit
+has one verified exit (see `docs/SCENE_SELECTION.md`). Survivors are found by YOLO on robot-camera frames
+rendered in the browser; an analytic fixture detector remains for CI and the synthetic development scene.
+Hosted Gemini decisions are optional; without credentials the mission uses a deterministic policy.
 
 ```bash
 python3 -m venv .venv
@@ -44,13 +49,14 @@ Open the Vite localhost URL. Place survivors and ignition points, run either pol
 
 ```bash
 python3 -m pytest -q
-python3 scripts/inspect_sponsor.py 5p6KKvHqh3W
-python3 scripts/fetch_matterport.py 5p6KKvHqh3W
+python3 scripts/inspect_sponsor.py 9A46aT7FCPg --property 22572250 --plan 6106437
+python3 scripts/prepare_scene.py fetch 9A46aT7FCPg   # needs Matterport credentials
+python3 scripts/prepare_scene.py build 9A46aT7FCPg
 ```
 
-The sponsor kit is ignored by Git at `data/costar-hackathon-kit`. Fetching source metadata requires the existing Matterport credentials; it does not prepare collision meshes or validate exits.
+The sponsor kit is ignored by Git at `data/costar-hackathon-kit`. Prepared bundles stay in ignored `data/prepared/`. Exits come only from manual annotations in `scenes/`. Keep the browser tab open during image-mode runs, because it renders the robot camera.
 
-Optional hosted reasoning: install `pip install -e '.[agent]'`, export `GEMINI_API_KEY` and optionally `GEMINI_MODEL`, then restart the backend. API access/model availability must be verified against your account. Failed or rejected decisions pause the run. For the independent image detector, install `pip install -e '.[vision]'`; weights download on first use.
+Optional hosted reasoning: install `pip install -e '.[agent]'`, export `GEMINI_API_KEY` and optionally `GEMINI_MODEL`, then restart the backend. API access/model availability must be verified against your account. Failed or rejected decisions pause the run. For image perception install `pip install -e '.[vision]'`; YOLO weights download on first use. The survivor model is CesiumMan (CC BY 4.0, Cesium).
 
 See [agent setup](AGENTS.md), [architecture](docs/ARCHITECTURE.md), [MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md).
 

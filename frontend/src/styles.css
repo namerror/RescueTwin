@@ -14,6 +14,36 @@ main{max-width:1660px;margin:0 auto;padding:34px 4% 20px}.page-intro{display:fle
 @media(max-width:520px){main{padding:24px 14px 14px}.app-header{height:75px;padding:0 16px}.brand{font-size:21px;gap:10px}.brand small{font-size:7px;letter-spacing:1.4px}.brand-mark{height:36px;width:36px;font-size:24px}.connection{font-size:10px;gap:5px}.header-right{gap:0}.page-intro{gap:8px;margin-bottom:20px}.eyebrow{font-size:8px;letter-spacing:1.1px}h1{font-size:24px;line-height:1.25}.subtitle{font-size:11px}.run-badge{min-width:90px}.run-badge>span{font-size:8px;letter-spacing:.6px}.run-badge strong{font-size:21px}.run-badge small{font-size:8px;display:block;margin-top:4px}.disclosure{padding:14px;gap:10px;align-items:flex-start}.disclosure strong{font-size:11px}.disclosure p{font-size:10px}.disclosure-icon{margin-top:1px;flex-shrink:0}.metrics{gap:9px;margin-bottom:16px}.metric{padding:15px 12px}.metric>div{gap:5px;flex-wrap:wrap}.metric-label{font-size:9px}.metric small{font-size:9px}.metric strong{font-size:26px}.metric strong.text-value{font-size:23px}.metric-unit{font-size:9px}.sidebar{grid-template-columns:1fr}.compare-callout{grid-column:auto}.panel-heading{padding:16px}.panel-heading h2{font-size:16px}.scene-panel .panel-heading{align-items:flex-start;flex-direction:column;gap:6px}.viewport{height:390px}.layer-controls{gap:4px 9px}.layer-controls label{font-size:9px}.scene-toolbar{gap:5px}.scene-toolbar>.button{padding:4px;font-size:9px}.cell-inputs{gap:8px;flex-wrap:wrap}.cell-inputs input{width:75px}.cell-inputs .button{font-size:11px}.event-list li{gap:12px;padding:12px 16px}.event-list time{min-width:50px}.view-label{left:12px;top:12px;font-size:8px}.cell-readout{left:10px;right:10px;max-width:calc(100% - 20px);font-size:9px}.app-footer{font-size:9px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
 
+/* Scene, property and perception panels */
+.camera-panel{grid-column:1/-1}
+.camera-body{display:grid;grid-template-columns:minmax(0,512px) minmax(0,1fr);gap:20px;padding:18px 22px}
+.camera-body canvas{width:100%;height:auto;aspect-ratio:4/3;background:#0b121b;border:1px solid var(--border);border-radius:8px}
+.camera-side{min-width:0}
+.detection-list{max-height:300px}
+.view-toggle{width:250px}
+.view-toggle span{padding:6px 4px;font-size:11px}
+.scene-toolbar{flex-wrap:wrap;gap:10px}
+.property-card{margin:12px 0 4px}
+.property-list{display:grid;gap:6px;margin:0 0 10px}
+.property-row{display:grid;grid-template-columns:118px minmax(0,1fr);gap:8px;font-size:12px;line-height:1.45}
+.property-row dt{color:var(--muted)}
+.property-row dd{margin:0;color:#dce5f0;overflow-wrap:anywhere}
+.property-row small{display:block;color:#aeb79e;font-size:10px}
+.details-block{font-size:11px;color:var(--muted);margin-top:6px}
+.details-block summary{cursor:pointer;color:#b7c4d4}
+.details-block h3{font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:#b7c4d4;margin:12px 0 6px}
+.provenance-list{margin:0;padding-left:16px;display:grid;gap:4px;line-height:1.5}
+.provenance-list code{font-size:10px;color:#a8dfcf;overflow-wrap:anywhere}
+select{font:inherit;background:#0c141e;color:#dce5f0;border:1px solid #2e3c4c;border-radius:6px;padding:7px;width:100%;margin-top:6px}
+.preset-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.preset-list .button{text-align:left}
+.capacity-note{width:100%;margin:2px 0 0;font-size:10px;color:#aeb79e}
+.tiny-dot.warning{background:#e8a368;box-shadow:0 0 10px #e8a36840}
+.legend-detection{display:inline-block;width:10px;height:10px;border:2px solid #59d7ff;border-radius:50%;margin-right:6px;vertical-align:-1px}
+@media (max-width:900px){.camera-body{grid-template-columns:1fr}.view-toggle{width:100%}}
+
+/* ---- Upstream PR #1 (floor2-hazard-preview) layout and hazard styles ---- */
+
 /* Keep the scene and its controls above the mission report. */
 :root { font-family: 'DM Sans', system-ui, sans-serif; }
 .app-header { height: 54px; padding: 0 clamp(14px, 2.2vw, 36px); }
@@ -55,3 +85,10 @@ main { padding: 20px clamp(14px, 2.2vw, 36px); max-width: 1850px; }
   font-variant-numeric: tabular-nums;
 }
 .hazard-readout:empty { display: none; }
+
+/* Integration: compact data disclosure and toolbar fit for the merged controls */
+.disclosure-line { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: #aeb79e; }
+.disclosure-line b { color: #dce1bc; font-weight: 600; }
+.scene-toolbar { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.view-toggle { width: 230px; }
+.run-summary .tiny-dot { vertical-align: 1px; }

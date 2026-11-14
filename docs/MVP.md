@@ -8,10 +8,12 @@ identification, smart path planning. This is an acceptance specification; applic
 completion and sponsor integration have not been established by these documents.
 
 One floor, one kinematic robot, two survivors by default, multiple configurable
-ignitions, evolving fire/smoke, and two inspected floor-level egress endpoints.
+ignitions, evolving fire/smoke, and inspected floor-level egress endpoints.
 Evacuation ends at the floor boundary; downstream corridors/stairs/outdoors are
-assumed available. A balcony/window is not automatically an exit. Reject a candidate
-scene without two defensible endpoints rather than inventing geometry.
+assumed available. A balcony/window is not automatically an exit. Never invent an
+exit. Two endpoints were the original target; neither shortlisted scan has them, so
+the project owner accepted `9A46aT7FCPg` with one verified door (see
+[scene selection](SCENE_SELECTION.md)). Results on it must state the single-egress limit.
 
 Exclude structural damage, carrying, manipulation, human biomechanics, locomotion
 training, SLAM, and exterior navigation. Escort is a simple single-survivor follower.
