@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { hazardSprites } from './hazardSprites';
 import './styles.css';
 
 type Cell = [number, number];
@@ -11,11 +12,18 @@ interface SimState {
   scenario: Scenario;
   time: number;
   hazard_time?: number;
+  hazard_sensor?: {
+    radius_m: number;
+    source_distance_m: number | null;
+    source_heat_intensity: number | null;
+    smoke_intensity: number;
+  };
   hazards_running?: boolean;
   status: string;
   robot: Cell;
   survivors: { id: string | number; position: Cell; status: string }[];
   heat: number[][];
+  fire?: number[][];
   smoke: number[][];
   observed: number[][];
   route: Cell[];
@@ -39,12 +47,14 @@ $('app').innerHTML = `
   <a class="skip-link" href="#workspace">Skip to simulation</a>
   <header class="app-header">
     <a class="brand" href="./">RescueTwin</a>
+    <nav class="section-nav" aria-label="Workspace"><a href="#workspace">Simulation</a><a href="#scenario-heading">Scenario</a><a href="#events-heading">Telemetry</a></nav>
     <div class="header-right"><span id="connection" class="connection" role="status"><i></i>Connecting</span></div>
   </header>
   <main>
     <section class="page-intro">
       <div><h1 id="scene-heading">Waiting for scene</h1><p id="scene-size" class="subtle-label"></p></div>
-      <div class="run-badge"><span id="run-status">Awaiting backend</span><strong id="clock">—</strong></div>
+      <div class="map-actions"><button id="load-map" class="button">Open floor plan…</button><input id="map-file" type="file" accept=".json,application/json" hidden /></div>
+      <div class="run-badge"><strong id="clock">—</strong><span id="run-status">Awaiting backend</span></div>
     </section>
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div class="workspace-grid" id="workspace" tabindex="-1">
@@ -67,28 +77,37 @@ $('app').innerHTML = `
           </div>
         </div>
         <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
-        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor proxy</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Exit</span><span><i class="legend-fire"></i>Ignition</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Exit</span><span><i class="legend-fire"></i>Ignition</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates start at (0, 0). Choose an editing tool in Scenario setup, then apply it here or click the map. Heat and smoke display with intensity clamped to 0–1; inspection shows raw values.</p></details>
-      </section>
-      <aside class="sidebar">
-        <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Run simulation</h2></div></div>
-          <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Adaptive</span></label><label><input type="radio" name="mode" value="baseline" /><span>Baseline</span></label></div></fieldset><p id="mode-description" class="field-hint">Strategy sent to the backend when starting a run.</p>
-          <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
-        </section>
-        <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Scenario</h2></div></div>
-          <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
-          <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
-          <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
-          <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
-        </section>
-        <section class="panel compare-callout"><h2>Compare runs</h2><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">Apply scenario changes before comparing.</p></section>
-      </aside>
       <dl class="run-summary" aria-label="Mission metrics">
         <div><dt>Evacuated</dt><dd><strong id="evacuated">—</strong> <span id="population"></span></dd></div>
         <div><dt>Exposure (normalized)</dt><dd id="exposure">—</dd></div>
         <div><dt>Distance (m)</dt><dd id="distance">—</dd></div>
       </dl>
-      <section class="panel event-panel" aria-labelledby="events-heading"><div class="panel-heading compact"><div><h2 id="events-heading">Event timeline</h2></div></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
+      </section>
+      <aside class="sidebar">
+        <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Mission controls</h2></div></div>
+          <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Adaptive</span></label><label><input type="radio" name="mode" value="baseline" /><span>Baseline</span></label></div></fieldset><p id="mode-description" class="field-hint">Strategy sent to the backend when starting a run.</p>
+          <div class="control-buttons"><button id="start" class="button primary">Start run</button><button id="pause" class="button secondary">Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">Reset</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
+        </section>
+        <section class="panel sensor-panel" aria-labelledby="sensor-heading">
+          <div class="panel-heading"><h2 id="sensor-heading">Robot hazard sensor</h2></div>
+          <p id="sensor-range" class="subtle-label">Waiting for sensor data</p>
+          <dl class="sensor-values">
+            <div><dt>Source heat intensity</dt><dd id="sensor-heat">—</dd></div>
+            <div><dt>Smoke intensity</dt><dd id="sensor-smoke">—</dd></div>
+            <div><dt>Distance to source</dt><dd id="sensor-distance">—</dd></div>
+          </dl>
+          <p id="sensor-note" class="field-hint">Readings update as the robot moves.</p>
+        </section>
+        <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Scenario</h2></div></div>
+          <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
+          <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
+          <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
+          <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">Save placements</button><button id="import" class="button subtle small">Load placements</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
+        </section>
+      </aside>
+      <section class="panel event-panel" aria-labelledby="events-heading"><div class="panel-heading compact"><div><h2 id="events-heading">Event timeline</h2></div><button id="compare" class="button secondary">Compare strategies</button></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
       <section id="comparison" class="panel comparison-panel" aria-labelledby="comparison-heading" hidden><div class="panel-heading compact"><div><h2 id="comparison-heading">Strategy comparison</h2></div><button id="close-comparison" class="button subtle small">Close</button></div><p id="comparison-context" class="field-hint"></p><div id="comparison-body"></div></section>
     </div>
 
@@ -109,7 +128,7 @@ let renderer: THREE.WebGLRenderer | null = null;
 let controls: OrbitControls | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
 const world = new THREE.Scene();
-world.background = new THREE.Color('#20262d');
+world.background = new THREE.Color('#111519');
 const staticLayer = new THREE.Group();
 const wallLayer = new THREE.Group();
 function createField(altitude: number, order: number) {
@@ -131,25 +150,15 @@ function createField(altitude: number, order: number) {
 const heatField = createField(0.027, 1);
 const smokeField = createField(1, 2);
 const smokeLimit = 320;
-const smokeClouds = new THREE.InstancedMesh(
-  new THREE.SphereGeometry(1, 8, 5),
-  new THREE.MeshBasicMaterial({ color: '#c6d1dc', transparent: true, opacity: 0.24, depthWrite: false }),
-  smokeLimit,
-);
-smokeClouds.count = 0;
-smokeClouds.frustumCulled = false;
-smokeClouds.renderOrder = 3;
-const smokeTransform = new THREE.Object3D();
-const heatColor = new THREE.Color();
 const flameLimit = 256;
-const flames = new THREE.InstancedMesh(
-  new THREE.ConeGeometry(0.34, 1, 6),
-  new THREE.MeshStandardMaterial({ color: '#ff962e', emissive: '#ed4c0a', emissiveIntensity: 1.25 }),
-  flameLimit,
-);
-flames.count = 0;
-flames.frustumCulled = false;
+const smokeClouds = hazardSprites(smokeLimit, true);
+const flames = hazardSprites(flameLimit, false);
+smokeClouds.renderOrder = 3;
+flames.renderOrder = 4;
+const smokeTransform = new THREE.Object3D();
 const flameTransform = new THREE.Object3D();
+const heatColor = new THREE.Color();
+let hazardFrame = '';
 let focusCell: Cell | null = null;
 const hotColor = new THREE.Color('#e6451d');
 let view: 'orbit' | 'plan' = 'orbit';
@@ -225,6 +234,7 @@ function idle(): boolean { return connected && state?.status.toLowerCase() === '
 
 function syncUI(): void {
   const editable = idle() && !busy;
+  $<HTMLButtonElement>('load-map').disabled = !connected || busy || dirty || state?.status === 'running' || !!state?.hazards_running;
   const status = state?.status.toLowerCase();
   $('connection').className = `connection ${connected ? 'online' : 'offline'}`;
   $('connection').innerHTML = `<i></i>${connected ? 'Backend connected' : state ? 'Connection lost' : 'Backend offline'}`;
@@ -233,7 +243,7 @@ function syncUI(): void {
   const preview = $<HTMLButtonElement>('preview-hazards');
   preview.disabled = !connected || busy || dirty || status === 'running' || state?.hazard_time === undefined || state.hazard_time >= 600;
   preview.textContent = state?.hazards_running ? 'Pause hazards' : 'Preview hazards';
-  $('start') .textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
+  $('start') .textContent = status === 'paused' ? 'Resume run' : 'Start run';
   ($('start') as HTMLButtonElement).disabled = !connected || busy || dirty || !['idle', 'paused'].includes(status ?? '');
   ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running';
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
@@ -270,6 +280,14 @@ function acceptState(next: SimState): void {
     document.querySelector<HTMLInputElement>('input[name="tool"][value="inspect"]')!.checked = true;
   }
   if (!dirty && next.status.toLowerCase() !== 'idle') document.querySelector<HTMLInputElement>(`input[name="mode"][value="${next.mode}"]`)!.checked = true;
+  const sensor = next.hazard_sensor;
+  const percent = (value: number): string => Number.isFinite(value) ? `${number(value * 100, 1)}%` : '—';
+  $('sensor-range').textContent = sensor ? `${number(sensor.radius_m)} m sensing radius` : 'Sensor data unavailable';
+  $('sensor-heat').textContent = sensor?.source_heat_intensity != null ? percent(sensor.source_heat_intensity) : '—';
+  $('sensor-smoke').textContent = sensor ? percent(sensor.smoke_intensity) : '—';
+  $('sensor-distance').textContent = sensor?.source_distance_m != null ? `${number(sensor.source_distance_m, 3)} m` : '—';
+  $('sensor-note').textContent = !sensor ? 'Restart the updated backend to load the sensor.'
+    : sensor.source_distance_m == null ? 'No active ignition point in range.' : 'Nearest ignition point. Smoke is sampled at the robot.';
   $('scene-heading').textContent = next.scene.name;
   $('scene-size').textContent = `${number(next.scene.width * next.scene.resolution)} × ${number(next.scene.height * next.scene.resolution)} m · ${number(next.scene.resolution, 3)} m/cell`;
   $('clock').innerHTML = `${number(next.time)}<small> s SIM TIME</small>`;
@@ -297,12 +315,12 @@ function acceptState(next: SimState): void {
 }
 
 async function poll(): Promise<void> {
-  if (pollInFlight || document.hidden) return;
+  if (pollInFlight || busy || document.hidden) return;
   pollInFlight = true;
   try {
     const next = await api<unknown>('state', undefined, AbortSignal.timeout(4000));
     validateState(next);
-    acceptState(next);
+    if (!busy) acceptState(next);
   } catch (error) {
     if (connected || !state) {
       $('scene-empty').querySelector('p')!.textContent = `Cannot load /api/state. Run the backend on port 8000. ${error instanceof Error ? error.message : ''}`;
@@ -347,7 +365,7 @@ function buildStaticScene(): void {
     field.mesh.scale.set(width, height, 1);
   }
   smokeField.mesh.position.y = Math.min(5, 1.15 / state.scene.resolution) * 0.9;
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(width, 0.16, height), new THREE.MeshStandardMaterial({ color: '#39434d', roughness: 1 }));
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(width, 0.16, height), new THREE.MeshStandardMaterial({ color: '#32383c', roughness: 1 }));
   floor.position.y = -0.12;
   staticLayer.add(floor);
   const roomColors = ['#233746', '#253b47', '#203746', '#2b3946'];
@@ -367,7 +385,7 @@ function buildStaticScene(): void {
   if (exposed.length) {
     const mesh = new THREE.InstancedMesh(
       new THREE.BoxGeometry(1, wallHeight, 1),
-      new THREE.MeshStandardMaterial({ color: '#acb4b8', roughness: 0.85 }),
+      new THREE.MeshStandardMaterial({ color: '#aab2b5', roughness: 0.85 }),
       exposed.length,
     );
     const matrix = new THREE.Matrix4();
@@ -397,6 +415,10 @@ function human(cell: Cell, rescued: boolean): void {
 
 function drawHazardField(sim: SimState): void {
   const { width, height } = sim.scene;
+  const frame = [sceneIdentity, sim.hazard_time ?? sim.time, sim.status,
+    layers.heat, layers.smoke, layers.observed].join('|');
+  if (frame === hazardFrame && !layers.observed) return;
+  hazardFrame = frame;
   const heatPixels = heatField.context.createImageData(width * 4, height * 4);
   const smokePixels = smokeField.context.createImageData(width * 4, height * 4);
   let burning = 0;
@@ -415,16 +437,17 @@ function drawHazardField(sim: SimState): void {
       const smoke = smokeBand(density);
       if (layers.smoke && density >= 0.06) denseSmoke.push({ cell: [col, row], density });
       if (smoke) smoky++;
-      if (heat >= 0.3) {
+      const fire = sim.fire?.[row]?.[col] ?? heat;
+      if (fire >= 0.15) {
         burning++;
-        if (heat > hottest) {
-          hottest = heat;
+        if (fire > hottest) {
+          hottest = fire;
           focusCell = [col, row];
         }
         if (layers.heat && flameCount < flameLimit) {
-          const height = 0.75 + Math.min(heat, 1) * 1.6;
+          const height = 0.75 + Math.min(fire, 1) * 1.6;
           flameTransform.position.copy(position([col, row], height / 2));
-          flameTransform.scale.set(1, height, 1);
+          flameTransform.scale.set(0.65 + fire * 0.5, height, 1);
           flameTransform.updateMatrix();
           flames.setMatrixAt(flameCount++, flameTransform.matrix);
         }
@@ -458,12 +481,13 @@ function drawHazardField(sim: SimState): void {
     const { cell, density } = denseSmoke[i];
     const spread = 0.48 + Math.min(1, density) * 0.42;
     smokeTransform.position.copy(position(cell, smokeField.mesh.position.y - 0.45));
-    smokeTransform.scale.set(spread, 0.4 + spread * 0.3, spread);
+    smokeTransform.scale.set(spread * 2.8, spread * 1.65, 1);
     smokeTransform.updateMatrix();
     smokeClouds.setMatrixAt(cloudCount++, smokeTransform.matrix);
   }
   smokeClouds.count = cloudCount;
   smokeClouds.visible = view === 'orbit';
+  smokeField.mesh.visible = view === 'plan';
   smokeClouds.instanceMatrix.needsUpdate = true;
   flames.count = flameCount;
   flames.instanceMatrix.needsUpdate = true;
@@ -550,6 +574,7 @@ function recenter(): void {
 function setView(next: typeof view): void {
   view = next;
   smokeClouds.visible = next === 'orbit';
+  smokeField.mesh.visible = next === 'plan';
   if (controls) {
     controls.enableRotate = next === 'orbit';
     controls.mouseButtons.LEFT = next === 'orbit' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
@@ -583,10 +608,15 @@ function setupRenderer(): void {
     };
     resize();
     new ResizeObserver(resize).observe($('viewport'));
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     setView(view);
-    renderer.setAnimationLoop(() => {
+    renderer.setAnimationLoop((now) => {
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
+      const motion = !reducedMotion.matches;
+      const clock = motion ? now * 0.001 : 0;
+      smokeClouds.material.uniforms.clock.value = clock;
+      flames.material.uniforms.clock.value = clock;
       renderer.render(world, camera);
     });
     let down: { x: number; y: number } | null = null;
@@ -771,6 +801,25 @@ $('compare').addEventListener('click', () => void mutation(async () => {
   }
 }));
 $('close-comparison').addEventListener('click', () => { $('comparison').hidden = true; });
+$('load-map').addEventListener('click', () => $<HTMLInputElement>('map-file').click());
+$<HTMLInputElement>('map-file').addEventListener('change', event => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  void mutation(async () => {
+    if (file.size > 2_000_000) throw new Error('Floor plan JSON must be under 2 MB.');
+    const plan: unknown = JSON.parse(await file.text());
+    const next = await api<unknown>('environment', plan);
+    validateState(next);
+    selectedCell = null;
+    hazardFrame = '';
+    dirty = false;
+    acceptState(next);
+    notify(`Opened ${next.scene.name}.`);
+  });
+});
+
 $('recenter').addEventListener('click', recenter);
 $('focus-fire').addEventListener('click', () => {
   if (!focusCell || !camera || !controls) return;

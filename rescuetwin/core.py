@@ -7,6 +7,15 @@ import random
 from copy import deepcopy
 
 Cell = tuple[int, int]
+HAZARD_SENSOR_RADIUS_M = 1.0
+
+# Relative ignition threshold, burn rate, fuel load and smoke yield.
+MATERIALS = {
+    'inert': (1., 0., 0., 0.),
+    'light': (.24, 1.05, .65, .48),
+    'wood': (.31, .85, 1., .40),
+    'upholstery': (.19, 1.25, 1.15, .72),
+}
 
 @dataclass
 class Scene:
@@ -19,6 +28,9 @@ class Scene:
     exits: list[Cell] = field(default_factory=lambda: [(0, 6), (31, 18)])
     rooms: list = field(default_factory=list)
     source: str = 'synthetic'
+    default_material: str = 'wood'
+    materials: dict[Cell, str] = field(default_factory=dict)
+    vents: set[Cell] = field(default_factory=set)
 
     def free(self, p):
         return 0 <= p[0] < self.width and 0 <= p[1] < self.height and tuple(p) not in self.walls
@@ -80,7 +92,16 @@ class Simulation:
         self.scenario=deepcopy(scenario or dict(survivors=[[26,6],[15,18]],ignitions=[[25,18]],seed=7))
         self.validate(self.scenario)
         self.mode=mode;self.time=0.;self.status='idle';self.robot=self.scene.exits[0]
-        self.heat=self.grid();self.smoke=self.grid();self.fuel=self.grid(1.)
+        self.heat=self.grid();self.smoke=self.grid();self.fuel=self.grid();self.fire=self.grid()
+        self.hazard_cells = []
+        for y in range(self.scene.height):
+            for x in range(self.scene.width):
+                point = (x, y)
+                if self.scene.free(point):
+                    profile = MATERIALS[self.scene.materials.get(point, self.scene.default_material)]
+                    self.fuel[y][x] = profile[2]
+                    self.hazard_cells.append((x, y, self.scene.neighbors(point), profile,
+                                              point in self.scene.vents or point in self.scene.exits))
         self.observed=self.grid();self.belief_heat=self.grid();self.belief_smoke=self.grid()
         self.last_seen=self.grid(-1.);self.route=[];self.goal=None;self.visited=set();self.known=set();self.escort=None
         self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.)
@@ -90,7 +111,9 @@ class Simulation:
         self.ignition_cells = set(map(tuple, self.scenario['ignitions']))
         self.hazard_time = 0.0
         self.hazards_running = False
-        for x,y in self.ignition_cells: self.heat[y][x]=.9
+        for x,y in self.ignition_cells:
+            self.heat[y][x] = self.fire[y][x] = .9
+        self.sample_hazards()
 
     def grid(self,value=0.): return [[value for _ in range(self.scene.width)] for _ in range(self.scene.height)]
 
@@ -114,20 +137,60 @@ class Simulation:
     def hazards(self,dt):
         self.hazard_time += dt
         h=self.grid();s=self.grid()
-        for y in range(self.scene.height):
-            for x in range(self.scene.width):
-                p=(x,y)
-                if not self.scene.free(p): continue
-                ns=self.scene.neighbors(p);heat=self.heat[y][x];smoke=self.smoke[y][x]
-                # A short sustained ignition seeds adjacent fuel in the demo model.
-                source = 0.9 if self.hazard_time <= 45 and p in self.ignition_cells else 0.0
-                burn=max(0.,heat-.14)*self.fuel[y][x]*.85
-                self.fuel[y][x]=max(0.,self.fuel[y][x]-burn*dt*.2)
-                h[y][x]=max(source,min(1.,heat+dt*(.3*sum(self.heat[b][a]-heat for a,b in ns)+burn-.025*heat)))
-                s[y][x]=max(0.,min(1.,smoke+dt*(.5*sum(self.smoke[b][a]-smoke for a,b in ns)+burn*.6-.015*smoke)))
+        # Four-face diffusion with zero flux at walls. Open faces are represented
+        # by local exchange with ambient air at the configured vent cells.
+        heat_mix = min(.30 * (.2 / self.scene.resolution) ** 2, .18 / dt)
+        smoke_mix = min(.50 * (.2 / self.scene.resolution) ** 2, .18 / dt)
+        for x, y, neighbors, profile, vent in self.hazard_cells:
+            threshold, rate, _, yield_factor = profile
+            heat, smoke = self.heat[y][x], self.smoke[y][x]
+            fuel = self.fuel[y][x]
+            burn = min(fuel / dt, rate * max(0., heat - threshold) * fuel * .2)
+            self.fuel[y][x] = fuel - burn * dt
+            source = .9 if self.hazard_time <= 12 and (x, y) in self.ignition_cells else 0.
+            self.fire[y][x] = min(1., max(source, 5 * burn))
+            heat_flux = heat_mix * sum(self.heat[b][a] - heat for a, b in neighbors)
+            smoke_flux = smoke_mix * sum(self.smoke[b][a] - smoke for a, b in neighbors)
+            h[y][x] = max(source, min(1., max(0., heat + dt * (
+                heat_flux + 5 * burn - (.04 + .16 * vent) * heat))))
+            s[y][x] = min(1., max(0., smoke + dt * (
+                smoke_flux + 5 * burn * yield_factor - (.015 + .24 * vent) * smoke)))
         self.heat,self.smoke=h,s
 
+    def sample_hazards(self):
+        """Sample the horizontal slice of the robot's local sensing volume."""
+        rx, ry = self.robot
+        resolution = self.scene.resolution
+        radius = HAZARD_SENSOR_RADIUS_M
+        reach = math.floor(radius / resolution)
+        for y in range(max(0, ry - reach), min(self.scene.height, ry + reach + 1)):
+            for x in range(max(0, rx - reach), min(self.scene.width, rx + reach + 1)):
+                if math.hypot(x - rx, y - ry) * resolution > radius:
+                    continue
+                if not line_visible(self.scene, self.robot, (x, y)):
+                    continue
+                heat, smoke = self.heat[y][x], self.smoke[y][x]
+                self.belief_heat[y][x] = heat
+                self.belief_smoke[y][x] = smoke
+        nearest = None
+        for x, y in sorted(self.ignition_cells):
+            distance = math.hypot(x - rx, y - ry) * resolution
+            intensity = self.heat[y][x]
+            if distance <= radius and intensity > 0:
+                reading = (distance, -intensity)
+                if nearest is None or reading < nearest:
+                    nearest = reading
+        self.hazard_sensor = {
+            'position': self.robot,
+            'time_s': round(self.time, 2),
+            'radius_m': radius,
+            'source_distance_m': nearest[0] if nearest is not None else None,
+            'source_heat_intensity': -nearest[1] if nearest is not None else None,
+            'smoke_intensity': self.smoke[ry][rx],
+        }
+
     def sense(self):
+        self.sample_hazards()
         # Explicit analytic adapter for core development; image detector is separate.
         rx,ry=self.robot
         for y in range(max(0,ry-7),min(self.scene.height,ry+8)):
@@ -135,9 +198,6 @@ class Simulation:
                 if math.hypot(x-rx,y-ry)<=7 and line_visible(self.scene,self.robot,(x,y)):
                     if self.smoke[y][x]>.5: continue
                     self.observed[y][x]=1;self.last_seen[y][x]=self.time
-                    # Local scalar readings only; no remote ground truth heat leak.
-                    if (x,y)==self.robot:
-                        self.belief_heat[y][x]=self.heat[y][x];self.belief_smoke[y][x]=self.smoke[y][x]
         if self.perception_mode=='analytic-development':
             for p in self.survivors:
                 x,y=p['position']
@@ -151,6 +211,7 @@ class Simulation:
 
     def observations(self):
         return dict(time=self.time,robot=self.robot,observed=self.observed,heat=self.belief_heat,smoke=self.belief_smoke,
+                    hazard_sensor=self.hazard_sensor.copy(),
                     survivors=[deepcopy(p) for p in self.survivors if p['id'] in self.known],events=self.events[-8:])
 
     def path(self,goal,escort=False):
@@ -202,6 +263,7 @@ class Simulation:
                 self.belief_heat[y][x]=self.heat[y][x];self.belief_smoke[y][x]=self.smoke[y][x]
                 self.observed[y][x]=1;self.log('Local interlock stopped motion into hazard.');return
             self.robot=q;self.route=self.route[1:];self.metrics['distance']+=self.scene.resolution
+            self.sample_hazards()
             if self.escort:
                 p=next(p for p in self.survivors if p['id']==self.escort);p['position']=q
                 if q in self.scene.exits:
@@ -215,9 +277,10 @@ class Simulation:
 
     def state(self):
         return dict(scene=self.scene.public(),scenario=self.scenario,time=round(self.time,2),status=self.status,
-                    hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,
+                    hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,fire=self.fire,
                     robot=self.robot,survivors=self.survivors,heat=self.heat,smoke=self.smoke,observed=self.observed,
-                    route=self.route,events=self.events,metrics=self.metrics,mode=self.mode,perception_mode=self.perception_mode)
+                    route=self.route,events=self.events,metrics=self.metrics,mode=self.mode,perception_mode=self.perception_mode,
+                    hazard_sensor=self.hazard_sensor.copy())
 
 
 def compare(scene,scenario):

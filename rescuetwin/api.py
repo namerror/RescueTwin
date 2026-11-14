@@ -6,6 +6,7 @@ from copy import deepcopy
 from fastapi import FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 from .core import Simulation, compare
+from .environment import parse_environment
 
 sim=Simulation()
 
@@ -63,6 +64,19 @@ def observations():return sim.observations()
 
 @app.get('/api/scenes')
 def scenes():return [sim.scene.public()]
+
+@app.post('/api/environment')
+def environment(body: dict):
+    global sim
+    if sim.status == 'running' or sim.hazards_running:
+        raise HTTPException(409, 'Pause or reset before loading a floor plan')
+    try:
+        scene, scenario = parse_environment(body)
+        sim = Simulation(scene, scenario, sim.mode)
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise HTTPException(422, f'Invalid floor plan: {error}') from error
+    return sim.state()
+
 
 @app.post('/api/scenario')
 def scenario(body:Scenario):
