@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 
-CAPACITY_LABEL = ('Hypothetical load: survivor count set to the marketed maximum occupants of the matched '
+CAPACITY_LABEL = ('Hypothetical load: survivor count derived from the marketed maximum occupants of the matched '
                   'CoStar floor plan. This is not actual or live occupancy.')
 MAX_PLACEMENTS = 20
 MIN_EXIT_DISTANCE_M = 2.0
@@ -72,12 +72,14 @@ def build(scene, kind, seed=7):
         return dict(id='standard', label=f'Standard: {len(survivors)} survivors, 1 ignition',
                     note='Illustrative placements; survivors and fire are synthetic.',
                     scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed))
-    if kind == 'capacity-stress':
+    if kind in ('capacity-stress', 'capacity-25', 'capacity-50'):
         costar = scene.meta.get('costar') or {}
         capacity = costar.get('max_occupants')
-        if not isinstance(capacity, int) or capacity <= 0:
+        if type(capacity) is not int or capacity <= 0 or costar.get('capacity_conflicts'):
             return None
-        count = min(capacity, MAX_PLACEMENTS)
+        fraction = {'capacity-25': .25, 'capacity-50': .5, 'capacity-stress': 1.0}[kind]
+        requested = math.ceil(capacity * fraction)
+        count = min(requested, MAX_PLACEMENTS)
         # Distribute round-robin over bedrooms first, then other rooms; capacity says nothing about where people are.
         order = (_rooms(scene, 'Bedroom') + [r for r in scene.rooms if r.get('label') not in ('Bedroom', 'Bathroom')]
                  + _rooms(scene, 'Bathroom')) or scene.rooms
@@ -89,10 +91,10 @@ def build(scene, kind, seed=7):
                 survivors.append(list(cell)); taken.append(cell)
         ignition = _ignition(rng, scene, taken)
         field = next((f for f in costar.get('fields', []) if f['key'] == 'max_occupants'), {})
-        return dict(id='capacity-stress', label=f'Capacity stress: {len(survivors)} survivors (marketed max occupants {capacity})',
-                    note=CAPACITY_LABEL, capacity=capacity,
+        return dict(id=kind, label=f'Capacity {fraction:.0%}: {len(survivors)} survivors (marketed max {capacity})',
+                    note=CAPACITY_LABEL, capacity=capacity, fraction=fraction, requested_count=requested, placed_count=len(survivors),
                     provenance=dict(source_id=field.get('source_id'), field_path=field.get('field_path'), dataset=field.get('dataset')),
-                    truncated=capacity > MAX_PLACEMENTS,
+                    truncated=len(survivors) < requested,
                     scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed))
     raise ValueError(f'Unknown preset {kind!r}')
 
@@ -101,8 +103,24 @@ def available(scene, seed=7):
     presets = [build(scene, 'standard', seed)]
     stress = build(scene, 'capacity-stress', seed)
     if stress:
-        presets.append(stress)
+        seen=set()
+        for kind in ('capacity-25','capacity-50','capacity-stress'):
+            entry=build(scene,kind,seed)
+            if entry['requested_count'] not in seen:
+                presets.append(entry);seen.add(entry['requested_count'])
     else:
         presets.append(dict(id='capacity-stress', label='Capacity stress unavailable', unavailable=True,
-                            note='No matched CoStar floor-plan maxOccupants for this scene; nothing is inferred.'))
+                            note='No unambiguous matched CoStar floor-plan maxOccupants for this scene; nothing is inferred.'))
     return presets
+
+
+def experiment_context(scene, scenario):
+    """Operator/evaluation provenance only; never part of agent observations."""
+    import hashlib
+    import json
+    costar=scene.meta.get('costar') or {}
+    canonical=json.dumps(scenario,sort_keys=True,separators=(',',':'))
+    return dict(scenario_sha256=hashlib.sha256(canonical.encode()).hexdigest(),
+                placed_count=len(scenario['survivors']),marketed_capacity=costar.get('max_occupants'),
+                capacity_provenance=next((f for f in costar.get('fields',[]) if f['key']=='max_occupants'),None),
+                disclaimer='Scenario survivor count is hypothetical; marketed capacity is not live occupancy.')

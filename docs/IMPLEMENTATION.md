@@ -7,13 +7,13 @@ joined to CoStar PropertyId 22572250 and floor plan 6106437. Its collision grid,
 verified exit, derived wall mesh and floor texture share the Matterport model frame (see
 [scene selection](SCENE_SELECTION.md) and [contracts](CONTRACTS.md)). Survivor detection in image
 mode is YOLO on browser-rendered RGB-D frames. The synthetic fixture and the analytic detector
-remain as labelled development/CI modes. MatterPak meshes were unavailable, so the rendered mesh
-is derived from the schematic plan. Motion is grid-based, not a continuous rigid-body simulation.
+remain as labelled development/CI modes. Complete source meshes with matching materials have not passed validation; the rendered
+mesh remains derived from the schematic plan (see DATA_INTEGRATION.md). Motion is grid-based, not a continuous rigid-body simulation.
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e '.[test]'
+pip install -e '.[test,scene,vision]'
 uvicorn rescuetwin.api:app --host 127.0.0.1 --port 8000
 # separate terminal
 cd frontend
@@ -37,7 +37,7 @@ credentials are never included in browser configuration. Source preparation star
 The latter saves ignored source metadata; it does not certify exits or load a real scene.
 
 Before coding in parallel, read [architecture](ARCHITECTURE.md), [MVP](MVP.md), and
-[AGENTS.md](../AGENTS.md). Confirm the scene candidate, two floor-level exits, coordinate
+[AGENTS.md](../AGENTS.md). Confirm the accepted scene, its single verified floor-level exit, coordinate
 transform, and shared contracts. Test a rendered avatar with actual person-detection
 weights and verify Gemini image/tool capabilities and credentials. Do not hard-code
 unverified model names from planning as guaranteed available releases.
@@ -126,6 +126,9 @@ work. Never describe the application as complete solely because these documents 
 
 ## Verification recorded (2026-11-14, after merging upstream PR #1)
 
+Historical results below precede the current source-asset changes. See
+[baseline rehearsal](BASELINE_REHEARSAL.md) for checks on the reviewed working tree.
+
 Environment: macOS (Apple M5), Python 3.12 venv, Node 24.22.3, ultralytics 8.4.212, torch MPS.
 Working tree: uncommitted changes on top of `origin/main` 930d175 (PR #1 fire model and hazard preview).
 
@@ -144,3 +147,10 @@ Working tree: uncommitted changes on top of `origin/main` 930d175 (PR #1 fire mo
 - Not verified: hosted Gemini decisions, real (non-rendered) imagery, a second egress endpoint,
   calibrated fire behaviour, and visual QA on a physical display. Exposure is illustrative, and the planner
   difference is not attributable to an LLM.
+
+
+## Source asset integration update (2026-11-14)
+
+See [data integration evidence and workflow](DATA_INTEGRATION.md). Direct mesh assets exist;
+complete textured packages have not passed validation. Both sponsor scenes remain labeled
+derived fallbacks. CoStar capacity levels and reproducible offline experiments are implemented.

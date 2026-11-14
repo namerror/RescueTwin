@@ -1,0 +1,35 @@
+{
+  "model": "5p6KKvHqh3W",
+  "floor_label": "Floor 1",
+  "property_id": 4025799,
+  "floor_plan_id": 2669568,
+  "resolution": 0.25,
+  "exits": [
+    {
+      "id": "exit-entry",
+      "label": "Unit entry door",
+      "segment": [
+        [
+          -0.561,
+          -1.254
+        ],
+        [
+          0.547,
+          -1.254
+        ]
+      ],
+      "evidence": [
+        "pano 0 face 2: hinged wooden unit door; prior inspection recorded in SCENE_SELECTION.md",
+        "schematic: horizontal doorway at lower-left living-room notch, pixels approximately (158,750) to (269,750)"
+      ],
+      "verified": "manual plan/pano inspection 2026-11-14",
+      "beyond": "assumed available; not inspected"
+    }
+  ],
+  "not_exits": [
+    {
+      "label": "Balcony (room 7)",
+      "reason": "pano 4: elevated courtyard balcony; not ground-floor egress"
+    }
+  ]
+}

@@ -42,7 +42,9 @@ CoStar track is primary; Amazon practical agentic AI is secondary. The local rul
 require at least two sponsor layers and consequential agent action. Use Matterport
 geometry and CoStar matched floor-plan capacity to drive presets and report context;
 Vexcel is deferred. A decorative property card alone does not meet the intended use.
-See [local rules](HACKATHON_RULES.md) for criteria and weights.
+See [local rules](HACKATHON_RULES.md) for criteria and weights. Integration findings,
+asset gates, Vexcel comparison, and reproducible experiment results are in
+[DATA_INTEGRATION.md](DATA_INTEGRATION.md).
 
 Candidate `5p6KKvHqh3W` joins PropertyId 4025799 and floor-plan id 2669568 with
 `maxOccupants: 5`. Candidate `9A46aT7FCPg` joins PropertyId 22572250 and floor-plan id 6106437

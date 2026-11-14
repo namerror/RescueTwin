@@ -61,3 +61,11 @@ Optional hosted reasoning: install `pip install -e '.[agent]'`, export `GEMINI_A
 See [agent setup](AGENTS.md), [architecture](docs/ARCHITECTURE.md), [MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md).
 
 Implemented payloads and current fidelity limits are documented in [runtime contracts](docs/CONTRACTS.md).
+
+
+## Source asset integration update (2026-11-14)
+
+See [data integration evidence and workflow](docs/DATA_INTEGRATION.md) for direct OBJ imports,
+material/geometry gates, the two-scene workflow, capacity experiments, and Vexcel findings.
+The [baseline rehearsal](docs/BASELINE_REHEARSAL.md) records current checks, the demo
+sequence, paired results and remaining sponsor-data gates.

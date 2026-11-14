@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import './styles.css';
@@ -14,7 +16,7 @@ interface SceneData {
   id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
   walls: Cell[]; exterior: Cell[]; exits: Cell[]; source: string; robot_start: Cell; time_limit: number;
   rooms: { id: string; name: string; label?: string; cells: Cell[]; observe?: Cell[]; polygon?: [number, number][] }[];
-  mesh?: { file: string; source: string; wall_height: number } | null;
+  mesh?: { file: string; source: string; wall_height: number; format?: string; materials?: string[]; textured?: boolean; frame?: string; transform?: number[][] } | null;
   floor_image?: { file: string; origin: [number, number]; pixels_per_metre: number; width: number; height: number; source: string } | null;
   costar?: { fields: CostarField[]; max_occupants: number; disclaimer: string; property_id: number; floor_plan_id: number } | null;
   checks?: Record<string, unknown> | null;
@@ -24,7 +26,7 @@ interface SceneData {
 interface Pose { x: number; y: number; z: number; yaw: number }
 interface DetectionEntry { id: string; position: [number, number]; cell: Cell; confidence: number; hits: number; status: string; source: string }
 interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
-interface Paired { status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
+interface Paired { experiment?: Record<string, unknown>; status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
   scene_id: string; scenario: Scenario; time: number; status: string; robot: Cell; heading: number; pose: Pose;
   survivors: { id: string; position: Cell; status: string }[];
@@ -37,6 +39,8 @@ interface SimState {
 interface Observation { heat: number[][]; smoke: number[][]; observed: number[][]; survivors: DetectionEntry[] }
 interface Preset { id: string; label: string; note: string; scenario?: Scenario; unavailable?: boolean; capacity?: number }
 
+let sceneReady = false, sceneLoadVersion = 0;
+const sourceCutaway = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1.6);
 const CAM_W = 512, CAM_H = 384, CAM_HFOV = Math.PI / 2;
 const CAM_VFOV = 2 * Math.atan(Math.tan(CAM_HFOV / 2) * CAM_H / CAM_W);
 const FX = (CAM_W / 2) / Math.tan(CAM_HFOV / 2), FY = (CAM_H / 2) / Math.tan(CAM_VFOV / 2);
@@ -109,7 +113,7 @@ $('app').innerHTML = `
           <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
           <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
         </section>
-        <section class="panel compare-callout"><h2>Compare runs</h2><p id="compare-text" class="field-hint">Distance-only vs risk-aware from the same frozen scenario, sensors, hazard model and safety rules.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">Apply scenario changes before comparing.</p></section>
+        <section class="panel compare-callout"><h2>Compare runs</h2><p id="compare-text" class="field-hint">Distance-only vs risk-aware from the same frozen scenario, sensors, hazard model and safety rules.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">For a CoStar workload, select a capacity preset, Apply it, then compare. The report includes its source field and scenario hash.</p></section>
       </aside>
       <dl class="run-summary" aria-label="Mission metrics">
         <div><dt>Evacuated</dt><dd><strong id="evacuated">—</strong> <span id="population"></span> <span id="unresolved-note" class="subtle-label"></span></dd></div>
@@ -305,7 +309,7 @@ function syncUI(): void {
   preview.disabled = !connected || busy || dirty || status === 'running' || pairedRunning() || !state || state.hazard_time >= 600;
   preview.textContent = state?.hazards_running && status !== 'running' ? 'Pause hazards' : 'Preview hazards';
   $('start').textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
-  ($('start') as HTMLButtonElement).disabled = !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
+  ($('start') as HTMLButtonElement).disabled = !sceneReady || !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
   ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running' || pairedRunning();
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
   ($('mode-fieldset') as HTMLFieldSetElement).disabled = !editable;
@@ -318,8 +322,8 @@ function syncUI(): void {
   ($('discard') as HTMLButtonElement).disabled = busy || !dirty;
   ($('import') as HTMLButtonElement).disabled = !editable;
   ($('export') as HTMLButtonElement).disabled = !draft;
-  ($('compare') as HTMLButtonElement).disabled = !connected || busy || dirty || pairedRunning() || status === 'running';
-  $('control-hint').textContent = !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
+  ($('compare') as HTMLButtonElement).disabled = !sceneReady || !connected || busy || dirty || pairedRunning() || status === 'running';
+  $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
   $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Pick a preset or a tool, then click a floor cell. Changes stay local until applied.';
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
   $('survivor-count').textContent = draft ? String(draft.survivors.length) : '—';
@@ -343,7 +347,7 @@ async function loadScene(): Promise<void> {
 async function loadPresets(): Promise<void> {
   const presets = await api<Preset[]>(`presets?seed=${draft?.seed ?? 7}`);
   $('presets').innerHTML = presets.map((p, i) => `<button class="button subtle small preset" data-index="${i}" data-unavailable="${p.unavailable ? 1 : 0}" title="${escape(p.note)}">${escape(p.label)}</button>`).join('') +
-    presets.filter(p => p.id === 'capacity-stress').map(p => `<p class="field-hint capacity-note">${escape(p.note)}</p>`).join('');
+    presets.filter(p => p.id.startsWith('capacity-')).slice(0, 1).map(p => `<p class="field-hint capacity-note">${escape(p.note)}</p>`).join('');
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => b.addEventListener('click', () => {
     const preset = presets[Number(b.dataset.index)];
     if (!preset.scenario || !idle()) return;
@@ -363,7 +367,7 @@ function renderSceneInfo(): void {
   $('scene-heading').textContent = scene.name;
   $('scene-size').textContent = `${number(scene.width * scene.resolution)} × ${number(scene.height * scene.resolution)} m · ${number(scene.resolution, 3)} m/cell`;
   $('disclosure-body').textContent = real
-    ? `Real: CoStar record and scan-derived floor geometry (derived mesh). Synthetic: fire, smoke, people, robot. ${scene.exits.length === 1 ? 'Single verified exit; corridor beyond assumed available. ' : ''}Not a fire-safety assessment.`
+    ? `Real: CoStar record. Geometry: ${scene.mesh?.source ?? scene.source}. Synthetic: fire, smoke, people, robot. ${scene.exits.length === 1 ? 'Single verified exit; corridor beyond assumed available. ' : ''}Not a fire-safety assessment.`
     : 'Simulated geometry, people and hazard fields. Not a property.';
   $('disclosure-tag').textContent = real ? 'Scanned property, synthetic emergency.' : 'Synthetic fixture.';
   const c = scene.costar;
@@ -454,7 +458,10 @@ function clearGroup(group: THREE.Group): void {
     if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
       object.geometry.dispose();
       const materials = Array.isArray(object.material) ? object.material : [object.material];
-      materials.forEach(material => material.dispose());
+      materials.forEach(material => {
+        for (const value of Object.values(material)) if (value instanceof THREE.Texture) value.dispose();
+        material.dispose();
+      });
     }
   });
   group.clear();
@@ -484,7 +491,54 @@ function applyWallLayer(): void {
   wallLayer.traverse(o => o.layers.set(shown ? 0 : CAMERA_ONLY_LAYER));
 }
 
+function disposeObject(object: THREE.Object3D): void {
+  object.traverse(o => {
+    if (!(o instanceof THREE.Mesh)) return;
+    o.geometry.dispose();
+    for (const material of Array.isArray(o.material) ? o.material : [o.material]) {
+      for (const value of Object.values(material)) if (value instanceof THREE.Texture) value.dispose();
+      material.dispose();
+    }
+  });
+}
+
+async function loadSceneMesh(current: SceneData, version: number): Promise<void> {
+  const mesh = current.mesh!;
+  const base = `/api/scenes/${encodeURIComponent(current.id)}/files/`;
+  let failed = false, mounted = false, complete = false;
+  const manager = new THREE.LoadingManager();
+  const ready = () => { if (version === sceneLoadVersion && mounted && complete && !failed) { sceneReady = true; syncUI(); } };
+  manager.onLoad = () => { complete = true; ready(); };
+  manager.onError = () => { failed = true; if (version === sceneLoadVersion) { sceneReady = false; notify('A scene asset failed to load. Mission start is disabled.', true); syncUI(); } };
+  try {
+    let object: THREE.Group;
+    if (mesh.format === 'obj') {
+      const loader = new OBJLoader(manager);
+      if (mesh.materials?.length) {
+        const texts = await Promise.all(mesh.materials.map(async name => {
+          const response = await fetch(base + encodeURIComponent(name));
+          if (!response.ok) throw new Error('Material unavailable');
+          return response.text();
+        }));
+        const materials = new MTLLoader(manager).parse(texts.join('\n'), base);
+        materials.preload(); loader.setMaterials(materials);
+      }
+      object = await loader.loadAsync(base + encodeURIComponent(mesh.file));
+      const registration = new THREE.Matrix4();
+      if (mesh.transform) registration.set(...mesh.transform.flat() as [number,number,number,number,number,number,number,number,number,number,number,number,number,number,number,number]);
+      const viewer = new THREE.Matrix4().set(1,0,0,0, 0,0,1,0, 0,-1,0,0, 0,0,0,1);
+      object.applyMatrix4(viewer.multiply(registration));
+    } else object = (await new GLTFLoader(manager).loadAsync(base + encodeURIComponent(mesh.file))).scene;
+    if (version !== sceneLoadVersion) { disposeObject(object); return; }
+    wallLayer.add(object); applyWallLayer(); mounted = true; ready();
+  } catch {
+    if (version === sceneLoadVersion) { sceneReady = false; notify('Scene geometry or materials unavailable. Mission start is disabled.', true); syncUI(); }
+  }
+}
+
 function buildStaticScene(): void {
+  const version = ++sceneLoadVersion;
+  sceneReady = false;
   clearGroup(staticLayer);
   clearGroup(wallLayer);
   avatars.forEach(a => avatarLayer.remove(a));
@@ -492,6 +546,8 @@ function buildStaticScene(): void {
   if (!scene) return;
   const { width, height, resolution: res, origin } = scene;
   const real = !!scene.mesh;
+  const sourceMesh = scene.mesh?.format === 'obj';
+  if (!real) sceneReady = true;
   const wallHeight = wallHeightOf();
   const gridW = width * res, gridH = height * res;
   const cx = origin[0] + gridW / 2, cy = origin[1] + gridH / 2;
@@ -510,23 +566,21 @@ function buildStaticScene(): void {
     base.position.copy(toThree(cx, cy, -0.01));
     base.layers.set(CAMERA_ONLY_LAYER);
     staticLayer.add(base);
-  } else {
+  } else if (!sourceMesh) {
     const floor = new THREE.Mesh(new THREE.BoxGeometry(gridW, 0.16, gridH), new THREE.MeshStandardMaterial({ color: '#182633', roughness: 1 }));
     floor.position.copy(toThree(cx, cy, -0.08));
     staticLayer.add(floor);
   }
   if (real) {
-    new GLTFLoader().load(`/api/scenes/${encodeURIComponent(scene.id)}/files/${scene.mesh!.file}`, gltf => {
-      gltf.scene.traverse(o => { if (o instanceof THREE.Mesh) { o.material = new THREE.MeshStandardMaterial({ color: '#d9dcdf', roughness: 0.9, side: THREE.DoubleSide }); } });
-      wallLayer.add(gltf.scene);
-      applyWallLayer();
-    }, undefined, () => notify('Could not load the scene mesh; walls are shown from the collision grid only.', true));
+    void loadSceneMesh(scene, version);
     // Ceiling for the robot camera only, so the operator keeps the cutaway view.
+    if (!sourceMesh) {
     const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(gridW, gridH), new THREE.MeshStandardMaterial({ color: '#eceae6', emissive: '#bdbab4', emissiveIntensity: 0.55, side: THREE.DoubleSide }));
     ceiling.rotation.x = Math.PI / 2;
     ceiling.position.copy(toThree(cx, cy, wallHeight));
     ceiling.layers.set(CAMERA_ONLY_LAYER);
     staticLayer.add(ceiling);
+    }
     for (const room of scene.rooms) {
       if (!room.polygon) continue;
       const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(room.polygon.map(([x, y]) => toThree(x, y, 0.02))), new THREE.LineBasicMaterial({ color: '#4fc3a1', transparent: true, opacity: 0.55 }));
@@ -788,7 +842,7 @@ function drawDynamic(): void {
 /** Render RGB and linear depth from the requested camera pose and send them for YOLO inference. */
 async function sendFrame(snapshot: SimState): Promise<void> {
   const request = snapshot.frame_request;
-  if (!renderer || !scene || !request) return;
+  if (!renderer || !scene || !request || !sceneReady) return;
   frameInFlight = true;
   lastFrameSeq = request.seq;
   try {
@@ -801,6 +855,7 @@ async function sendFrame(snapshot: SimState): Promise<void> {
     // Smoke attenuates the rendered image (not depth); simple exponential fog at the robot's local density.
     world.fog = smokeHere > 0.02 ? new THREE.FogExp2(0x8d9299, 0.15 + smokeHere * 1.6) : null;
     world.background = new THREE.Color('#e9e7e3');
+    renderer.clippingPlanes = [];
     renderer.setRenderTarget(rgbTarget);
     renderer.render(world, robotCamera);
     const rgba = new Uint8Array(CAM_W * CAM_H * 4);
@@ -882,7 +937,7 @@ function renderPaired(): void {
   shownPairedStatus = signature;
   $('comparison').hidden = false;
   $('comparison-context').textContent = `Paired live runs on ${scene?.name ?? ''}, seed ${paired.seed}, ${paired.perception}. ${paired.status === 'running' ? `Running ${paired.running}…` : paired.status}.`;
-  $('comparison-body').innerHTML = renderReport({ reports: paired.reports, note: paired.note });
+  $('comparison-body').innerHTML = renderReport({ reports: paired.reports, experiment: paired.experiment, note: paired.note });
 }
 
 function recenter(): void {
@@ -952,7 +1007,9 @@ function setupRenderer(): void {
     renderer.setAnimationLoop(() => {
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
+      renderer.clippingPlanes = scene?.mesh?.format === 'obj' ? [sourceCutaway] : [];
       renderer.render(world, camera);
+      renderer.clippingPlanes = [];
     });
     $('scene-empty').hidden = true;
     let down: { x: number; y: number } | null = null;

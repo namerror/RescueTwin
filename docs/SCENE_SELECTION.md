@@ -10,8 +10,13 @@ of the panos nearest each candidate opening. The schematic DXF contains wall lin
 with no door entities; the wall graph has only `wall` edges. Openings were therefore
 identified from the plan images and confirmed visually in panos.
 
-Mesh status for both: MatterPak `unlocked`, but `matterpak`, `obj` and `obj-low-res`
-resources report `unavailable` with no download link.
+Asset investigation update (2026-11-14): MatterPak resource bundles remain `unavailable`,
+but `assets.meshes` exposes downloadable OBJs. For BOTH shortlisted scenes, the `50k`
+asset is `defurnished_50k.obj` without UVs or materials. The `500k` response is a partial
+`lod2_room0_chunk262145.obj`, with UVs but an MTL dependency that returns HTTP 403. Separate `50k`
+texture atlases do not establish a mapping to either OBJ. Do not equate bundle
+unavailability with all mesh unavailability, or an available OBJ with a complete
+textured scene. See DATA_INTEGRATION.md for import gates.
 
 ## 5p6KKvHqh3W: 512 Veteran Ave (PropertyId 4025799, plan 2669568 "H", maxOccupants 5)
 
@@ -52,5 +57,6 @@ Consequences, stated wherever results are shown:
 Geometry sources for the bundle: schematic DXF lines (inner wall faces, door gaps
 preserved) for collision; Matterport room polygons for interior extent and labels;
 pano positions for room observation points; the photogrammetric floor plan as a
-floor texture. No MatterPak mesh is available, so the rendered mesh is derived from
-the same DXF lines and labelled as derived.
+floor texture. No complete source mesh/material package has passed validation, so the rendered mesh
+is derived from the same DXF lines and labelled as derived. Both scenes now have
+configuration files and validated derived bundles; the current default remains 9A46aT7FCPg.

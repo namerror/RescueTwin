@@ -9,9 +9,21 @@ CAPACITY_NOTE = 'Marketed maximum occupants for this floor plan; not live or act
 
 def contains_model(value,model):
     if isinstance(value,dict):
-        return value.get('videoKey')==model or any(contains_model(v,model) for v in value.values())
+        return (value.get('videoKey')==model and value.get('videoExternalReferenceType',value.get('externalReferenceType')) in (36,234)) or any(contains_model(v,model) for v in value.values())
     if isinstance(value,list):return any(contains_model(v,model) for v in value)
     return False
+
+
+def model_references(value, model, path=''):
+    """Exact attachment paths for auditable joins, including nested units."""
+    found=[]
+    if isinstance(value,dict):
+        if value.get('videoKey')==model and value.get('videoExternalReferenceType',value.get('externalReferenceType')) in (36,234):
+            found.append(path+'.videoKey')
+        for key,item in value.items():found.extend(model_references(item,model,path+'.'+key if path else key))
+    elif isinstance(value,list):
+        for index,item in enumerate(value):found.extend(model_references(item,model,f'{path}[{index}]'))
+    return found
 
 
 def property_ids(kit,model):
@@ -90,7 +102,21 @@ def context(kit,model,property_id,plan_id):
         field('area','Floor-plan area',f'{plan_path}.maxSquareFeet',plan.get('maxSquareFeet'),'sq ft'),
         field('max_occupants','Marketed max occupants',f'{plan_path}.maxOccupants',plan.get('maxOccupants'),'people',note=CAPACITY_NOTE),
     ]
-    return dict(property_id=property_id,model_id=model,floor_plan_id=plan_id,
+    raw_fields={'property_type':record.get('propertyType'),'apartment_style':(record.get('propertyApartment') or {}).get('apartmentStyleType'),'construction_material':record.get('buildingConstructionMaterial'),'sprinkler_type':record.get('sprinklerType')}
+    for entry in fields:entry['raw_value']=raw_fields.get(entry['key'],entry['value'])
+    corroboration=[]
+    with (kit/'data/apartment-listing.jsonl').open() as stream:
+        for line in stream:
+            listing=json.loads(line)
+            if listing.get('propertyId') != property_id: continue
+            for i, candidate in enumerate(listing.get('apartmentModels') or []):
+                if candidate.get('id') != plan_id: continue
+                corroboration.append(dict(dataset='apartment-listing',source_id=listing['id'],record_type='ApartmentListing',
+                    field_path=f'apartmentModels[{i}].maxOccupants',value=candidate.get('maxOccupants'),units='people',
+                    derivation='exact propertyId and floor-plan id join'))
+    conflicts=[f for f in corroboration if f['value'] is not None and plan.get('maxOccupants') is not None and f['value'] != plan['maxOccupants']]
+    return dict(join_evidence=[dict(dataset='commercial-property',source_id=property_id,field_path=p,value=model) for p in model_references(record,model)],capacity_corroboration=corroboration,capacity_conflicts=conflicts,
+                property_id=property_id,model_id=model,floor_plan_id=plan_id,
                 max_occupants=plan.get('maxOccupants'),fields=fields,
                 join='commercial-properties.csv PropertyId -> commercial-property.id; floor plan videoKey == Matterport model id',
                 disclaimer='Real CoStar property record. Capacity is marketed, not actual occupancy. Contacts are excluded.')
