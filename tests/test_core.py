@@ -150,6 +150,50 @@ def test_prior_ignores_survivor_placements_and_validates_use():
     with pytest.raises(ValueError,match='building use'):
         Simulation(s,dict(scene_id='prior-test',survivors=[],ignitions=[],seed=1,building_use='casino'))
 
+def _twin_rooms_scene(costar=None):
+    """Two identical rooms at equal distance either side of the start; ties go to the left room."""
+    from rescuetwin.core import Scene
+    s=Scene(id='risk-test',name='Risk test',width=31,height=5,resolution=.5,meta={'costar':costar} if costar else {})
+    s.walls={(x,y) for x in range(31) for y in range(5) if y in (0,4) or x in (0,30)}
+    s.exits=[(15,2)];s.robot_start=(15,2)
+    s.rooms=[dict(id='left',name='Left',label='Bedroom',cells=[(c,2) for c in range(8,11)],observe=[(9,2)],area_m2=4.),
+             dict(id='right',name='Right',label='Bedroom',cells=[(c,2) for c in range(20,23)],observe=[(21,2)],area_m2=4.)]
+    return s
+
+
+def _first_target(scene,room_risk=None):
+    scenario=dict(scene_id=scene.id,survivors=[],ignitions=[],seed=1,**({'room_risk':room_risk} if room_risk else {}))
+    sim=Simulation(scene,scenario);sim.observed[:]=1
+    return sim.choose()[-1]
+
+
+def test_room_risk_orders_gas_then_neither_then_sprinkler():
+    s=_twin_rooms_scene()
+    assert _first_target(s)==(9,2)                                              # untagged: tie, left first
+    assert _first_target(s,{'right':'gas_heater'})==(21,2)                      # gas heater beats neither
+    assert _first_target(s,{'left':'sprinkler'})==(21,2)                        # neither beats sprinkler
+    assert _first_target(s,{'left':'sprinkler','right':'gas_heater'})==(21,2)
+    assert _first_target(s,{'left':'both','right':'sprinkler'})==(9,2)          # 1.2x beats 0.8x
+    sim=Simulation(s,dict(scene_id=s.id,survivors=[],ignitions=[],seed=1,room_risk={'right':'gas_heater'}))
+    assert {r['id']:r['tag'] for r in sim.observations()['risk_map']}=={'left':'unknown','right':'gas_heater'}
+    assert any('Room risk map' in e['message'] for e in sim.events)
+
+
+def test_room_risk_building_default_keeps_unknown_and_validates():
+    from rescuetwin import risk
+    field=lambda v:dict(fields=[dict(key='has_sprinklers',value=v,dataset='commercial-property',source_id=1,field_path='hasSprinklers')])
+    assert risk.building_default(_twin_rooms_scene())[0]=='unknown'
+    assert risk.building_default(_twin_rooms_scene(field(None)))[0]=='unknown'  # null is unknown, never "no"
+    assert risk.building_default(_twin_rooms_scene(field(False)))[0]=='unknown' # no gas data either
+    yes=_twin_rooms_scene(field(True))
+    assert risk.building_default(yes)[0]=='sprinkler'
+    assert _first_target(yes,{'left':'neither'})==(9,2)                         # operator override beats building default
+    s=_twin_rooms_scene()
+    for bad in ({'kitchen':'gas_heater'},{'left':'unknown'},{'left':'propane'},['left']):
+        with pytest.raises(ValueError,match='room_risk'):
+            Simulation(s,dict(scene_id=s.id,survivors=[],ignitions=[],seed=1,room_risk=bad))
+
+
 def test_two_nearby_confirmed_survivors_escort_together():
     sim = Simulation(scenario=dict(survivors=[[3,6],[3,7],[4,6]], ignitions=[], seed=1))
     sim.robot = (3,6)

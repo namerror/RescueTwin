@@ -191,6 +191,7 @@ class Scenario(BaseModel):
     building_use:str|None=None
     immobile:list[list[int]]=Field(default_factory=list,max_length=20)
     comms_outages:list[list[float]]=Field(default_factory=list,max_length=10)
+    room_risk:dict[str,str]=Field(default_factory=dict,max_length=200)
 
 class Control(BaseModel):
     action:str
@@ -276,6 +277,11 @@ def building_uses():
     use,source=occupancy.resolve(sim.scene)
     return dict(inferred=use,source=source,profiles=[dict(id=k,label=v['label'],rationale=v['rationale']) for k,v in occupancy.PROFILES.items()])
 
+@app.get('/api/risk-map')
+def risk_map():
+    from . import risk
+    return risk.public(sim.scene,sim.risk)
+
 @app.get('/api/agent')
 def agent_info():
     return dict(agent_status,note='Gemini proposes room/survivor/exit goals under docs/ROBOT_CONSTITUTION.md; the controller validates and executes. '
@@ -313,7 +319,7 @@ def scenario(body:Scenario):
     global sim
     if sim.status!='idle' or sim.hazards_running or busy():raise HTTPException(409,'Reset before editing a scenario')
     data=body.model_dump();data['scene_id']=data['scene_id'] or sim.scene.id
-    for key in ('building_use','immobile','comms_outages'):
+    for key in ('building_use','immobile','comms_outages','room_risk'):
         if not data.get(key):data.pop(key,None)   # unset fields stay out, so existing scenario hashes are unchanged
     try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
     except ValueError as e:raise HTTPException(422,str(e)) from e

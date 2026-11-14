@@ -121,3 +121,20 @@ def test_decision_quality_mode_holds_clock_only_while_waiting_on_the_model(monke
     assert not api.inference_hold(api.sim)                # real-time mode never holds
     monkeypatch.setitem(api.agent_status, 'enabled', False)
     client.post('/api/control', json={'action': 'reset'})
+
+
+def test_room_risk_scenario_and_risk_map():
+    with TestClient(app) as client:
+        client.post('/api/control',json={'action':'reset'})
+        room=client.get('/api/scene').json()['rooms'][0]['id']
+        body={'survivors':[],'ignitions':[],'seed':1,'room_risk':{room:'gas_heater'}}
+        state=client.post('/api/scenario',json=body).json()
+        assert state['scenario']['room_risk']=={room:'gas_heater'}
+        mapped=client.get('/api/risk-map').json()
+        assert {t['id']:t['factor'] for t in mapped['tags']}=={'gas_heater':1.5,'sprinkler':.8,'both':1.2,'neither':1.}
+        tagged=next(r for r in mapped['rooms'] if r['id']==room)
+        assert tagged['tag']=='gas_heater' and tagged['source']=='operator'
+        assert all(r['tag']=='unknown' for r in mapped['rooms'] if r['id']!=room)
+        assert client.post('/api/scenario',json={**body,'room_risk':{room:'propane'}}).status_code==422
+        client.post('/api/scenario',json={'survivors':[],'ignitions':[],'seed':1})
+        assert 'room_risk' not in client.get('/api/state').json()['scenario']
