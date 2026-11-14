@@ -6,7 +6,7 @@ The accepted hackathon design is documented in [architecture](docs/ARCHITECTURE.
 [MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md). These are
 implementation targets, not evidence that the application is complete. Inspect the
 current source and executable checks before reporting any capability as working.
-The runnable app defaults to the prepared sponsor scene `9A46aT7FCPg` (single verified exit; see docs/SCENE_SELECTION.md) with YOLO on browser-rendered RGB-D. Rendered derived geometry is not real imagery, and the synthetic fixture/analytic detector are labelled development modes.
+The runnable app defaults to the prepared sponsor scene `9A46aT7FCPg` (single verified exit; see docs/SCENE_SELECTION.md) with YOLO on browser-rendered RGB-D. Both selected scenes have validated textured MatterPak bundles (see docs/DATA_INTEGRATION.md). Browser RGB-D is rendered from scans, not live imagery; the synthetic fixture/analytic detector are labelled development modes.
 
 Priorities: risk detection, potential-survivor identification, and adaptive evacuation
 routing. One floor, one kinematic robot, fire/smoke, and simple survivor escort.

@@ -10,13 +10,10 @@ of the panos nearest each candidate opening. The schematic DXF contains wall lin
 with no door entities; the wall graph has only `wall` edges. Openings were therefore
 identified from the plan images and confirmed visually in panos.
 
-Asset investigation update (2026-11-14): MatterPak resource bundles remain `unavailable`,
-but `assets.meshes` exposes downloadable OBJs. For BOTH shortlisted scenes, the `50k`
-asset is `defurnished_50k.obj` without UVs or materials. The `500k` response is a partial
-`lod2_room0_chunk262145.obj`, with UVs but an MTL dependency that returns HTTP 403. Separate `50k`
-texture atlases do not establish a mapping to either OBJ. Do not equate bundle
-unavailability with all mesh unavailability, or an available OBJ with a complete
-textured scene. See DATA_INTEGRATION.md for import gates.
+Asset correction (2026-11-14): `model.bundle(id: "mp:matterpak").assets.url`
+provides complete textured packages for both selected scans. The earlier
+`assets.resources(format: "matterpak")` query did not establish export availability.
+Both packages now pass furnished-mesh import validation; see DATA_INTEGRATION.md.
 
 ## 5p6KKvHqh3W: 512 Veteran Ave (PropertyId 4025799, plan 2669568 "H", maxOccupants 5)
 
@@ -54,9 +51,9 @@ Consequences, stated wherever results are shown:
   survivors unresolved; there is no alternative route to report.
 - This is a single-egress rehearsal and is not evidence of code-compliant egress.
 
-Geometry sources for the bundle: schematic DXF lines (inner wall faces, door gaps
-preserved) for collision; Matterport room polygons for interior extent and labels;
-pano positions for room observation points; the photogrammetric floor plan as a
-floor texture. No complete source mesh/material package has passed validation, so the rendered mesh
-is derived from the same DXF lines and labelled as derived. Both scenes now have
-configuration files and validated derived bundles; the current default remains 9A46aT7FCPg.
+Both scenes use their own furnished MatterPak OBJ, matching MTL and source JPEGs.
+Collision starts from schematic DXF/PNG and is reconciled with scan obstacles;
+room polygons and observation points retain the Matterport model frame. Thin scanned
+door leaves in evidenced portals are treated as openable and recorded. The floor is
+part of the textured scan, not a schematic image overlaid on source geometry.
+See [data integration](DATA_INTEGRATION.md) for commands, measurements and limits.

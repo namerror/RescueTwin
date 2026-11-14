@@ -67,13 +67,16 @@ def package(path, output, allow_untextured=False):
             words = line.split()
             if words and words[0] == 'newmtl': current = ' '.join(words[1:]); materials[current] = False
             if words and words[0].lower().startswith(('map_', 'bump', 'disp', 'decal', 'refl')):
-                if len(words)!=2 or words[0] != 'map_Kd': raise ValueError('Unsupported MTL map/options; normalize package first')
+                if len(words)!=2 or words[0] not in ('map_Kd', 'map_Ka'): raise ValueError('Unsupported MTL map/options; normalize package first')
                 dep = safe_file(src.parent, words[1]); name = copy(dep)
+                # Ambient maps are unused by our diffuse, baked-lighting renderer.
+                if words[0] == 'map_Ka': continue
                 line = 'map_Kd '+name
                 if current is not None: materials[current] = True
             rewritten.append(line)
-        name = copy(src); (output/name).write_text('\n'.join(rewritten)+'\n')
-        assets[name]['sha256'] = hashlib.sha256((output/name).read_bytes()).hexdigest()
+        text = '\n'.join(rewritten)+'\n'
+        digest = hashlib.sha256(text.encode()).hexdigest(); name = digest[:20]+'.mtl'
+        (output/name).write_text(text); names[src] = name; assets[name] = {'sha256': digest}
     textured = bool(used) and all(uv and material and materials.get(material) for _,uv,material in faces)
     if not textured and not allow_untextured: raise ValueError('No complete UV/material mapping; use --allow-untextured only for a labeled geometry experiment')
     lines = []
@@ -81,8 +84,11 @@ def package(path, output, allow_untextured=False):
         if line.startswith('mtllib '):
             line = 'mtllib '+' '.join(names[safe_file(path.parent,n)] for n in line.split()[1:])
         lines.append(line)
-    (output/'source.obj').write_text('\n'.join(lines)+'\n')
-    assets['source.obj']={'sha256':hashlib.sha256((output/'source.obj').read_bytes()).hexdigest()}
+    obj_text = '\n'.join(lines)+'\n'
+    obj_digest = hashlib.sha256(obj_text.encode()).hexdigest()
+    obj_name = obj_digest[:20]+'.obj'
+    (output/obj_name).write_text(obj_text)
+    assets[obj_name]={'sha256':obj_digest}
     return vertices, faces, assets, [names[safe_file(path.parent,n)] for n in libraries], textured
 
 
@@ -209,13 +215,24 @@ def import_mesh(model, path, root, allow_untextured=False):
         (bundle.parent/'source-mesh-validation.json').write_text(json.dumps(report,indent=2))
         if not checks['passed']: raise ValueError('Source geometry validation failed; existing bundle unchanged. See source-mesh-validation.json')
         if not (bundle/'scene.before-source.json').exists(): shutil.copyfile(bundle/'scene.json',bundle/'scene.before-source.json')
-        for name in assets: shutil.copyfile(out/name,bundle/name)
+        for name in assets:
+            target = bundle/name
+            if target.exists():
+                if hashlib.sha256(target.read_bytes()).hexdigest() != assets[name]['sha256']:
+                    raise ValueError('Published asset hash mismatch; existing bundle unchanged')
+                continue
+            staging = bundle/(name+'.next')
+            try:
+                shutil.copyfile(out/name, staging)
+                staging.replace(target)
+            finally:
+                staging.unlink(missing_ok=True)
         scene['blocked'].update(kinds)
         scene['rooms']=rooms
         scene['skipped_rooms']=(scene.get('skipped_rooms') or [])+skipped
         scene['reconciliation']=records
         source_name='Synthetic test OBJ' if scene['source']=='synthetic' else 'Matterport source OBJ'
-        scene['mesh']={'file':'source.obj','format':'obj','materials':mtls,'textured':textured,'frame':'model','transform':matrix.tolist(), 'wall_height':scene['mesh']['wall_height'], 'source':source_name+(' with verified materials' if textured else '; UNTEXTURED geometry experiment'), 'validation':checks}
+        scene['mesh']={'file':next(n for n in assets if n.endswith('.obj')),'format':'obj','materials':mtls,'textured':textured,'frame':'model','transform':matrix.tolist(), 'wall_height':scene['mesh']['wall_height'], 'source':source_name+(' with verified materials' if textured else '; UNTEXTURED geometry experiment'), 'validation':checks}
         scene['assets']=assets;scene['source']='sponsor-source' if scene['source']!='synthetic' else 'synthetic';scene['floor_image']=None
         scene['provenance'].append({'item':'rendered mesh','source':f'{source_name} {model}; SHA256 '+hashlib.sha256(path.read_bytes()).hexdigest(),'derivation':f'source OBJ; explicit affine registration; mesh triangles in robot band {BAND[0]}-{BAND[1]} m projected to grid; cells within one cell of schematic walls or in schematic door gaps = source_walls, all others = furniture (never cleared); thin door-gap obstructions cleared as portals and recorded'})
         scene['assumptions'].append('Navigation is a scan-derived grid checked against source mesh, not a certified traversability map.')
@@ -243,8 +260,8 @@ def import_package(model, path, root, allow_untextured=False):
 
 def inspect(model, root, fetch=False):
     import prepare_scene as prep
-    prep.QUERY='''query($id: ID!){model(id:$id){id assets{ meshes{id filename format resolution status url} textures{id format resolution quality status textures urlTemplate} resources(format:"matterpak"){status filename url}}}}'''
-    data=prep.graph(model)['assets'];out=root/model/'source-assets';out.mkdir(parents=True,exist_ok=True)
+    prep.QUERY='''query($id: ID!){model(id:$id){id bundle(id:"mp:matterpak"){assets{url}} assets{ meshes{id filename format resolution status url} textures{id format resolution quality status textures urlTemplate} resources(format:"matterpak"){status filename url}}}}'''
+    response=prep.graph(model);data=response['assets'];out=root/model/'source-assets';out.mkdir(parents=True,exist_ok=True)
     report={'model':model,'checked_at':datetime.now(timezone.utc).isoformat(),'meshes':[],'textures':[],'resources':[]}
     for group in report.keys() & data.keys():
         for index,a in enumerate(data[group]):
@@ -273,6 +290,8 @@ def inspect(model, root, fetch=False):
                                     dependencies.append({'file':image,'downloaded':ok})
                     entry['dependencies']=dependencies
             report[group].append(entry)
+    report['matterpak'] = {'source':'model.bundle(mp:matterpak).assets',
+                          'download_links':sum(bool(a.get('url')) for a in (response.get('bundle') or {}).get('assets', []))}
     (out/'inspection.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))
 
 
@@ -282,6 +301,8 @@ class RangeFile:
         import urllib.request
         self._req = urllib.request; self.url = url; self.pos = 0
         with self._req.urlopen(self._req.Request(url, headers={'Range': 'bytes=0-0'}), timeout=60) as r:
+            if r.status != 206 or not r.headers.get('Content-Range'):
+                raise ValueError('MatterPak server does not support range downloads')
             self.size = int(r.headers['Content-Range'].split('/')[-1])
     def seekable(self): return True
     def tell(self): return self.pos
@@ -292,7 +313,11 @@ class RangeFile:
         end = self.size if n is None or n < 0 else min(self.size, self.pos + n)
         if end <= self.pos: return b''
         with self._req.urlopen(self._req.Request(self.url, headers={'Range': f'bytes={self.pos}-{end-1}'}), timeout=180) as r:
-            data = r.read()
+            if r.status != 206:
+                raise ValueError('MatterPak range request was not honored')
+            data = r.read(end-self.pos+1)
+            if len(data) != end-self.pos:
+                raise ValueError('MatterPak range response has incorrect length')
         self.pos += len(data); return data
 
 
@@ -308,27 +333,42 @@ def matterpak_members(names):
 def fetch_matterpak(model, root):
     """Download only the textured OBJ package from a MatterPak, if the API offers one. Never logs URLs."""
     import prepare_scene as prep
-    prep.QUERY = '''query($id: ID!){model(id:$id){id bundle(id:"mp:matterpak"){availability} assets{resources(format:"matterpak"){status filename url}}}}'''
+    prep.QUERY = 'query($id: ID!){model(id:$id){bundle(id:"mp:matterpak"){assets{url}}}}'
     data = prep.graph(model)
-    pak = next((r for r in data['assets']['resources'] if r.get('url') and 'matterpak' in r['filename']), None)
-    status = {'model': model, 'checked_at': datetime.now(timezone.utc).isoformat(), 'availability': data['bundle']['availability'],
-              'resources': [{k: v for k, v in r.items() if k != 'url'} for r in data['assets']['resources']]}
+    links = [a['url'] for a in (data.get('bundle') or {}).get('assets', []) if a.get('url')]
+    if len(links) != 1:
+        raise ValueError(f'MatterPak for {model}: expected one bundle ZIP link, found {len(links)}')
     out = root/model/'source-assets'; out.mkdir(parents=True, exist_ok=True)
-    if not pak:
-        (out/'matterpak-status.json').write_text(json.dumps(status, indent=2)); print(json.dumps(status, indent=2))
-        raise SystemExit(f'MatterPak for {model} has no download link (bundle {status["availability"]}); nothing downloaded')
-    dest = out/'matterpak'; dest.mkdir(exist_ok=True)
-    with zipfile.ZipFile(RangeFile(pak['url'])) as archive:
-        listing = [{'name': i.filename, 'bytes': i.file_size} for i in archive.infolist()]
-        obj, keep = matterpak_members([i['name'] for i in listing])
-        for name in keep:
-            target = (dest/name).resolve()
-            if not target.is_relative_to(dest.resolve()): raise ValueError('Unsafe archive entry')
-            target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(archive.read(name))
-    status.update(filename=pak['filename'], listing=listing, obj=obj,
-                  extracted=[{'name': n, 'sha256': hashlib.sha256((dest/n).read_bytes()).hexdigest()} for n in keep])
-    (out/'matterpak-status.json').write_text(json.dumps(status, indent=2))
-    print(f'Extracted {len(keep)} files; import with: scripts/scene_assets.py import {model} {dest/obj}')
+    # A content-addressed extraction cannot corrupt an earlier downloaded package.
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        dest = Path(tmp).resolve()
+        try:
+            with zipfile.ZipFile(RangeFile(links[0])) as archive:
+                entries = archive.infolist()
+                if sum(i.file_size for i in entries) > 2_000_000_000:
+                    raise ValueError('Archive exceeds 2 GB unpacked limit')
+                for entry in entries:
+                    if not (dest/entry.filename).resolve().is_relative_to(dest) or (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                        raise ValueError('Unsafe archive entry')
+                obj, keep = matterpak_members([i.filename for i in entries])
+                for name in keep:
+                    target = dest/name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.read(name))
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError('MatterPak download failed; retry discovery/download (previous package unchanged)') from None
+        extracted = [{'name': n, 'sha256': hashlib.sha256((dest/n).read_bytes()).hexdigest()} for n in keep]
+        digest = hashlib.sha256(json.dumps(extracted, sort_keys=True).encode()).hexdigest()
+        published = out/('matterpak-'+digest[:20])
+        if not published.exists(): dest.rename(published)
+        status = {'model': model, 'source': 'model.bundle(mp:matterpak).assets',
+                  'checked_at': datetime.now(timezone.utc).isoformat(), 'obj': obj,
+                  'listing': [{'name': i.filename, 'bytes': i.file_size} for i in entries], 'extracted': extracted}
+        pending = out/'matterpak-status.json.next'
+        pending.write_text(json.dumps(status, indent=2)); pending.replace(out/'matterpak-status.json')
+    print(f'Extracted {len(keep)} files; import with: scripts/scene_assets.py import {model} {published/obj}')
 
 
 if __name__=='__main__':

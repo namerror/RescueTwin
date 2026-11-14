@@ -19,8 +19,8 @@ QUERY = '''query($id: ID!) { model(id:$id) { id name
  rooms { id floor { id } classifications { label confidence } boundary { edges { id } }
          dimensions(units: metric) { areaFloor width depth height } }
  panoLocations { id label position { x y z } skybox(resolution: "2k") { status children } }
- bundle(id:"mp:matterpak") { availability }
- assets { resources(format:"matterpak") { status filename url }
+ bundle(id:"mp:matterpak") { availability assets { url } }
+ assets {
           floorplans(provider:"matterport") { format flags url width height resolution origin { x y } } }
 } }'''
 
@@ -71,14 +71,9 @@ def fetch(model, root, panos):
             name = f"pano_{pano['label']}_face{face}.jpg"
             if download(url, out / name):
                 saved.append(name)
-    mesh = [r for r in data['assets']['resources'] if r.get('url')]
-    for resource in mesh:
-        if download(resource['url'], out / resource['filename']):
-            resource['file'] = resource['filename']
-            saved.append(resource['filename'])
     (out / 'source.json').write_text(json.dumps(strip_urls(data), indent=2))
     print(json.dumps(dict(model=model, saved=saved, matterpak=data['bundle']['availability'],
-                          mesh_downloaded=any(r.get('filename') in saved for r in mesh), note='Exits remain UNVALIDATED until inspected.'), indent=2))
+                          matterpak_download_available=bool(data['bundle'].get('assets')), mesh_downloaded=False, note='Exits remain UNVALIDATED until inspected.'), indent=2))
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,12 @@ training. Model IDs are configuration, not guaranteed access: validate available
 weights/API capabilities before choosing a pinned release. No pooled multi-GPU memory
 assumption is permitted.
 
+The current selected scenes use complete textured MatterPak OBJ/MTL/JPEG packages,
+discovered through `model.bundle(id: "mp:matterpak").assets`. Their source geometry is
+shared between operator rendering and robot RGB-D; operator cutaway does not change
+camera geometry. Collision remains a reconciled 2D grid with recorded openable-door
+assumptions. See [data integration](DATA_INTEGRATION.md) for executable evidence.
+
 ## Components and data flow
 
 ```text

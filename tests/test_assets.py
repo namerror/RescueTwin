@@ -21,7 +21,7 @@ def test_package_preserves_and_rewrites_materials(tmp_path):
     assert complete and len(vertices)==3 and len(faces)==1
     assert len(assets)==3 and len(mtls)==1
     assert 'wall.jpg' not in (out/mtls[0]).read_text()
-    assert 'mtllib '+mtls[0] in (out/'source.obj').read_text()
+    assert 'mtllib '+mtls[0] in (out/next(n for n in assets if n.endswith('.obj'))).read_text()
 
 
 def test_missing_material_and_uvs_fail_closed(tmp_path):
@@ -180,3 +180,53 @@ def test_matterpak_member_selection_skips_point_cloud():
     obj, keep = matterpak_members(['cloud.xyz', 'abc.obj', 'abc.mtl', 'abc_000.jpg', 'colorplan_000.jpg', 'floorplan_000.jpg'])
     assert obj == 'abc.obj' and keep == ['abc.obj', 'abc.mtl', 'abc_000.jpg']
     with pytest.raises(ValueError, match='exactly one OBJ'): matterpak_members(['a.obj', 'b.obj'])
+
+
+def test_ambient_map_keeps_diffuse_and_validates_dependency(tmp_path):
+    obj = textured(tmp_path); out = tmp_path/'out'; out.mkdir()
+    (tmp_path/'wall.mtl').write_text('newmtl wall\nmap_Ka wall.jpg\nmap_Kd wall.jpg\n')
+    _, _, assets, mtls, complete = package(obj, out)
+    assert complete
+    text = (out/mtls[0]).read_text()
+    assert 'map_Kd ' in text and 'map_Ka' not in text
+    (tmp_path/'wall.mtl').write_text('newmtl wall\nmap_Ka missing.jpg\nmap_Kd wall.jpg\n')
+    with pytest.raises(ValueError, match='Missing'): package(obj, out)
+
+
+def test_failed_publication_preserves_previous_assets(tmp_path, monkeypatch):
+    from scripts.scene_assets import import_mesh
+    import scripts.scene_assets as mod
+    bundle, _ = apartment(tmp_path)
+    obj = write_obj(tmp_path/'s.obj', SHELL + DOOR_LEAF)
+    import_mesh('furnished', obj, tmp_path, allow_untextured=True)
+    before = {p.name: p.read_bytes() for p in bundle.iterdir()}
+    write_obj(obj, SHELL + DOOR_LEAF + TABLE)
+    def fail(*args): raise OSError('disk full')
+    monkeypatch.setattr(mod.shutil, 'copyfile', fail)
+    with pytest.raises(OSError, match='disk full'):
+        import_mesh('furnished', obj, tmp_path, allow_untextured=True)
+    assert all((bundle/n).read_bytes() == b for n, b in before.items())
+    assert not list(bundle.glob('*.next'))
+
+
+def test_bundle_assets_download_and_redacted_status(tmp_path, monkeypatch):
+    import io
+    import sys
+    from scripts import prepare_scene, scene_assets
+    monkeypatch.setitem(sys.modules, 'prepare_scene', prepare_scene)
+    secret = 'https://example.invalid/pak.zip?secret=DO_NOT_SAVE'
+    def graph(model):
+        assert 'assets{url}' in prepare_scene.QUERY and 'resources' not in prepare_scene.QUERY
+        return {'bundle': {'assets': [{'url': secret}]}}
+    monkeypatch.setattr(prepare_scene, 'graph', graph)
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, 'w') as z:
+        z.writestr('scan.obj', 'fixture'); z.writestr('scan.mtl', 'fixture'); z.writestr('tex.jpg', b'image')
+    monkeypatch.setattr(scene_assets, 'RangeFile', lambda url: io.BytesIO(data.getvalue()))
+    scene_assets.fetch_matterpak('m', tmp_path)
+    status = tmp_path/'m/source-assets/matterpak-status.json'
+    assert 'DO_NOT_SAVE' not in status.read_text()
+    before = status.read_bytes()
+    monkeypatch.setattr(scene_assets, 'RangeFile', lambda url: io.BytesIO(b'broken'))
+    with pytest.raises(ValueError, match='download failed'): scene_assets.fetch_matterpak('m', tmp_path)
+    assert status.read_bytes() == before

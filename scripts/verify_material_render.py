@@ -18,7 +18,7 @@ def verify(url='http://127.0.0.1:5174'):
     cells=[[c,r] for r in range(8) for c in range(8)]
     scene={'id':'material-fixture','name':'SYNTHETIC material fixture','width':8,'height':8,'resolution':.5,'origin':[0,0], 'walls':[],'exterior':[],'exits':[[2,2]],'source':'synthetic','robot_start':[2,2],'time_limit':600,
            'rooms':[{'id':'r','name':'Test','label':'Bedroom','cells':cells,'observe':[[2,2]]}],
-           'mesh':{'file':'source.obj','format':'obj','materials':mtls,'textured':True,'frame':'model','wall_height':3,'source':'SYNTHETIC test OBJ'},'assets':assets,
+           'mesh':{'file':next(n for n in assets if n.endswith('.obj')),'format':'obj','materials':mtls,'textured':True,'frame':'model','wall_height':3,'source':'SYNTHETIC test OBJ'},'assets':assets,
            'obstacle_overlay':{'furniture':[[5,5],[5,6],[6,5],[6,6]],'source_walls':[[7,r] for r in range(8)]}}
     zeros=[[0]*8 for _ in range(8)];seq=[0];frames=[];errors=[]
     state={'scene_id':scene['id'],'scenario':{'scene_id':scene['id'],'survivors':[],'ignitions':[],'seed':7},'time':0,'status':'idle','robot':[2,2],'heading':0,'pose':{'x':1.25,'y':1.25,'z':1,'yaw':0},'survivors':[], 'heat':zeros,'smoke':zeros,'observed':zeros,'route':[],'events':[],'metrics':{},'mode':'adaptive','perception_mode':'image-yolo','detections':[],'frame_request':None,'degraded':False,'scanning':False,'last_frame':None,'paired':None,'hazard_time':0,'hazards_running':False}
@@ -30,6 +30,7 @@ def verify(url='http://127.0.0.1:5174'):
             return route.fulfill(path=str(file))
         if path=='scene':body=scene
         elif path=='scenes':body=[{'id':scene['id'],'name':scene['name'],'source':'synthetic','checks_passed':True}]
+        elif path=='building-uses':body={'inferred':'residential','source':'synthetic fixture','profiles':[{'id':'residential','label':'Residential','rationale':'Synthetic test'}]}
         elif path.startswith('presets'):body=[]
         elif path=='state':
             seq[0]+=1;state['frame_request']={'seq':seq[0],'time':0,'pose':state['pose']};body=state

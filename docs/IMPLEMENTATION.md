@@ -4,11 +4,10 @@
 
 The default scene is a scanned sponsor property: `9A46aT7FCPg` (1276 W 38th St, unit 2, Floor 1),
 joined to CoStar PropertyId 22572250 and floor plan 6106437. Its collision grid, rooms, single
-verified exit, derived wall mesh and floor texture share the Matterport model frame (see
+verified exit, textured MatterPak mesh and source floor share the Matterport model frame (see
 [scene selection](SCENE_SELECTION.md) and [contracts](CONTRACTS.md)). Survivor detection in image
 mode is YOLO on browser-rendered RGB-D frames. The synthetic fixture and the analytic detector
-remain as labelled development/CI modes. Complete source meshes with matching materials have not passed validation; the rendered
-mesh remains derived from the schematic plan (see DATA_INTEGRATION.md). Motion is grid-based, not a continuous rigid-body simulation.
+remain as labelled development/CI modes. Both selected furnished MatterPak packages pass source-mesh validation (see DATA_INTEGRATION.md for render and mission evidence). Motion is grid-based, not a continuous rigid-body simulation.
 
 ```bash
 python3 -m venv .venv
@@ -152,5 +151,4 @@ Working tree: uncommitted changes on top of `origin/main` 930d175 (PR #1 fire mo
 ## Source asset integration update (2026-11-14)
 
 See [data integration evidence and workflow](DATA_INTEGRATION.md). Direct mesh assets exist;
-complete textured packages have not passed validation. Both sponsor scenes remain labeled
-derived fallbacks. CoStar capacity levels and reproducible offline experiments are implemented.
+complete textured MatterPak packages now pass validation for both selected scenes. Both use their own source mesh and materials. CoStar capacity levels and reproducible offline experiments are implemented.

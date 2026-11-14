@@ -619,6 +619,9 @@ async function loadSceneMesh(current: SceneData, version: number): Promise<void>
 function buildStaticScene(): void {
   const version = ++sceneLoadVersion;
   sceneReady = false;
+  lastFrameImage = null;
+  drawFeed(null);
+  $('camera-status').textContent = 'Waiting for this scene’s camera frame';
   clearGroup(staticLayer);
   clearGroup(wallLayer);
   avatars.forEach(a => avatarLayer.remove(a));
@@ -946,6 +949,7 @@ function drawDynamic(): void {
 async function sendFrame(snapshot: SimState): Promise<void> {
   const request = snapshot.frame_request;
   if (!renderer || !scene || !request || !sceneReady) return;
+  const frameSceneVersion = sceneLoadVersion;
   frameInFlight = true;
   lastFrameSeq = request.seq;
   try {
@@ -992,10 +996,12 @@ async function sendFrame(snapshot: SimState): Promise<void> {
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     lastFrameImage = image;
     const result = await api<FrameResult>('frames', { seq: request.seq, width: CAM_W, height: CAM_H, rgb, depth: btoa(binary), intrinsics: [FX, FY, CAM_W / 2, CAM_H / 2], pose }, AbortSignal.timeout(20000));
+    if (frameSceneVersion !== sceneLoadVersion) return;
     drawFeed(result);
     $('camera-status').textContent = `Frame ${result.seq} · t=${number(result.time)} s · ${result.accepted.length} person${result.accepted.length === 1 ? '' : 's'}`;
     void poll();
   } catch (error) {
+    if (frameSceneVersion !== sceneLoadVersion) return;
     $('camera-status').textContent = `Frame not accepted: ${error instanceof Error ? error.message.slice(0, 120) : 'error'}`;
   } finally {
     frameInFlight = false;
@@ -1006,6 +1012,7 @@ function drawFeed(result: FrameResult | null): void {
   const canvas = $('robot-feed') as HTMLCanvasElement;
   const ctx = canvas.getContext('2d')!;
   if (lastFrameImage) ctx.putImageData(lastFrameImage, 0, 0);
+  else ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!result) return;
   ctx.lineWidth = 2;
   ctx.font = '12px DM Sans, sans-serif';
