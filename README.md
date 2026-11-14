@@ -33,7 +33,7 @@ Hosted Gemini decisions are optional; without credentials the mission uses a det
 ```bash
 ./setup.sh
 # Another reviewed scene:
-RESCUETWIN_MODEL_ID=5p6KKvHqh3W ./setup.sh
+RESCUETWIN_MODEL_ID=XXXXXX ./setup.sh
 ```
 
 Use Python 3 (with venv support), Node 24 with npm (`nvm use` reads `.nvmrc`),
