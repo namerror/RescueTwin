@@ -13,3 +13,45 @@ main{max-width:1660px;margin:0 auto;padding:34px 4% 20px}.page-intro{display:fle
 @media(max-width:850px){.workspace-grid{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.compare-callout{grid-column:1/-1}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.viewport{height:500px}.environment-tag{display:none}.page-intro{align-items:flex-start}.run-badge{min-width:115px;padding-top:20px}.run-badge strong{font-size:23px}.page-intro h1 span{display:block;margin-top:4px}.panel-heading{padding:18px}.app-footer{flex-direction:column;gap:4px}.metric strong.text-value{font-size:24px}}
 @media(max-width:520px){main{padding:24px 14px 14px}.app-header{height:75px;padding:0 16px}.brand{font-size:21px;gap:10px}.brand small{font-size:7px;letter-spacing:1.4px}.brand-mark{height:36px;width:36px;font-size:24px}.connection{font-size:10px;gap:5px}.header-right{gap:0}.page-intro{gap:8px;margin-bottom:20px}.eyebrow{font-size:8px;letter-spacing:1.1px}h1{font-size:24px;line-height:1.25}.subtitle{font-size:11px}.run-badge{min-width:90px}.run-badge>span{font-size:8px;letter-spacing:.6px}.run-badge strong{font-size:21px}.run-badge small{font-size:8px;display:block;margin-top:4px}.disclosure{padding:14px;gap:10px;align-items:flex-start}.disclosure strong{font-size:11px}.disclosure p{font-size:10px}.disclosure-icon{margin-top:1px;flex-shrink:0}.metrics{gap:9px;margin-bottom:16px}.metric{padding:15px 12px}.metric>div{gap:5px;flex-wrap:wrap}.metric-label{font-size:9px}.metric small{font-size:9px}.metric strong{font-size:26px}.metric strong.text-value{font-size:23px}.metric-unit{font-size:9px}.sidebar{grid-template-columns:1fr}.compare-callout{grid-column:auto}.panel-heading{padding:16px}.panel-heading h2{font-size:16px}.scene-panel .panel-heading{align-items:flex-start;flex-direction:column;gap:6px}.viewport{height:390px}.layer-controls{gap:4px 9px}.layer-controls label{font-size:9px}.scene-toolbar{gap:5px}.scene-toolbar>.button{padding:4px;font-size:9px}.cell-inputs{gap:8px;flex-wrap:wrap}.cell-inputs input{width:75px}.cell-inputs .button{font-size:11px}.event-list li{gap:12px;padding:12px 16px}.event-list time{min-width:50px}.view-label{left:12px;top:12px;font-size:8px}.cell-readout{left:10px;right:10px;max-width:calc(100% - 20px);font-size:9px}.app-footer{font-size:9px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+
+/* Keep the scene and its controls above the mission report. */
+:root { font-family: 'DM Sans', system-ui, sans-serif; }
+.app-header { height: 54px; padding: 0 clamp(14px, 2.2vw, 36px); }
+.brand { font: 650 18px 'DM Sans', system-ui, sans-serif; letter-spacing: -.35px; }
+main { padding: 20px clamp(14px, 2.2vw, 36px); max-width: 1850px; }
+.page-intro { margin-bottom: 14px; align-items: center; }
+.page-intro h1 { font-size: clamp(19px, 2vw, 27px); margin: 0 0 2px; }
+.run-badge { padding: 0; min-width: 100px; }
+.run-badge > span { margin: 0 0 2px; }
+.run-badge strong { font-size: 21px; }
+.workspace-grid { gap: 14px; }
+.panel { border-radius: 6px; }
+.sidebar > .panel { padding: 15px; }
+.sidebar .panel-heading { padding-bottom: 12px; }
+.scene-toolbar { flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; }
+.camera-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.camera-controls [aria-pressed="true"] { color: var(--accent); background: #1b3934; border-color: #397268; }
+.camera-controls .button, .layer-controls label { font-size: 12px; }
+.viewport { height: clamp(430px, calc(100dvh - 200px), 860px); }
+.scene-panel:fullscreen { display: flex; flex-direction: column; background: #111923; overflow: auto; }
+.scene-panel:fullscreen .viewport { flex: 1 0 250px; height: auto; }
+.run-summary { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 16px 36px; margin: 0; padding: 13px 16px; border: 1px solid var(--border); border-radius: 6px; }
+.run-summary div { display: flex; align-items: baseline; gap: 8px; }
+.run-summary dt { color: var(--muted); font-size: 12px; }
+.run-summary dd { margin: 0; font-variant-numeric: tabular-nums; font-size: 13px; }
+@media(max-width: 520px) { .viewport { height: 390px; } }
+
+.hazard-readout {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  pointer-events: none;
+  padding: 5px 9px;
+  background: #0b131ee8;
+  border: 1px solid #314153;
+  border-radius: 4px;
+  color: #e2ebf5;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.hazard-readout:empty { display: none; }

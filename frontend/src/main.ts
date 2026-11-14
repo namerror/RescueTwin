@@ -10,6 +10,8 @@ interface SimState {
   scene: { id: string; name: string; width: number; height: number; resolution: number; walls: Cell[]; exits: Cell[]; rooms: { id: string; name: string; cells: Cell[] }[]; source: string };
   scenario: Scenario;
   time: number;
+  hazard_time?: number;
+  hazards_running?: boolean;
   status: string;
   robot: Cell;
   survivors: { id: string | number; position: Cell; status: string }[];
@@ -36,44 +38,60 @@ const key = (p: Cell): string => `${p[0]},${p[1]}`;
 $('app').innerHTML = `
   <a class="skip-link" href="#workspace">Skip to simulation</a>
   <header class="app-header">
-    <a class="brand" href="./" aria-label="RescueTwin home"><span class="brand-mark" aria-hidden="true">R<span>+</span></span><span>Rescue<span class="brand-light">Twin</span><small>EMERGENCY SIMULATION LAB</small></span></a>
-    <div class="header-right"><span class="environment-tag">LOCAL WORKBENCH</span><span id="connection" class="connection" role="status"><i></i>Connecting</span></div>
+    <a class="brand" href="./">RescueTwin</a>
+    <div class="header-right"><span id="connection" class="connection" role="status"><i></i>Connecting</span></div>
   </header>
   <main>
-    <section class="page-intro"><div><p class="eyebrow">OPERATIONS / SCENARIO WORKBENCH</p><h1>Plan the rescue. <span>Test the response.</span></h1><p class="subtitle">Explore hazard propagation and compare rescue strategies in a synthetic environment.</p></div><div class="run-badge"><span id="run-status">AWAITING BACKEND</span><strong id="clock">—<small> SIM TIME</small></strong></div></section>
-    <aside class="disclosure" aria-label="Simulation data disclosure"><span class="disclosure-icon" aria-hidden="true">i</span><div><strong>Synthetic fixture · Analytic perception</strong><p>This view uses simulated geometry, people and hazard fields. Human figures are simulation proxies. Camera-based detection is not connected yet.</p></div><span class="outline-tag">SIMULATION ONLY</span></aside>
-    <div class="metrics" aria-label="Mission metrics">
-      <article class="metric"><span class="metric-label">EVACUATED</span><div><strong id="evacuated">—</strong><span id="population" class="metric-unit">people</span></div><small>Backend-reported rescues</small></article>
-      <article class="metric"><span class="metric-label">EXPOSURE</span><div><strong id="exposure">—</strong><span class="metric-unit">normalized units</span></div><small>Illustrative hazard exposure</small></article>
-      <article class="metric"><span class="metric-label">DISTANCE</span><div><strong id="distance">—</strong><span class="metric-unit">metres</span></div><small>Robot travel distance</small></article>
-      <article class="metric"><span class="metric-label">PERCEPTION MODEL</span><div><strong class="text-value">Analytic</strong><span class="tiny-dot"></span></div><small>Observed cells from simulation state</small></article>
-    </div>
+    <section class="page-intro">
+      <div><h1 id="scene-heading">Waiting for scene</h1><p id="scene-size" class="subtle-label"></p></div>
+      <div class="run-badge"><span id="run-status">Awaiting backend</span><strong id="clock">—</strong></div>
+    </section>
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div class="workspace-grid" id="workspace" tabindex="-1">
       <section class="panel scene-panel" aria-labelledby="scene-heading">
-        <div class="panel-heading"><div><p class="eyebrow">DIGITAL TWIN / CUTAWAY</p><h2 id="scene-heading">Waiting for scene</h2></div><span id="scene-size" class="subtle-label">— × — cells</span></div>
-        <div class="scene-toolbar"><div class="layer-controls" aria-label="Map layers"><label><input type="checkbox" id="heat-layer" checked /><span class="swatch heat"></span>Heat</label><label><input type="checkbox" id="smoke-layer" checked /><span class="swatch smoke"></span>Smoke</label><label><input type="checkbox" id="observed-layer" /><span class="swatch observed"></span>Unobserved</label><label><input type="checkbox" id="route-layer" checked /><span class="swatch route"></span>Route</label></div><button id="recenter" class="button subtle small" title="Reset map camera">Recenter</button></div>
-        <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><span class="empty-symbol" aria-hidden="true">⌘</span><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div class="view-label">TOP-DOWN <span>3D CUTAWAY</span></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
-        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor proxy</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Exit</span><span><i class="legend-fire"></i>Ignition</span></div><span class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+        <div class="scene-toolbar">
+          <div class="camera-controls" aria-label="Camera">
+            <button id="orbit" class="button small" aria-pressed="true">3D</button>
+            <button id="plan" class="button small" aria-pressed="false">Plan</button>
+            <button id="recenter" class="button subtle small">Fit</button>
+            <button id="preview-hazards" class="button small" disabled>Preview hazards</button>
+            <button id="focus-fire" class="button subtle small" disabled>Find fire</button>
+            <button id="expand" class="button subtle small">Fullscreen</button>
+          </div>
+          <div class="layer-controls" aria-label="Scene layers">
+            <label><input type="checkbox" id="walls-layer" checked />Walls</label>
+            <label><input type="checkbox" id="heat-layer" checked /><span class="swatch heat"></span>Fire / heat</label>
+            <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
+            <label><input type="checkbox" id="observed-layer" />Unobserved</label>
+            <label><input type="checkbox" id="route-layer" checked /><span class="swatch route"></span>Route</label>
+          </div>
+        </div>
+        <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
+        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor proxy</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Exit</span><span><i class="legend-fire"></i>Ignition</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates start at (0, 0). Choose an editing tool in Scenario setup, then apply it here or click the map. Heat and smoke display with intensity clamped to 0–1; inspection shows raw values.</p></details>
       </section>
       <aside class="sidebar">
-        <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><p class="eyebrow">MISSION CONTROL</p><h2 id="controls-heading">Run simulation</h2></div><span class="step-number">01</span></div>
+        <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Run simulation</h2></div></div>
           <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Adaptive</span></label><label><input type="radio" name="mode" value="baseline" /><span>Baseline</span></label></div></fieldset><p id="mode-description" class="field-hint">Strategy sent to the backend when starting a run.</p>
           <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
         </section>
-        <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><p class="eyebrow">SCENARIO SETUP</p><h2 id="scenario-heading">Place the conditions</h2></div><span class="step-number">02</span></div>
+        <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Scenario</h2></div></div>
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
           <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
           <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
         </section>
-        <section class="panel compare-callout"><p class="eyebrow">STRATEGY BENCHMARK</p><h2>Same scenario. Two strategies.</h2><p>Request a paired report for adaptive and baseline planning from the backend.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">Apply scenario changes before comparing.</p></section>
+        <section class="panel compare-callout"><h2>Compare runs</h2><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">Apply scenario changes before comparing.</p></section>
       </aside>
-      <section class="panel event-panel" aria-labelledby="events-heading"><div class="panel-heading compact"><div><p class="eyebrow">MISSION TELEMETRY</p><h2 id="events-heading">Event timeline</h2></div><span class="subtle-label">5 Hz state polling</span></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
-      <section id="comparison" class="panel comparison-panel" aria-labelledby="comparison-heading" hidden><div class="panel-heading compact"><div><p class="eyebrow">BACKEND REPORT</p><h2 id="comparison-heading">Strategy comparison</h2></div><button id="close-comparison" class="button subtle small">Close</button></div><p id="comparison-context" class="field-hint"></p><div id="comparison-body"></div></section>
+      <dl class="run-summary" aria-label="Mission metrics">
+        <div><dt>Evacuated</dt><dd><strong id="evacuated">—</strong> <span id="population"></span></dd></div>
+        <div><dt>Exposure (normalized)</dt><dd id="exposure">—</dd></div>
+        <div><dt>Distance (m)</dt><dd id="distance">—</dd></div>
+      </dl>
+      <section class="panel event-panel" aria-labelledby="events-heading"><div class="panel-heading compact"><div><h2 id="events-heading">Event timeline</h2></div></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
+      <section id="comparison" class="panel comparison-panel" aria-labelledby="comparison-heading" hidden><div class="panel-heading compact"><div><h2 id="comparison-heading">Strategy comparison</h2></div><button id="close-comparison" class="button subtle small">Close</button></div><p id="comparison-context" class="field-hint"></p><div id="comparison-body"></div></section>
     </div>
-    <footer class="app-footer"><span><strong>RescueTwin</strong> / Emergency response research</span><span>Synthetic fixture · Analytic perception · No camera feed or detections</span></footer>
+
   </main>`;
 
 let state: SimState | null = null;
@@ -91,10 +109,52 @@ let renderer: THREE.WebGLRenderer | null = null;
 let controls: OrbitControls | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
 const world = new THREE.Scene();
-world.background = new THREE.Color('#0d151f');
+world.background = new THREE.Color('#20262d');
 const staticLayer = new THREE.Group();
+const wallLayer = new THREE.Group();
+function createField(altitude: number, order: number) {
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d')!;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({
+    map: texture, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = altitude;
+  mesh.renderOrder = order;
+  return { canvas, context, texture, mesh };
+}
+
+const heatField = createField(0.027, 1);
+const smokeField = createField(1, 2);
+const smokeLimit = 320;
+const smokeClouds = new THREE.InstancedMesh(
+  new THREE.SphereGeometry(1, 8, 5),
+  new THREE.MeshBasicMaterial({ color: '#c6d1dc', transparent: true, opacity: 0.24, depthWrite: false }),
+  smokeLimit,
+);
+smokeClouds.count = 0;
+smokeClouds.frustumCulled = false;
+smokeClouds.renderOrder = 3;
+const smokeTransform = new THREE.Object3D();
+const heatColor = new THREE.Color();
+const flameLimit = 256;
+const flames = new THREE.InstancedMesh(
+  new THREE.ConeGeometry(0.34, 1, 6),
+  new THREE.MeshStandardMaterial({ color: '#ff962e', emissive: '#ed4c0a', emissiveIntensity: 1.25 }),
+  flameLimit,
+);
+flames.count = 0;
+flames.frustumCulled = false;
+const flameTransform = new THREE.Object3D();
+let focusCell: Cell | null = null;
+const hotColor = new THREE.Color('#e6451d');
+let view: 'orbit' | 'plan' = 'orbit';
 const dynamicLayer = new THREE.Group();
-world.add(staticLayer, dynamicLayer);
+world.add(staticLayer, wallLayer, heatField.mesh, smokeField.mesh, smokeClouds, flames, dynamicLayer);
 world.add(new THREE.HemisphereLight(0xd6ebff, 0x24344a, 2.5));
 const sunlight = new THREE.DirectionalLight(0xffffff, 3);
 sunlight.position.set(-10, 30, 15);
@@ -102,6 +162,7 @@ world.add(sunlight);
 const raycaster = new THREE.Raycaster();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const pointer = new THREE.Vector2();
+let blockedCells = new Set<string>();
 const layers = { heat: true, smoke: true, observed: false, route: true };
 
 function notify(message: string, error = false): void {
@@ -169,6 +230,9 @@ function syncUI(): void {
   $('connection').innerHTML = `<i></i>${connected ? 'Backend connected' : state ? 'Connection lost' : 'Backend offline'}`;
   $('run-status').textContent = state ? state.status.toUpperCase() : 'AWAITING BACKEND';
   $('run-status').classList.toggle('running', status === 'running');
+  const preview = $<HTMLButtonElement>('preview-hazards');
+  preview.disabled = !connected || busy || dirty || status === 'running' || state?.hazard_time === undefined || state.hazard_time >= 600;
+  preview.textContent = state?.hazards_running ? 'Pause hazards' : 'Preview hazards';
   $('start') .textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
   ($('start') as HTMLButtonElement).disabled = !connected || busy || dirty || !['idle', 'paused'].includes(status ?? '');
   ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running';
@@ -207,7 +271,7 @@ function acceptState(next: SimState): void {
   }
   if (!dirty && next.status.toLowerCase() !== 'idle') document.querySelector<HTMLInputElement>(`input[name="mode"][value="${next.mode}"]`)!.checked = true;
   $('scene-heading').textContent = next.scene.name;
-  $('scene-size').textContent = `${next.scene.width} × ${next.scene.height} cells · ${number(next.scene.resolution, 3)} m/cell`;
+  $('scene-size').textContent = `${number(next.scene.width * next.scene.resolution)} × ${number(next.scene.height * next.scene.resolution)} m · ${number(next.scene.resolution, 3)} m/cell`;
   $('clock').innerHTML = `${number(next.time)}<small> s SIM TIME</small>`;
   $('evacuated').textContent = number(next.metrics.evacuated, 0);
   $('population').textContent = `/ ${next.scenario.survivors.length} people`;
@@ -251,6 +315,7 @@ async function poll(): Promise<void> {
 
 function clearGroup(group: THREE.Group): void {
   group.traverse(object => {
+    if (object instanceof THREE.InstancedMesh) object.dispose();
     if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
       object.geometry.dispose();
       const materials = Array.isArray(object.material) ? object.material : [object.material];
@@ -273,9 +338,16 @@ function box(group: THREE.Group, cell: Cell, width: number, height: number, dept
 
 function buildStaticScene(): void {
   clearGroup(staticLayer);
+  clearGroup(wallLayer);
   if (!state) return;
   const { width, height, walls, exits, rooms } = state.scene;
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(width, 0.16, height), new THREE.MeshStandardMaterial({ color: '#182633', roughness: 1 }));
+  for (const field of [heatField, smokeField]) {
+    field.canvas.width = width * 4;
+    field.canvas.height = height * 4;
+    field.mesh.scale.set(width, height, 1);
+  }
+  smokeField.mesh.position.y = Math.min(5, 1.15 / state.scene.resolution) * 0.9;
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(width, 0.16, height), new THREE.MeshStandardMaterial({ color: '#39434d', roughness: 1 }));
   floor.position.y = -0.12;
   staticLayer.add(floor);
   const roomColors = ['#233746', '#253b47', '#203746', '#2b3946'];
@@ -285,10 +357,23 @@ function buildStaticScene(): void {
   for (let x = 0; x <= width; x++) points.push(new THREE.Vector3(x - width / 2, 0.005, -height / 2), new THREE.Vector3(x - width / 2, 0.005, height / 2));
   for (let y = 0; y <= height; y++) points.push(new THREE.Vector3(-width / 2, 0.005, y - height / 2), new THREE.Vector3(width / 2, 0.005, y - height / 2));
   staticLayer.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: '#3b5062', transparent: true, opacity: 0.3 })));
-  walls.forEach(cell => {
-    box(staticLayer, cell, 0.97, 0.72, 0.97, '#62778a', 0.36);
-    box(staticLayer, cell, 0.97, 0.035, 0.97, '#8ba1b1', 0.735);
-  });
+  const blocked = blockedCells = new Set(walls.map(key));
+  const exposed = walls.filter(([x, y]) =>
+    [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].some(([col, row]) =>
+      col >= 0 && col < width && row >= 0 && row < height && !blocked.has(key([col, row]))
+    )
+  );
+  const wallHeight = Math.min(5, 1.15 / state.scene.resolution);
+  if (exposed.length) {
+    const mesh = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, wallHeight, 1),
+      new THREE.MeshStandardMaterial({ color: '#acb4b8', roughness: 0.85 }),
+      exposed.length,
+    );
+    const matrix = new THREE.Matrix4();
+    exposed.forEach((cell, i) => mesh.setMatrixAt(i, matrix.setPosition(position(cell, wallHeight / 2))));
+    wallLayer.add(mesh);
+  }
   exits.forEach(cell => {
     box(staticLayer, cell, 0.9, 0.045, 0.9, '#2bcba1', 0.045);
     const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), position(cell, 0.1).add(new THREE.Vector3(0, 0, 0.28)), 0.6, '#d0fff0', 0.22, 0.22);
@@ -310,21 +395,90 @@ function human(cell: Cell, rescued: boolean): void {
   dynamicLayer.add(ring);
 }
 
+function drawHazardField(sim: SimState): void {
+  const { width, height } = sim.scene;
+  const heatPixels = heatField.context.createImageData(width * 4, height * 4);
+  const smokePixels = smokeField.context.createImageData(width * 4, height * 4);
+  let burning = 0;
+  let smoky = 0;
+  let flameCount = 0;
+  const denseSmoke: { cell: Cell; density: number }[] = [];
+  let hottest = 0;
+  focusCell = null;
+  const smokeBand = (value: number) => value >= 0.5 ? 3 : value >= 0.2 ? 2 : value >= 0.015 ? 1 : 0;
+  const smokeColors = [[0, 0, 0, 0], [212, 221, 229, 130], [173, 186, 201, 180], [129, 144, 161, 225]];
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      if (blockedCells.has(key([col, row]))) continue;
+      const heat = sim.heat[row]?.[col] ?? 0;
+      const density = sim.smoke[row]?.[col] ?? 0;
+      const smoke = smokeBand(density);
+      if (layers.smoke && density >= 0.06) denseSmoke.push({ cell: [col, row], density });
+      if (smoke) smoky++;
+      if (heat >= 0.3) {
+        burning++;
+        if (heat > hottest) {
+          hottest = heat;
+          focusCell = [col, row];
+        }
+        if (layers.heat && flameCount < flameLimit) {
+          const height = 0.75 + Math.min(heat, 1) * 1.6;
+          flameTransform.position.copy(position([col, row], height / 2));
+          flameTransform.scale.set(1, height, 1);
+          flameTransform.updateMatrix();
+          flames.setMatrixAt(flameCount++, flameTransform.matrix);
+        }
+      }
+      const band = layers.smoke ? smoke : 0;
+      let color = smokeColors[0];
+      if (layers.observed && !sim.observed[row]?.[col] && !band) color = [7, 11, 17, 155];
+      if (layers.heat && heat >= 0.04) {
+        heatColor.set('#f7ba57').lerp(hotColor, THREE.MathUtils.clamp(heat, 0, 1));
+        const hex = heatColor.getHex();
+        color = [hex >> 16, (hex >> 8) & 255, hex & 255, Math.max(color[3], 90 + 150 * heat)];
+      }
+      const left = band >= 1 && smokeBand(sim.smoke[row]?.[col - 1] ?? 0) < band;
+      const right = band >= 1 && smokeBand(sim.smoke[row]?.[col + 1] ?? 0) < band;
+      const top = band >= 1 && smokeBand(sim.smoke[row - 1]?.[col] ?? 0) < band;
+      const bottom = band >= 1 && smokeBand(sim.smoke[row + 1]?.[col] ?? 0) < band;
+      if (!color[3] && !band) continue;
+      for (let y = 0; y < 4; y++) {
+        for (let x = 0; x < 4; x++) {
+          const edge = (left && x === 0) || (right && x === 3) || (top && y === 0) || (bottom && y === 3);
+          const offset = ((row * 4 + y) * heatPixels.width + col * 4 + x) * 4;
+          if (color[3]) heatPixels.data.set(color, offset);
+          if (band) smokePixels.data.set(edge ? [236, 242, 248, 225] : smokeColors[band], offset);
+        }
+      }
+    }
+  }
+  const stride = Math.max(1, Math.ceil(denseSmoke.length / smokeLimit));
+  let cloudCount = 0;
+  for (let i = 0; i < denseSmoke.length; i += stride) {
+    const { cell, density } = denseSmoke[i];
+    const spread = 0.48 + Math.min(1, density) * 0.42;
+    smokeTransform.position.copy(position(cell, smokeField.mesh.position.y - 0.45));
+    smokeTransform.scale.set(spread, 0.4 + spread * 0.3, spread);
+    smokeTransform.updateMatrix();
+    smokeClouds.setMatrixAt(cloudCount++, smokeTransform.matrix);
+  }
+  smokeClouds.count = cloudCount;
+  smokeClouds.visible = view === 'orbit';
+  smokeClouds.instanceMatrix.needsUpdate = true;
+  flames.count = flameCount;
+  flames.instanceMatrix.needsUpdate = true;
+  $<HTMLButtonElement>('focus-fire').disabled = focusCell === null;
+  $('hazard-readout').textContent = `${number(sim.hazard_time ?? sim.time)} s hazards · ${burning} fire cells · ${smoky} smoke cells`;
+  heatField.context.putImageData(heatPixels, 0, 0);
+  smokeField.context.putImageData(smokePixels, 0, 0);
+  heatField.texture.needsUpdate = true;
+  smokeField.texture.needsUpdate = true;
+}
+
 function drawDynamic(): void {
   clearGroup(dynamicLayer);
   if (!state) return;
-  const walls = new Set(state.scene.walls.map(key));
-  for (let y = 0; y < state.scene.height; y++) {
-    for (let x = 0; x < state.scene.width; x++) {
-      if (walls.has(`${x},${y}`)) continue;
-      const cell: Cell = [x, y];
-      const heat = THREE.MathUtils.clamp(state.heat[y]?.[x] ?? 0, 0, 1);
-      const smoke = THREE.MathUtils.clamp(state.smoke[y]?.[x] ?? 0, 0, 1);
-      if (layers.heat && heat > 0.01) box(dynamicLayer, cell, 0.96, 0.045 + heat * 0.2, 0.96, new THREE.Color('#efb145').lerp(new THREE.Color('#f04f35'), heat), 0.07 + heat * 0.1, 0.25 + heat * 0.65);
-      if (layers.smoke && smoke > 0.01) box(dynamicLayer, cell, 0.94, 0.04 + smoke * 0.35, 0.94, '#9ea6b5', 0.18 + smoke * 0.12, smoke * 0.5);
-      if (layers.observed && !(state.observed[y]?.[x] > 0)) box(dynamicLayer, cell, 0.98, 0.02, 0.98, '#050a13', 0.39, 0.78);
-    }
-  }
+  drawHazardField(state);
   if (layers.route && state.route.length > 1) {
     // Thin tubes remain visible on high-DPI displays, unlike WebGL line widths.
     const material = new THREE.MeshBasicMaterial({ color: '#55e3c2' });
@@ -345,11 +499,9 @@ function drawDynamic(): void {
   else state.survivors.forEach(person => {
     if (!['evacuated', 'dead', 'deceased'].includes(person.status.toLowerCase())) human(person.position, person.status.toLowerCase() === 'rescued');
   });
-  (editing && draft ? draft.ignitions : state.scenario.ignitions).forEach(cell => {
-    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.65, 6), new THREE.MeshStandardMaterial({ color: '#ff9a46', emissive: '#da3d13', emissiveIntensity: 0.7 }));
-    flame.position.copy(position(cell, 0.43));
-    dynamicLayer.add(flame);
-  });
+  if (editing && layers.heat && draft) {
+    draft.ignitions.forEach(cell => box(dynamicLayer, cell, 0.6, 0.14, 0.6, '#ff9a46', 0.1));
+  }
   box(dynamicLayer, state.robot, 0.53, 0.27, 0.6, '#5ce0ca', 0.24);
   box(dynamicLayer, state.robot, 0.26, 0.13, 0.24, '#d9fff7', 0.44);
   for (const side of [-0.29, 0.29]) {
@@ -367,16 +519,46 @@ function drawDynamic(): void {
 
 function recenter(): void {
   if (!camera || !controls) return;
-  const extent = state ? Math.max(state.scene.height, state.scene.width / Math.max(camera.aspect, 0.25)) : 20;
-  const distance = extent * 1.48;
-  camera.position.set(0, distance, distance * 0.35);
-  camera.near = 0.1;
+  const direction = view === 'plan' ? new THREE.Vector3(0, 1, 0.0001) : new THREE.Vector3(0.72, 0.8, 1);
+  direction.normalize();
+  const width = state?.scene.width ?? 20;
+  const height = state?.scene.height ?? 20;
+  const target = new THREE.Vector3(0, 0.5, 0);
+  camera.position.copy(target).add(direction);
+  camera.lookAt(target);
+  const inverse = camera.quaternion.clone().invert();
+  const slopeY = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.88;
+  const slopeX = slopeY * Math.max(camera.aspect, 0.1);
+  let distance = 2;
+  for (const x of [-width / 2, width / 2]) {
+    for (const z of [-height / 2, height / 2]) {
+      for (const y of [0, 5]) {
+        const corner = new THREE.Vector3(x, y, z).sub(target).applyQuaternion(inverse);
+        distance = Math.max(distance, corner.z + Math.max(Math.abs(corner.x) / slopeX, Math.abs(corner.y) / slopeY));
+      }
+    }
+  }
+  camera.position.copy(target).addScaledVector(direction, distance);
   camera.far = Math.max(1000, distance * 10);
   camera.updateProjectionMatrix();
-  controls.target.set(0, 0, 0);
-  controls.maxDistance = distance * 3;
-  controls.minDistance = Math.max(3, extent * 0.25);
+  controls.target.copy(target);
+  controls.maxDistance = distance * 4;
+  controls.minDistance = 0.8;
   controls.update();
+}
+
+function setView(next: typeof view): void {
+  view = next;
+  smokeClouds.visible = next === 'orbit';
+  if (controls) {
+    controls.enableRotate = next === 'orbit';
+    controls.mouseButtons.LEFT = next === 'orbit' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+    controls.touches.ONE = next === 'orbit' ? THREE.TOUCH.ROTATE : THREE.TOUCH.PAN;
+  }
+  $('orbit').setAttribute('aria-pressed', String(next === 'orbit'));
+  $('plan').setAttribute('aria-pressed', String(next === 'plan'));
+  $('map-help').textContent = next === 'plan' ? 'Drag to pan · Scroll to zoom' : 'Drag to orbit · Scroll to zoom · Right-drag to pan';
+  recenter();
 }
 
 function setupRenderer(): void {
@@ -385,7 +567,7 @@ function setupRenderer(): void {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     const canvas = renderer.domElement;
-    canvas.setAttribute('aria-label', 'Synthetic scene: walls, robot, survivor proxies, hazards and planned route. Use the cell inspector below for keyboard access.');
+    canvas.setAttribute('aria-label', '3D scene: walls, robot, survivor proxies, hazards and planned route. Use the cell inspector below for keyboard access.');
     canvas.setAttribute('role', 'img');
     $('viewport').prepend(canvas);
     camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
@@ -393,14 +575,15 @@ function setupRenderer(): void {
     controls.enableDamping = true;
     controls.maxPolarAngle = Math.PI / 2.4;
     controls.minPolarAngle = 0;
-    const observer = new ResizeObserver(() => {
+    const resize = () => {
       const { width, height } = $('viewport').getBoundingClientRect();
       renderer!.setSize(width, height);
       camera!.aspect = width / Math.max(height, 1);
       camera!.updateProjectionMatrix();
-    });
-    observer.observe($('viewport'));
-    recenter();
+    };
+    resize();
+    new ResizeObserver(resize).observe($('viewport'));
+    setView(view);
     renderer.setAnimationLoop(() => {
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
@@ -470,6 +653,14 @@ async function mutation(work: () => Promise<void>): Promise<void> {
   catch (error) { notify(error instanceof Error ? error.message : 'The request failed.', true); }
   finally { busy = false; syncUI(); await poll(); }
 }
+
+$('preview-hazards').addEventListener('click', () => {
+  void mutation(async () => {
+    const next = await api<unknown>('control', { action: 'toggle_hazards' });
+    validateState(next);
+    acceptState(next);
+  });
+});
 
 for (const action of ['start', 'pause', 'reset'] as const) {
   $(action).addEventListener('click', () => void mutation(async () => {
@@ -581,6 +772,31 @@ $('compare').addEventListener('click', () => void mutation(async () => {
 }));
 $('close-comparison').addEventListener('click', () => { $('comparison').hidden = true; });
 $('recenter').addEventListener('click', recenter);
+$('focus-fire').addEventListener('click', () => {
+  if (!focusCell || !camera || !controls) return;
+  const target = position(focusCell);
+  const offset = camera.position.clone().sub(controls.target).setLength(13);
+  controls.target.copy(target);
+  camera.position.copy(target).add(offset);
+  controls.update();
+});
+$('orbit').addEventListener('click', () => setView('orbit'));
+$('plan').addEventListener('click', () => setView('plan'));
+$('walls-layer').addEventListener('change', () => {
+  wallLayer.visible = $<HTMLInputElement>('walls-layer').checked;
+});
+$('expand').addEventListener('click', async () => {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await $('viewport').closest('section')?.requestFullscreen();
+  } catch {
+    notify('Fullscreen is unavailable in this browser.', true);
+  }
+});
+document.addEventListener('fullscreenchange', () => {
+  $('expand').textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen';
+  requestAnimationFrame(recenter);
+});
 for (const name of ['heat', 'smoke', 'observed', 'route'] as const) {
   $(`${name}-layer`).addEventListener('change', () => { layers[name] = ($(`${name}-layer`) as HTMLInputElement).checked; drawDynamic(); });
 }
