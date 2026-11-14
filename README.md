@@ -31,32 +31,58 @@ rendered in the browser; an analytic fixture detector remains for CI and the syn
 Hosted Gemini decisions are optional; without credentials the mission uses a deterministic policy.
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[test]'
-uvicorn rescuetwin.api:app --host 127.0.0.1 --port 8000
+./setup.sh
+# Another reviewed scene:
+RESCUETWIN_MODEL_ID=5p6KKvHqh3W ./setup.sh
 ```
 
-In another terminal:
+Use Python 3 (with venv support), Node 24 with npm (`nvm use` reads `.nvmrc`),
+and `curl` on Linux/macOS or WSL. The first run installs locked Python 3.12.3
+and Python dependencies with uv 0.11.25 (bootstrapped locally if needed), runs
+`npm ci`, prepares missing textured scene assets, and starts both services.
+Later runs skip dependency installation. After dependency changes or a damaged
+installation, run `./setup.sh --install` once to resynchronize and start.
+No virtualenv activation or second terminal is needed. Ctrl+C stops both services;
+if either service exits, the launcher stops its sibling. It never kills existing
+services to reclaim an occupied port.
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+Defaults are model `9A46aT7FCPg`, backend `http://127.0.0.1:8000`, and frontend
+`http://127.0.0.1:5173`. Configure `RESCUETWIN_MODEL_ID`,
+`RESCUETWIN_BACKEND_PORT`, and `RESCUETWIN_FRONTEND_PORT` in root `.env` or as
+exported variables; exported values win. `.env` accepts literal `KEY=value`
+assignments with optional matching quotes, not shell commands/interpolation.
+The frontend proxy and backend scene ID are selected automatically.
+
+For an uncached scene, place the sponsor kit at `data/costar-hackathon-kit` and
+configure `MATTERPORT_API_KEY` / `MATTERPORT_API_TOKEN` (or `MP_API_KEY` /
+`MP_API_TOKEN`) in root `.env`. Downloads use the supported MatterPak bundle API.
+A complete validated cached bundle needs neither sponsor credentials nor the kit.
+The launcher checks asset hashes and rebuilds incomplete bundles in staging;
+failed preparation leaves the previous bundle intact and stops startup. New model
+IDs require reviewed `scenes/MODEL.json` annotations with verified exits.
+YOLO weights are downloaded only when absent under `data/weights`; `YOLO_WEIGHTS`
+can point to an existing local model. Warm launches use cached assets and perform
+no dependency synchronization or asset downloads. Gemini is used when configured;
+otherwise the existing deterministic mission policy runs. A mission starts only
+when the operator requests it in the browser.
+
+Dependency maintainers: update `uv.lock` with uv 0.11.25 and commit changes to
+`pyproject.toml`/`uv.lock` together; commit frontend dependency changes with
+`package-lock.json`. Teammates then run `./setup.sh --install`. Files under
+`data/`, `.venv/`, and `.bootstrap-venv/` remain local and ignored.
 
 Open the Vite localhost URL. Place survivors and ignition points, run either policy, or compare both on identical starting conditions. Exposure is in illustrative units. Use reset before editing. The operator view contains ground truth; `/api/observations` contains robot knowledge only. Keep this development server on localhost; it has no authentication.
 
 ```bash
-python3 -m pytest -q
-python3 scripts/inspect_sponsor.py 9A46aT7FCPg --property 22572250 --plan 6106437
-python3 scripts/prepare_scene.py fetch 9A46aT7FCPg   # needs Matterport credentials
-python3 scripts/prepare_scene.py build 9A46aT7FCPg
+.venv/bin/python -m pytest -q
+.venv/bin/python scripts/inspect_sponsor.py 9A46aT7FCPg --property 22572250 --plan 6106437
+.venv/bin/python scripts/prepare_scene.py fetch 9A46aT7FCPg   # needs Matterport credentials
+.venv/bin/python scripts/prepare_scene.py build 9A46aT7FCPg
 ```
 
 The sponsor kit is ignored by Git at `data/costar-hackathon-kit`. Prepared bundles stay in ignored `data/prepared/`. Exits come only from manual annotations in `scenes/`. Keep the browser tab open during image-mode runs, because it renders the robot camera.
 
-Optional hosted reasoning: install `pip install -e '.[agent]'`, export `GEMINI_API_KEY` and optionally `GEMINI_MODEL`, then restart the backend. API access/model availability must be verified against your account. Failed or rejected decisions pause the run. For image perception install `pip install -e '.[vision]'`; YOLO weights download on first use. The survivor model is CesiumMan (CC BY 4.0, Cesium).
+Optional hosted reasoning (dependencies included by setup): export `GEMINI_API_KEY` and optionally `GEMINI_MODEL`, then restart the backend. API access/model availability must be verified against your account. Failed or rejected decisions pause the run. Image perception dependencies and weights are prepared by setup. The survivor model is CesiumMan (CC BY 4.0, Cesium).
 
 See [agent setup](AGENTS.md), [architecture](docs/ARCHITECTURE.md), [MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md).
 

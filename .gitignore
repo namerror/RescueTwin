@@ -9,3 +9,5 @@ frontend/dist/
 .env.*
 !.env.example
 *.pt
+
+.bootstrap-venv/
