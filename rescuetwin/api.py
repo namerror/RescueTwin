@@ -157,6 +157,7 @@ class Scenario(BaseModel):
     ignitions:list[list[int]]=Field(max_length=20)
     seed:int=7
     scene_id:str|None=None
+    building_use:str|None=None
 
 class Control(BaseModel):
     action:str
@@ -230,7 +231,15 @@ def scene_file(scene_id:str,name:str):
     return FileResponse(path,media_type=mime)
 
 @app.get('/api/presets')
-def preset_list(seed:int=7):return presets.available(sim.scene,seed)
+def preset_list(seed:int=7,building_use:str|None=None):
+    try:return presets.available(sim.scene,seed,building_use)
+    except ValueError as e:raise HTTPException(422,str(e)) from e
+
+@app.get('/api/building-uses')
+def building_uses():
+    from . import occupancy
+    use,source=occupancy.resolve(sim.scene)
+    return dict(inferred=use,source=source,profiles=[dict(id=k,label=v['label'],rationale=v['rationale']) for k,v in occupancy.PROFILES.items()])
 
 @app.get('/api/perception')
 def perception_status():
@@ -244,6 +253,7 @@ def scenario(body:Scenario):
     global sim
     if sim.status!='idle' or sim.hazards_running or busy():raise HTTPException(409,'Reset before editing a scenario')
     data=body.model_dump();data['scene_id']=data['scene_id'] or sim.scene.id
+    if data.get('building_use') is None:data.pop('building_use',None)
     try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     return sim.state()

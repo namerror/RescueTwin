@@ -11,7 +11,7 @@ type Cell = [number, number];
 type Mode = 'adaptive' | 'baseline';
 type Perception = 'image-yolo' | 'analytic-development';
 type Tool = 'inspect' | 'survivor' | 'fire' | 'remove';
-interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string }
+interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string }
 interface CostarField { key: string; label: string; value: unknown; units: string | null; field_path: string; source_id: number; dataset: string; derivation: string; note?: string }
 interface SceneData {
   id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
@@ -46,7 +46,8 @@ interface Preset { id: string; label: string; note: string; scenario?: Scenario;
 
 let sceneReady = false, sceneLoadVersion = 0;
 const sourceCutaway = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1.6);
-let cutawayOn = true;
+let cutawayOn = true, cutawayHeight = 1.6;
+const NO_CUT = 1e6;  // plane constant that clips nothing (robot camera, cutaway off)
 const CAM_W = 512, CAM_H = 384, CAM_HFOV = Math.PI / 2;
 const CAM_VFOV = 2 * Math.atan(Math.tan(CAM_HFOV / 2) * CAM_H / CAM_W);
 const FX = (CAM_W / 2) / Math.tan(CAM_HFOV / 2), FY = (CAM_H / 2) / Math.tan(CAM_VFOV / 2);
@@ -60,7 +61,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const number = (value: number, digits = 1): string => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 const same = (a: Cell, b: Cell): boolean => a[0] === b[0] && a[1] === b[1];
-const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id });
+const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}) });
 const key = (p: Cell): string => `${p[0]},${p[1]}`;
 
 $('app').innerHTML = `
@@ -118,6 +119,8 @@ $('app').innerHTML = `
           <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
         </section>
         <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Place the conditions</h2></div></div>
+          <label class="seed-label" for="building-use" title="Static building information only; it changes where the robot searches first, never what it knows about people">Building use <select id="building-use"><option value="">Auto</option></select></label>
+          <p id="building-use-hint" class="field-hint"></p>
           <div id="presets" class="preset-list"></div>
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
@@ -350,13 +353,37 @@ async function loadScene(): Promise<void> {
   buildStaticScene();
   recenter();
   renderSceneInfo();
+  await loadBuildingUses();
   await loadPresets();
   const list = await api<{ id: string; name: string; source: string; checks_passed: boolean | null }[]>('scenes');
   ($('scene-select') as HTMLSelectElement).innerHTML = list.map(s => `<option value="${escape(s.id)}"${s.id === scene!.id ? ' selected' : ''}>${escape(s.name)}${s.source === 'synthetic' ? ' (synthetic)' : ''}</option>`).join('');
 }
 
+interface BuildingUses { inferred: string; source: string; profiles: { id: string; label: string; rationale: string }[] }
+let buildingUses: BuildingUses | null = null;
+
+async function loadBuildingUses(): Promise<void> {
+  buildingUses = await api<BuildingUses>('building-uses');
+  const auto = buildingUses.profiles.find(p => p.id === buildingUses!.inferred);
+  ($('building-use') as HTMLSelectElement).innerHTML = `<option value="">Auto: ${escape(auto?.label ?? buildingUses.inferred)}</option>` +
+    buildingUses.profiles.map(p => `<option value="${escape(p.id)}">${escape(p.label)}</option>`).join('');
+  syncBuildingUse();
+}
+
+function syncBuildingUse(): void {
+  const select = $('building-use') as HTMLSelectElement;
+  if (!buildingUses) return;
+  if (document.activeElement !== select) select.value = draft?.building_use ?? '';
+  select.disabled = !idle() || busy;
+  const chosen = buildingUses.profiles.find(p => p.id === (select.value || buildingUses!.inferred));
+  $('building-use-hint').textContent = chosen
+    ? `${chosen.rationale} ${select.value ? 'Operator selection.' : `From ${buildingUses.source}.`} Search order only; not occupancy data.`
+    : '';
+}
+
 async function loadPresets(): Promise<void> {
-  const presets = await api<Preset[]>(`presets?seed=${draft?.seed ?? 7}`);
+  const use = draft?.building_use ? `&building_use=${encodeURIComponent(draft.building_use)}` : '';
+  const presets = await api<Preset[]>(`presets?seed=${draft?.seed ?? 7}${use}`);
   $('presets').innerHTML = presets.map((p, i) => `<button class="button subtle small preset" data-index="${i}" data-unavailable="${p.unavailable ? 1 : 0}" title="${escape(p.note)}">${escape(p.label)}</button>`).join('') +
     presets.filter(p => p.id.startsWith('capacity-')).slice(0, 1).map(p => `<p class="field-hint capacity-note">${escape(p.note)}</p>`).join('');
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => b.addEventListener('click', () => {
@@ -429,7 +456,10 @@ function acceptState(next: SimState): void {
   $('unresolved-note').textContent = next.status === 'unresolved' ? 'unresolved: remaining people not confirmed absent' : next.holding ? 'holding: no viable route yet' : '';
   $('exposure').textContent = number(next.metrics.exposure, 2);
   $('distance').textContent = number(next.metrics.distance, 2);
-  $('route-note').textContent = `${next.metrics.route_changes ?? 0} changes · ${next.metrics.rooms_inspected ?? 0} rooms inspected`;
+  $('route-note').textContent = `${next.metrics.route_changes ?? 0} changes · ${next.metrics.rooms_inspected ?? 0} rooms inspected` +
+    (next.metrics.robot_hazard_s ? ` · ${number(next.metrics.robot_hazard_s, 1)} s robot in fire/smoke` : '') +
+    (next.metrics.last_resort_escorts ? ` · ${next.metrics.last_resort_escorts} last-resort escort` : '');
+  syncBuildingUse();
   const image = next.perception_mode === 'image-yolo';
   $('perception-label').textContent = image ? 'YOLO · RGB-D' : 'Analytic fixture';
   $('perception-dot').classList.toggle('warning', !image || next.degraded);
@@ -565,6 +595,10 @@ async function loadSceneMesh(current: SceneData, version: number): Promise<void>
       object.applyMatrix4(viewer.multiply(registration));
     } else object = (await new GLTFLoader(manager).loadAsync(base + encodeURIComponent(mesh.file))).scene;
     if (version !== sceneLoadVersion) { disposeObject(object); return; }
+    // Clip only the scan mesh (per-material), so smoke and flames near the ceiling stay visible in the cutaway.
+    if (mesh.format === 'obj') object.traverse(o => {
+      if (o instanceof THREE.Mesh) for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.clippingPlanes = [sourceCutaway];
+    });
     wallLayer.add(object); applyWallLayer(); mounted = true; ready();
   } catch {
     if (version === sceneLoadVersion) { sceneReady = false; notify('Scene geometry or materials unavailable. Mission start is disabled.', true); syncUI(); }
@@ -905,7 +939,7 @@ async function sendFrame(snapshot: SimState): Promise<void> {
     // Smoke attenuates the rendered image (not depth); simple exponential fog at the robot's local density.
     world.fog = smokeHere > 0.02 ? new THREE.FogExp2(0x8d9299, 0.15 + smokeHere * 1.6) : null;
     world.background = new THREE.Color('#e9e7e3');
-    renderer.clippingPlanes = [];
+    sourceCutaway.constant = NO_CUT;   // the robot camera always sees the complete geometry
     renderer.setRenderTarget(rgbTarget);
     renderer.render(world, robotCamera);
     const rgba = new Uint8Array(CAM_W * CAM_H * 4);
@@ -1036,6 +1070,7 @@ function setupRenderer(): void {
     renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.localClippingEnabled = true;   // scan-mesh cutaway is per material
     const canvas = renderer.domElement;
     canvas.setAttribute('aria-label', 'Scene: walls, robot, simulated survivors, hazards and planned route. Use the cell inspector below for keyboard access.');
     canvas.setAttribute('role', 'img');
@@ -1061,9 +1096,8 @@ function setupRenderer(): void {
       smokeClouds.material.uniforms.clock.value = clock;
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
-      renderer.clippingPlanes = scene?.mesh?.format === 'obj' && cutawayOn ? [sourceCutaway] : [];
+      sourceCutaway.constant = cutawayOn ? cutawayHeight : NO_CUT;
       renderer.render(world, camera);
-      renderer.clippingPlanes = [];
     });
     $('scene-empty').hidden = true;
     let down: { x: number; y: number } | null = null;
@@ -1273,11 +1307,20 @@ $('focus-fire').addEventListener('click', () => {
 $('orbit').addEventListener('click', () => setView('orbit'));
 $('plan').addEventListener('click', () => setView('plan'));
 $('walls-layer').addEventListener('change', applyWallLayer);
+$('building-use').addEventListener('change', async () => {
+  if (!draft || !idle() || busy || !state || !scene) return;
+  const value = ($('building-use') as HTMLSelectElement).value;
+  if (value) draft.building_use = value; else delete draft.building_use;
+  dirty = JSON.stringify(draft) !== JSON.stringify({ ...state.scenario, scene_id: scene.id });
+  syncBuildingUse(); syncUI();
+  await loadPresets();
+  notify('Building use changed. Pick a preset or Apply to use it; presets now place people for this use.');
+});
 $('furniture-layer').addEventListener('change', () => { obstacleLayer.visible = ($('furniture-layer') as HTMLInputElement).checked; });
 $('cutaway-height').addEventListener('change', () => {
   const value = ($('cutaway-height') as HTMLSelectElement).value;
   cutawayOn = value !== 'off';
-  if (cutawayOn) sourceCutaway.constant = Number(value);
+  if (cutawayOn) cutawayHeight = Number(value);
 });
 $('expand').addEventListener('click', async () => {
   try {

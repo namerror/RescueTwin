@@ -23,7 +23,8 @@ def load_bundle(directory: Path) -> Scene:
     if not exits:
         raise ValueError(f'{directory}: no verified exits')
     rooms = [dict(id=r['id'], name=r['name'], label=r.get('label'), cells=[tuple(p) for p in r['cells']],
-                  observe=[tuple(p) for p in r['observe']], polygon=r.get('polygon')) for r in data['rooms']]
+                  observe=[tuple(p) for p in r['observe']], polygon=r.get('polygon'),
+                  area_m2=r.get('area_m2')) for r in data['rooms']]
     meta = {k: data.get(k) for k in ('frame', 'grid', 'mesh', 'floor_image', 'costar', 'checks', 'provenance',
                                      'assumptions', 'not_exits', 'skipped_rooms', 'assets')}
     meta['exit_info'] = data['exits']

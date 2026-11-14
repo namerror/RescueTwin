@@ -55,23 +55,47 @@ def _walking_steps(scene, start):
     return steps
 
 
-def build(scene, kind, seed=7):
+def _use(building_use):
+    """Only record an explicit building use, so scenarios without one keep their existing hashes."""
+    return {'building_use': building_use} if building_use else {}
+
+
+def _by_prior(scene, building_use, rng, count, spacing):
+    """Place people in rooms drawn in proportion to the building-use prior (illustrative, not occupancy data)."""
+    from . import occupancy
+    prior = occupancy.weights(scene, building_use)['weights']
+    rooms = [r for r in scene.rooms if prior.get(r['id'], 0) > 0]
+    taken, tries = [], 0
+    while len(taken) < count and tries < count * 8:
+        tries += 1
+        room = rng.choices(rooms, weights=[prior[r['id']] for r in rooms])[0]
+        cell = _pick(rng, scene, room, taken, spacing)
+        if cell: taken.append(cell)
+    return taken
+
+
+def build(scene, kind, seed=7, building_use=None):
+    from . import occupancy
+    use, _ = occupancy.resolve(scene, building_use)
     rng = random.Random(seed)
     taken = []
     if kind == 'standard':
         if scene.id == 'development-apartment':
             return dict(id='standard', label='Standard: 2 survivors, 1 ignition', note='Synthetic fixture default.',
-                        scenario=dict(scene_id=scene.id, survivors=[[26, 6], [15, 18]], ignitions=[[25, 18]], seed=seed))
-        bedrooms = _rooms(scene, 'Bedroom') or [r for r in scene.rooms if r.get('label') != 'Kitchen'] or scene.rooms
+                        scenario=dict(scene_id=scene.id, survivors=[[26, 6], [15, 18]], ignitions=[[25, 18]], seed=seed, **_use(building_use)))
         survivors = []
-        for room in bedrooms[-2:]:
-            cell = _pick(rng, scene, room, taken, 1.0)
-            if cell:
-                survivors.append(list(cell)); taken.append(cell)
+        if use == 'residential':
+            bedrooms = _rooms(scene, 'Bedroom') or [r for r in scene.rooms if r.get('label') != 'Kitchen'] or scene.rooms
+            for room in bedrooms[-2:]:
+                cell = _pick(rng, scene, room, taken, 1.0)
+                if cell:
+                    survivors.append(list(cell)); taken.append(cell)
+        else:
+            taken = _by_prior(scene, use, rng, 3, 1.0); survivors = [list(c) for c in taken]
         ignition = _ignition(rng, scene, taken)
-        return dict(id='standard', label=f'Standard: {len(survivors)} survivors, 1 ignition',
+        return dict(id='standard', label=f'Standard: {len(survivors)} survivors, 1 ignition' + ('' if use == 'residential' else f' ({use})'),
                     note='Illustrative placements; survivors and fire are synthetic.',
-                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed))
+                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed, **_use(building_use)))
     if kind in ('capacity-stress', 'capacity-25', 'capacity-50'):
         costar = scene.meta.get('costar') or {}
         capacity = costar.get('max_occupants')
@@ -84,6 +108,8 @@ def build(scene, kind, seed=7):
         order = (_rooms(scene, 'Bedroom') + [r for r in scene.rooms if r.get('label') not in ('Bedroom', 'Bathroom')]
                  + _rooms(scene, 'Bathroom')) or scene.rooms
         survivors, i = [], 0
+        if use != 'residential':
+            taken = _by_prior(scene, use, rng, count, 0.75); survivors = [list(c) for c in taken]
         while len(survivors) < count and i < count * 4:
             cell = _pick(rng, scene, order[i % len(order)], taken, 0.75)
             i += 1
@@ -95,17 +121,17 @@ def build(scene, kind, seed=7):
                     note=CAPACITY_LABEL, capacity=capacity, fraction=fraction, requested_count=requested, placed_count=len(survivors),
                     provenance=dict(source_id=field.get('source_id'), field_path=field.get('field_path'), dataset=field.get('dataset')),
                     truncated=len(survivors) < requested,
-                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed))
+                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed, **_use(building_use)))
     raise ValueError(f'Unknown preset {kind!r}')
 
 
-def available(scene, seed=7):
-    presets = [build(scene, 'standard', seed)]
-    stress = build(scene, 'capacity-stress', seed)
+def available(scene, seed=7, building_use=None):
+    presets = [build(scene, 'standard', seed, building_use)]
+    stress = build(scene, 'capacity-stress', seed, building_use)
     if stress:
         seen=set()
         for kind in ('capacity-25','capacity-50','capacity-stress'):
-            entry=build(scene,kind,seed)
+            entry=build(scene,kind,seed,building_use)
             if entry['requested_count'] not in seen:
                 presets.append(entry);seen.add(entry['requested_count'])
     else:

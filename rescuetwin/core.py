@@ -10,11 +10,24 @@ import math
 import random
 from copy import deepcopy
 
+import os
+
 import numpy as np
+
+from . import occupancy
 
 Cell = tuple[int, int]
 
 ROBOT_SPEED = 0.5            # m/s along the grid
+# The robot is modelled as fire-proof: heat and smoke never block it on its own. Crossing a hazard cell it
+# moves at its top speed; risk-aware routing still prefers the path with the least observed fire.
+ROBOT_DASH_SPEED = 1.0       # m/s while the robot (or an escort) is in or entering a hazard cell
+HAZARD_HEAT, HAZARD_SMOKE = 0.3, 0.5   # a cell counts as "in fire/dense smoke" at or above these
+ESCORT_HEAT_LIMIT, ESCORT_SMOKE_LIMIT = .6, .5   # people are not fire-proof
+ESCORT_LAST_RESORT_S = 15.0  # escort cornered this long with no safe route: take the least-hazard route
+# Demo pacing: the hazard model advances at this fraction of mission time (1.0 = teammate model as-is).
+HAZARD_TIME_SCALE = float(os.environ.get('RESCUETWIN_HAZARD_TIME_SCALE', '0.6'))
+SEARCH_PRIOR_SMOOTHING_M = 3.0   # travel added to every candidate so likelihood, not just proximity, matters
 SENSE_RANGE_M = 3.5          # analytic (fixture) sensing radius
 CAMERA_RANGE_M = 4.0         # rendered depth range used for image perception
 CAMERA_FOV = math.radians(90)
@@ -111,14 +124,19 @@ def fixture():
     return s
 
 
-def step_cost(heat, smoke, observed, x, y, adaptive, escort):
-    """None if the cell violates hard limits; otherwise the traversal cost (cells)."""
-    if heat[y][x] >= (.6 if escort else .8) or smoke[y][x] >= (.5 if escort else .8): return None
+def step_cost(heat, smoke, observed, x, y, adaptive, escort, last_resort=False):
+    """None if the cell is impassable for this move; otherwise its traversal cost (cells).
+
+    The robot alone is fire-proof (no hazard limit). An escorted person keeps human limits unless the escort
+    is cornered (last_resort), when the least-hazard route is taken whatever the policy."""
+    if last_resort:
+        return 1 + 20*heat[y][x] + 10*smoke[y][x] + (0 if observed[y][x] else 2)
+    if escort and (heat[y][x] >= ESCORT_HEAT_LIMIT or smoke[y][x] >= ESCORT_SMOKE_LIMIT): return None
     if escort and not observed[y][x]: return None
     return 1 + ((8*heat[y][x]+5*smoke[y][x]+(0 if observed[y][x] else 2)) if adaptive else 0)
 
 
-def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False):
+def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False, last_resort=False):
     """A* sees belief fields only; hard limits apply to both policies."""
     start,goal=tuple(start),tuple(goal)
     if not scene.free(start) or not scene.free(goal): return []
@@ -131,7 +149,7 @@ def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False
             while p in previous: p=previous[p]; result.append(p)
             return result[::-1]
         for q in scene.neighbors(p):
-            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort)
+            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort,last_resort)
             if step is None: continue
             c=cost+step
             if c < costs.get(q,math.inf):
@@ -140,14 +158,14 @@ def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False
     return []
 
 
-def route_tree(scene, start, heat, smoke, observed, adaptive=True, escort=False):
+def route_tree(scene, start, heat, smoke, observed, adaptive=True, escort=False, last_resort=False):
     """Single-source Dijkstra with the same costs/limits as route(); one pass serves every goal."""
     start=tuple(start); costs={start:0.}; previous={}; queue=[(0.,start)]
     while queue:
         cost,p=heapq.heappop(queue)
         if cost != costs[p]: continue
         for q in scene.neighbors(p):
-            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort)
+            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort,last_resort)
             if step is None: continue
             c=cost+step
             if c < costs.get(q,math.inf):
@@ -203,12 +221,17 @@ class Simulation:
         self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.)
         self.route=[];self.goal=None;self.visited=set();self.escort=None;self.escort_detection=None
         self.detections=[];self.next_detection=0;self.version=0
-        self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.,detections=0,false_detections=0,route_changes=0,rooms_inspected=0)
+        self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.,detections=0,false_detections=0,route_changes=0,rooms_inspected=0,robot_hazard_s=0.,last_resort_escorts=0)
+        self.escort_blocked_since=None;self.last_resort=False
         self.survivors=[dict(id=f'person-{i}',position=tuple(p),status='unobserved') for i,p in enumerate(self.scenario['survivors'])]
         self.rng=random.Random(self.scenario['seed']);self.steps=0
         self.frame_request=None;self.frame_seq=0;self.degraded=False;self.last_frame=None;self.holding=False
         label='Synthetic fixture' if self.scene.source=='synthetic' else 'Scanned geometry with synthetic hazards and people'
         self.log(f"{label}; perception: {'analytic fixture (not image-based)' if perception=='analytic-development' else 'YOLO on rendered RGB-D'}.")
+        # Search prior from static building information only (never from survivor placements).
+        self.prior=occupancy.weights(self.scene,self.scenario.get('building_use'))
+        self.log(occupancy.describe(self.scene,self.prior))
+        if HAZARD_TIME_SCALE!=1:self.log(f'Demo pacing: fire and smoke advance at {HAZARD_TIME_SCALE:g}x mission time.')
         for x,y in self.scenario['ignitions']:
             cx,cy=self.scene.world((x,y))
             for yy in range(H):
@@ -236,6 +259,7 @@ class Simulation:
                 if tuple(p)==start: raise ValueError('Keep the robot start cell clear')
                 seen.add(tuple(p))
         if set(map(tuple,scenario['survivors'])) & set(map(tuple,scenario['ignitions'])): raise ValueError('Survivor and ignition overlap')
+        if scenario.get('building_use') is not None and scenario['building_use'] not in occupancy.PROFILES: raise ValueError('Unknown building use')
 
     def log(self,message):
         self.events.append(dict(time=round(self.time,2),message=message));self.events=self.events[-100:]
@@ -243,6 +267,7 @@ class Simulation:
     # ---------------------------------------------------------------- hazards
     def hazards(self,dt):
         """Advance finite fuel, wall-confined diffusion and ambient exchange."""
+        dt = dt * HAZARD_TIME_SCALE   # demo pacing; see HAZARD_TIME_SCALE
         scale = (.2 / self.scene.resolution) ** 2
         kh, ks = .30 * scale, .50 * scale
         steps = max(1, math.ceil(dt * (4 * max(kh, ks) + .255) / .8))
@@ -373,9 +398,9 @@ class Simulation:
         heat,smoke=self.planning_fields()
         return route(self.scene,self.robot,goal,heat,smoke,self.observed,self.mode=='adaptive',escort)
 
-    def tree(self,escort=False):
+    def tree(self,escort=False,last_resort=False):
         heat,smoke=self.planning_fields()
-        return route_tree(self.scene,self.robot,heat.tolist(),smoke.tolist(),self.observed.tolist(),self.mode=='adaptive',escort)
+        return route_tree(self.scene,self.robot,heat.tolist(),smoke.tolist(),self.observed.tolist(),self.mode=='adaptive',escort,last_resort)
 
     def observe_points(self,room):
         return [tuple(p) for p in room.get('observe',room['cells'])]
@@ -384,7 +409,19 @@ class Simulation:
         if self.escort:
             costs,prev=self.tree(True)
             options=[(costs[e],e) for e in self.scene.exits if e in costs]
-            if options:return extract(prev,self.robot,min(options)[1])
+            if options:
+                self.escort_blocked_since=None;self.last_resort=False
+                return extract(prev,self.robot,min(options)[1])
+            if self.escort_blocked_since is None:self.escort_blocked_since=self.time
+            if self.time-self.escort_blocked_since>=ESCORT_LAST_RESORT_S:
+                # Cornered with a person: waiting longer only adds exposure. Take the least-hazard route.
+                costs,prev=self.tree(True,last_resort=True)
+                options=[(costs[e],e) for e in self.scene.exits if e in costs]
+                if options:
+                    if not self.last_resort:
+                        self.last_resort=True;self.metrics['last_resort_escorts']+=1
+                        self.log('Escort cornered: taking the least-fire route to the exit at top speed (last resort).')
+                    return extract(prev,self.robot,min(options)[1])
             self.hold('Escort paused: no observed viable egress route; holding until conditions change.');return []
         if self.goal is not None:
             if self.robot==self.goal:self.goal=None
@@ -397,9 +434,13 @@ class Simulation:
         options=[(costs[t],t) for t in targets if t in costs]
         if options:return extract(prev,self.robot,min(options)[1])
         # Coverage targets are static geometry, not hidden survivor locations.
-        remaining=[p for room in self.scene.rooms for p in self.observe_points(room) if p not in self.visited]
-        options=[(costs[p],p) for p in remaining if p in costs]
-        if options:return extract(prev,self.robot,min(options)[1])
+        # Prior-weighted coverage: likelihood of people in the room over travel cost. With a uniform prior
+        # (residential) this is nearest-first.
+        smooth=SEARCH_PRIOR_SMOOTHING_M/self.scene.resolution
+        remaining=[(self.prior['weights'].get(room['id'],1.),p) for room in self.scene.rooms for p in self.observe_points(room) if p not in self.visited]
+        options=[(-w/(costs[p]+smooth),costs[p],p) for w,p in remaining if p in costs]
+        if options:return extract(prev,self.robot,min(options)[2])
+        remaining=[p for _,p in remaining]
         if targets or remaining:
             self.hold('No viable route to remaining targets; holding until observed hazards change.')
         return []
@@ -444,13 +485,20 @@ class Simulation:
         if moving and new and self.route and new[1:3]!=self.route[:2]:
             self.metrics['route_changes']+=1;self.log('Route updated from observed evidence.')
         self.route=new[1:]
-        self.progress+=ROBOT_SPEED*dt if moving and self.route else 0
+        here_hot=self.heat[self.robot[1],self.robot[0]]>=HAZARD_HEAT or self.smoke[self.robot[1],self.robot[0]]>=HAZARD_SMOKE
+        if here_hot:self.metrics['robot_hazard_s']+=dt
+        ahead=self.route[0] if self.route else None
+        ahead_hot=ahead is not None and (self.heat[ahead[1],ahead[0]]>=HAZARD_HEAT or self.smoke[ahead[1],ahead[0]]>=HAZARD_SMOKE)
+        # Local measurement of its own and the next cell: cross hazards at top speed.
+        speed=ROBOT_DASH_SPEED if (here_hot or ahead_hot) else ROBOT_SPEED
+        self.progress+=speed*dt if moving and self.route else 0
         if self.progress>=self.scene.resolution-1e-9 and self.route:
             self.progress-=self.scene.resolution
             q=tuple(self.route[0]);x,y=q
-            hl,sl=(.6,.5) if self.escort else (.8,.8)
-            # Independent immediate sensor/collision interlock, never global planner input.
-            if self.heat[y,x]>=hl or self.smoke[y,x]>=sl:
+            # Independent immediate interlock, never global planner input. The robot alone is fire-proof;
+            # it protects an escorted person unless the escort is cornered (last resort).
+            guard=self.escort is not None and not self.last_resort
+            if guard and (self.heat[y,x]>=ESCORT_HEAT_LIMIT or self.smoke[y,x]>=ESCORT_SMOKE_LIMIT):
                 self.belief_heat[y,x]=self.heat[y,x];self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time
                 self.observed[y,x]=1;self.progress=0;self.log('Local interlock stopped motion into hazard.')
             else:
@@ -462,6 +510,7 @@ class Simulation:
                         p['status']='evacuated';self.metrics['evacuated']+=1;self.escort=None
                         d=next(d for d in self.detections if d['id']==self.escort_detection);d['status']='evacuated';self.escort_detection=None
                         self.log(f"Evacuated: {d['id']}");self.version+=1
+                        self.escort_blocked_since=None;self.last_resort=False
         elif not self.route:self.progress=0
         for p in self.survivors:
             if p['status']!='evacuated':
