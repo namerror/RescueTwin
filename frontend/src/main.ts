@@ -1,6 +1,8 @@
 import { hazardSprites } from './hazardSprites';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import './styles.css';
@@ -9,23 +11,24 @@ type Cell = [number, number];
 type Mode = 'adaptive' | 'baseline';
 type Perception = 'image-yolo' | 'analytic-development';
 type Tool = 'inspect' | 'survivor' | 'fire' | 'remove';
-interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string }
+interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string }
 interface CostarField { key: string; label: string; value: unknown; units: string | null; field_path: string; source_id: number; dataset: string; derivation: string; note?: string }
 interface SceneData {
   id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
   walls: Cell[]; exterior: Cell[]; exits: Cell[]; source: string; robot_start: Cell; time_limit: number;
   rooms: { id: string; name: string; label?: string; cells: Cell[]; observe?: Cell[]; polygon?: [number, number][] }[];
-  mesh?: { file: string; source: string; wall_height: number } | null;
+  mesh?: { file: string; source: string; wall_height: number; format?: string; materials?: string[]; textured?: boolean; frame?: string; transform?: number[][] } | null;
   floor_image?: { file: string; origin: [number, number]; pixels_per_metre: number; width: number; height: number; source: string } | null;
   costar?: { fields: CostarField[]; max_occupants: number; disclaimer: string; property_id: number; floor_plan_id: number } | null;
   checks?: Record<string, unknown> | null;
   exit_info?: { id: string; label: string; opening_width_m: number; evidence: string[]; beyond: string }[];
   assumptions?: string[]; provenance?: { item: string; source: string; derivation: string }[];
+  obstacle_overlay?: { furniture?: Cell[]; source_walls?: Cell[] } | null;
 }
 interface Pose { x: number; y: number; z: number; yaw: number }
 interface DetectionEntry { id: string; position: [number, number]; cell: Cell; confidence: number; hits: number; status: string; source: string }
 interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
-interface Paired { status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
+interface Paired { experiment?: Record<string, unknown>; status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
   fire?: number[][];
   hazard_sensor?: { radius_m: number; source_distance_m: number | null;
@@ -41,6 +44,10 @@ interface SimState {
 interface Observation { heat: number[][]; smoke: number[][]; observed: number[][]; survivors: DetectionEntry[] }
 interface Preset { id: string; label: string; note: string; scenario?: Scenario; unavailable?: boolean; capacity?: number }
 
+let sceneReady = false, sceneLoadVersion = 0;
+const sourceCutaway = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1.6);
+let cutawayOn = true, cutawayHeight = 1.6;
+const NO_CUT = 1e6;  // plane constant that clips nothing (robot camera, cutaway off)
 const CAM_W = 512, CAM_H = 384, CAM_HFOV = Math.PI / 2;
 const CAM_VFOV = 2 * Math.atan(Math.tan(CAM_HFOV / 2) * CAM_H / CAM_W);
 const FX = (CAM_W / 2) / Math.tan(CAM_HFOV / 2), FY = (CAM_H / 2) / Math.tan(CAM_VFOV / 2);
@@ -54,7 +61,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const number = (value: number, digits = 1): string => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 const same = (a: Cell, b: Cell): boolean => a[0] === b[0] && a[1] === b[1];
-const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id });
+const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}) });
 const key = (p: Cell): string => `${p[0]},${p[1]}`;
 
 $('app').innerHTML = `
@@ -84,6 +91,8 @@ $('app').innerHTML = `
           <div class="segmented view-toggle" role="radiogroup" aria-label="Knowledge view"><label><input type="radio" name="view" value="truth" checked /><span>Operator truth</span></label><label><input type="radio" name="view" value="belief" /><span>Robot belief</span></label></div>
           <div class="layer-controls" aria-label="Scene layers">
             <label><input type="checkbox" id="walls-layer" checked />Walls</label>
+            <label id="cutaway-control" hidden title="Operator view clips the scanned mesh above this height; robot camera always sees full geometry">Cutaway <select id="cutaway-height"><option value="1.0">1.0 m</option><option value="1.6" selected>1.6 m</option><option value="2.2">2.2 m</option><option value="off">Off</option></select></label>
+            <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
             <label><input type="checkbox" id="heat-layer" checked /><span class="swatch heat"></span>Fire / heat</label>
             <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
             <label><input type="checkbox" id="observed-layer" />Unobserved</label>
@@ -110,13 +119,15 @@ $('app').innerHTML = `
           <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
         </section>
         <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Place the conditions</h2></div></div>
+          <label class="seed-label" for="building-use" title="Static building information only; it changes where the robot searches first, never what it knows about people">Building use <select id="building-use"><option value="">Auto</option></select></label>
+          <p id="building-use-hint" class="field-hint"></p>
           <div id="presets" class="preset-list"></div>
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
           <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
           <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
         </section>
-        <section class="panel compare-callout"><h2>Compare runs</h2><p id="compare-text" class="field-hint">Distance-only vs risk-aware from the same frozen scenario, sensors, hazard model and safety rules.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">Apply scenario changes before comparing.</p></section>
+        <section class="panel compare-callout"><h2>Compare runs</h2><p id="compare-text" class="field-hint">Distance-only vs risk-aware from the same frozen scenario, sensors, hazard model and safety rules.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">For a CoStar workload, select a capacity preset, Apply it, then compare. The report includes its source field and scenario hash.</p></section>
       </aside>
       <dl class="run-summary" aria-label="Mission metrics">
         <div><dt>Evacuated</dt><dd><strong id="evacuated">—</strong> <span id="population"></span> <span id="unresolved-note" class="subtle-label"></span></dd></div>
@@ -172,6 +183,8 @@ const layers = { heat: true, smoke: true, observed: false, route: true };
 // Upstream PR #1 hazard rendering: textured heat (floor) and banded smoke (near ceiling) fields,
 // instanced smoke clouds and flame cones. Fields/clouds are operator-only; flames are physical (camera sees them).
 const wallLayer = new THREE.Group();
+const obstacleLayer = new THREE.Group();  // operator-only furniture/source-wall cells
+world.add(obstacleLayer);
 function createField(order: number) {
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d')!;
@@ -309,7 +322,7 @@ function syncUI(): void {
   preview.disabled = !connected || busy || dirty || status === 'running' || pairedRunning() || !state || state.hazard_time >= 600;
   preview.textContent = state?.hazards_running && status !== 'running' ? 'Pause hazards' : 'Preview hazards';
   $('start').textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
-  ($('start') as HTMLButtonElement).disabled = !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
+  ($('start') as HTMLButtonElement).disabled = !sceneReady || !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
   ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running' || pairedRunning();
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
   ($('mode-fieldset') as HTMLFieldSetElement).disabled = !editable;
@@ -323,8 +336,8 @@ function syncUI(): void {
   ($('discard') as HTMLButtonElement).disabled = busy || !dirty;
   ($('import') as HTMLButtonElement).disabled = !editable;
   ($('export') as HTMLButtonElement).disabled = !draft;
-  ($('compare') as HTMLButtonElement).disabled = !connected || busy || dirty || pairedRunning() || status === 'running';
-  $('control-hint').textContent = !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
+  ($('compare') as HTMLButtonElement).disabled = !sceneReady || !connected || busy || dirty || pairedRunning() || status === 'running';
+  $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
   $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Pick a preset or a tool, then click a floor cell. Changes stay local until applied.';
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
   $('survivor-count').textContent = draft ? String(draft.survivors.length) : '—';
@@ -340,15 +353,39 @@ async function loadScene(): Promise<void> {
   buildStaticScene();
   recenter();
   renderSceneInfo();
+  await loadBuildingUses();
   await loadPresets();
   const list = await api<{ id: string; name: string; source: string; checks_passed: boolean | null }[]>('scenes');
   ($('scene-select') as HTMLSelectElement).innerHTML = list.map(s => `<option value="${escape(s.id)}"${s.id === scene!.id ? ' selected' : ''}>${escape(s.name)}${s.source === 'synthetic' ? ' (synthetic)' : ''}</option>`).join('');
 }
 
+interface BuildingUses { inferred: string; source: string; profiles: { id: string; label: string; rationale: string }[] }
+let buildingUses: BuildingUses | null = null;
+
+async function loadBuildingUses(): Promise<void> {
+  buildingUses = await api<BuildingUses>('building-uses');
+  const auto = buildingUses.profiles.find(p => p.id === buildingUses!.inferred);
+  ($('building-use') as HTMLSelectElement).innerHTML = `<option value="">Auto: ${escape(auto?.label ?? buildingUses.inferred)}</option>` +
+    buildingUses.profiles.map(p => `<option value="${escape(p.id)}">${escape(p.label)}</option>`).join('');
+  syncBuildingUse();
+}
+
+function syncBuildingUse(): void {
+  const select = $('building-use') as HTMLSelectElement;
+  if (!buildingUses) return;
+  if (document.activeElement !== select) select.value = draft?.building_use ?? '';
+  select.disabled = !idle() || busy;
+  const chosen = buildingUses.profiles.find(p => p.id === (select.value || buildingUses!.inferred));
+  $('building-use-hint').textContent = chosen
+    ? `${chosen.rationale} ${select.value ? 'Operator selection.' : `From ${buildingUses.source}.`} Search order only; not occupancy data.`
+    : '';
+}
+
 async function loadPresets(): Promise<void> {
-  const presets = await api<Preset[]>(`presets?seed=${draft?.seed ?? 7}`);
+  const use = draft?.building_use ? `&building_use=${encodeURIComponent(draft.building_use)}` : '';
+  const presets = await api<Preset[]>(`presets?seed=${draft?.seed ?? 7}${use}`);
   $('presets').innerHTML = presets.map((p, i) => `<button class="button subtle small preset" data-index="${i}" data-unavailable="${p.unavailable ? 1 : 0}" title="${escape(p.note)}">${escape(p.label)}</button>`).join('') +
-    presets.filter(p => p.id === 'capacity-stress').map(p => `<p class="field-hint capacity-note">${escape(p.note)}</p>`).join('');
+    presets.filter(p => p.id.startsWith('capacity-')).slice(0, 1).map(p => `<p class="field-hint capacity-note">${escape(p.note)}</p>`).join('');
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => b.addEventListener('click', () => {
     const preset = presets[Number(b.dataset.index)];
     if (!preset.scenario || !idle()) return;
@@ -368,7 +405,7 @@ function renderSceneInfo(): void {
   $('scene-heading').textContent = scene.name;
   $('scene-size').textContent = `${number(scene.width * scene.resolution)} × ${number(scene.height * scene.resolution)} m · ${number(scene.resolution, 3)} m/cell`;
   $('disclosure-body').textContent = real
-    ? `Real: CoStar record and scan-derived floor geometry (derived mesh). Synthetic: fire, smoke, people, robot. ${scene.exits.length === 1 ? 'Single verified exit; corridor beyond assumed available. ' : ''}Not a fire-safety assessment.`
+    ? `Real: CoStar record. Geometry: ${scene.mesh?.source ?? scene.source}. Synthetic: fire, smoke, people, robot. ${scene.exits.length === 1 ? 'Single verified exit; corridor beyond assumed available. ' : ''}Not a fire-safety assessment.`
     : 'Simulated geometry, people and hazard fields. Not a property.';
   $('disclosure-tag').textContent = real ? 'Scanned property, synthetic emergency.' : 'Synthetic fixture.';
   const c = scene.costar;
@@ -419,7 +456,10 @@ function acceptState(next: SimState): void {
   $('unresolved-note').textContent = next.status === 'unresolved' ? 'unresolved: remaining people not confirmed absent' : next.holding ? 'holding: no viable route yet' : '';
   $('exposure').textContent = number(next.metrics.exposure, 2);
   $('distance').textContent = number(next.metrics.distance, 2);
-  $('route-note').textContent = `${next.metrics.route_changes ?? 0} changes · ${next.metrics.rooms_inspected ?? 0} rooms inspected`;
+  $('route-note').textContent = `${next.metrics.route_changes ?? 0} changes · ${next.metrics.rooms_inspected ?? 0} rooms inspected` +
+    (next.metrics.robot_hazard_s ? ` · ${number(next.metrics.robot_hazard_s, 1)} s robot in fire/smoke` : '') +
+    (next.metrics.last_resort_escorts ? ` · ${next.metrics.last_resort_escorts} last-resort escort` : '');
+  syncBuildingUse();
   const image = next.perception_mode === 'image-yolo';
   $('perception-label').textContent = image ? 'YOLO · RGB-D' : 'Analytic fixture';
   $('perception-dot').classList.toggle('warning', !image || next.degraded);
@@ -464,7 +504,10 @@ function clearGroup(group: THREE.Group): void {
     if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
       object.geometry.dispose();
       const materials = Array.isArray(object.material) ? object.material : [object.material];
-      materials.forEach(material => material.dispose());
+      materials.forEach(material => {
+        for (const value of Object.values(material)) if (value instanceof THREE.Texture) value.dispose();
+        material.dispose();
+      });
     }
   });
   group.clear();
@@ -494,7 +537,77 @@ function applyWallLayer(): void {
   wallLayer.traverse(o => o.layers.set(shown ? 0 : CAMERA_ONLY_LAYER));
 }
 
+function disposeObject(object: THREE.Object3D): void {
+  object.traverse(o => {
+    if (!(o instanceof THREE.Mesh)) return;
+    o.geometry.dispose();
+    for (const material of Array.isArray(o.material) ? o.material : [o.material]) {
+      for (const value of Object.values(material)) if (value instanceof THREE.Texture) value.dispose();
+      material.dispose();
+    }
+  });
+}
+
+async function loadSceneMesh(current: SceneData, version: number): Promise<void> {
+  const mesh = current.mesh!;
+  const base = `/api/scenes/${encodeURIComponent(current.id)}/files/`;
+  let failed = false, mounted = false, complete = false;
+  const manager = new THREE.LoadingManager();
+  const ready = () => { if (version === sceneLoadVersion && mounted && complete && !failed) { sceneReady = true; syncUI(); } };
+  manager.onLoad = () => { complete = true; ready(); };
+  manager.onError = () => { failed = true; if (version === sceneLoadVersion) { sceneReady = false; notify('A scene asset failed to load. Mission start is disabled.', true); syncUI(); } };
+  try {
+    let object: THREE.Group;
+    if (mesh.format === 'obj') {
+      const loader = new OBJLoader(manager);
+      if (mesh.materials?.length) {
+        const texts = await Promise.all(mesh.materials.map(async name => {
+          const response = await fetch(base + encodeURIComponent(name));
+          if (!response.ok) throw new Error('Material unavailable');
+          return response.text();
+        }));
+        const materials = new MTLLoader(manager).parse(texts.join('\n'), base);
+        materials.preload(); loader.setMaterials(materials);
+      }
+      object = await loader.loadAsync(base + encodeURIComponent(mesh.file));
+      // Untextured scans (e.g. the defurnished 50k OBJ) ship without normals: compute them and shade
+      // flat in a neutral plaster tone so walls, floor and fixtures read as 3D instead of flat white.
+      if (!mesh.textured) object.traverse(o => {
+        if (!(o instanceof THREE.Mesh)) return;
+        o.geometry.computeVertexNormals();
+        for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.dispose();
+        o.material = new THREE.MeshLambertMaterial({ color: '#d9d2c6', flatShading: true, side: THREE.DoubleSide });
+      });
+      // Scanned textures already contain the room's lighting; render them unlit so they are not lit twice.
+      if (mesh.textured) object.traverse(o => {
+        if (!(o instanceof THREE.Mesh)) return;
+        const swap = (m: THREE.Material) => {
+          const map = (m as THREE.MeshPhongMaterial).map ?? null;
+          if (map) map.colorSpace = THREE.SRGBColorSpace;
+          const basic = new THREE.MeshBasicMaterial({ map, side: THREE.DoubleSide, name: m.name });
+          m.dispose(); return basic;
+        };
+        o.material = Array.isArray(o.material) ? o.material.map(swap) : swap(o.material);
+      });
+      const registration = new THREE.Matrix4();
+      if (mesh.transform) registration.set(...mesh.transform.flat() as [number,number,number,number,number,number,number,number,number,number,number,number,number,number,number,number]);
+      const viewer = new THREE.Matrix4().set(1,0,0,0, 0,0,1,0, 0,-1,0,0, 0,0,0,1);
+      object.applyMatrix4(viewer.multiply(registration));
+    } else object = (await new GLTFLoader(manager).loadAsync(base + encodeURIComponent(mesh.file))).scene;
+    if (version !== sceneLoadVersion) { disposeObject(object); return; }
+    // Clip only the scan mesh (per-material), so smoke and flames near the ceiling stay visible in the cutaway.
+    if (mesh.format === 'obj') object.traverse(o => {
+      if (o instanceof THREE.Mesh) for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.clippingPlanes = [sourceCutaway];
+    });
+    wallLayer.add(object); applyWallLayer(); mounted = true; ready();
+  } catch {
+    if (version === sceneLoadVersion) { sceneReady = false; notify('Scene geometry or materials unavailable. Mission start is disabled.', true); syncUI(); }
+  }
+}
+
 function buildStaticScene(): void {
+  const version = ++sceneLoadVersion;
+  sceneReady = false;
   clearGroup(staticLayer);
   clearGroup(wallLayer);
   avatars.forEach(a => avatarLayer.remove(a));
@@ -502,6 +615,8 @@ function buildStaticScene(): void {
   if (!scene) return;
   const { width, height, resolution: res, origin } = scene;
   const real = !!scene.mesh;
+  const sourceMesh = scene.mesh?.format === 'obj';
+  if (!real) sceneReady = true;
   const wallHeight = wallHeightOf();
   const gridW = width * res, gridH = height * res;
   const cx = origin[0] + gridW / 2, cy = origin[1] + gridH / 2;
@@ -520,23 +635,21 @@ function buildStaticScene(): void {
     base.position.copy(toThree(cx, cy, -0.01));
     base.layers.set(CAMERA_ONLY_LAYER);
     staticLayer.add(base);
-  } else {
+  } else if (!sourceMesh) {
     const floor = new THREE.Mesh(new THREE.BoxGeometry(gridW, 0.16, gridH), new THREE.MeshStandardMaterial({ color: '#182633', roughness: 1 }));
     floor.position.copy(toThree(cx, cy, -0.08));
     staticLayer.add(floor);
   }
   if (real) {
-    new GLTFLoader().load(`/api/scenes/${encodeURIComponent(scene.id)}/files/${scene.mesh!.file}`, gltf => {
-      gltf.scene.traverse(o => { if (o instanceof THREE.Mesh) { o.material = new THREE.MeshStandardMaterial({ color: '#d9dcdf', roughness: 0.9, side: THREE.DoubleSide }); } });
-      wallLayer.add(gltf.scene);
-      applyWallLayer();
-    }, undefined, () => notify('Could not load the scene mesh; walls are shown from the collision grid only.', true));
+    void loadSceneMesh(scene, version);
     // Ceiling for the robot camera only, so the operator keeps the cutaway view.
+    if (!sourceMesh) {
     const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(gridW, gridH), new THREE.MeshStandardMaterial({ color: '#eceae6', emissive: '#bdbab4', emissiveIntensity: 0.55, side: THREE.DoubleSide }));
     ceiling.rotation.x = Math.PI / 2;
     ceiling.position.copy(toThree(cx, cy, wallHeight));
     ceiling.layers.set(CAMERA_ONLY_LAYER);
     staticLayer.add(ceiling);
+    }
     for (const room of scene.rooms) {
       if (!room.polygon) continue;
       const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(room.polygon.map(([x, y]) => toThree(x, y, 0.02))), new THREE.LineBasicMaterial({ color: '#4fc3a1', transparent: true, opacity: 0.55 }));
@@ -568,6 +681,20 @@ function buildStaticScene(): void {
   heatField.mesh.position.copy(toThree(cx, cy, 0.03));
   smokeField.mesh.position.copy(toThree(cx, cy, wallHeight * 0.9));
   blockedCells = new Set([...scene.walls, ...scene.exterior].map(key));
+  clearGroup(obstacleLayer);
+  const overlay = scene.obstacle_overlay ?? {};
+  const kinds: [Cell[] | undefined, string][] = [[overlay.furniture, '#f0a640'], [overlay.source_walls, '#7f8fa3']];
+  for (const [cells, color] of kinds) {
+    if (!cells?.length) continue;
+    const marks = new THREE.InstancedMesh(new THREE.BoxGeometry(res * 0.9, 0.04, res * 0.9), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.7, depthWrite: false }), cells.length);
+    const matrix = new THREE.Matrix4();
+    cells.forEach((cell, i) => marks.setMatrixAt(i, matrix.makeTranslation(position(cell, 0.05))));
+    obstacleLayer.add(marks);
+  }
+  operatorOnly(obstacleLayer);
+  obstacleLayer.visible = ($('furniture-layer') as HTMLInputElement).checked;
+  $('furniture-control').hidden = !(overlay.furniture?.length || overlay.source_walls?.length);
+  $('cutaway-control').hidden = !sourceMesh;
 }
 
 /** CesiumMan (CC BY 4.0, © Cesium; see public/models/ATTRIBUTION.md): a textured human figure that a
@@ -799,7 +926,7 @@ function drawDynamic(): void {
 /** Render RGB and linear depth from the requested camera pose and send them for YOLO inference. */
 async function sendFrame(snapshot: SimState): Promise<void> {
   const request = snapshot.frame_request;
-  if (!renderer || !scene || !request) return;
+  if (!renderer || !scene || !request || !sceneReady) return;
   frameInFlight = true;
   lastFrameSeq = request.seq;
   try {
@@ -812,6 +939,7 @@ async function sendFrame(snapshot: SimState): Promise<void> {
     // Smoke attenuates the rendered image (not depth); simple exponential fog at the robot's local density.
     world.fog = smokeHere > 0.02 ? new THREE.FogExp2(0x8d9299, 0.15 + smokeHere * 1.6) : null;
     world.background = new THREE.Color('#e9e7e3');
+    sourceCutaway.constant = NO_CUT;   // the robot camera always sees the complete geometry
     renderer.setRenderTarget(rgbTarget);
     renderer.render(world, robotCamera);
     const rgba = new Uint8Array(CAM_W * CAM_H * 4);
@@ -893,7 +1021,7 @@ function renderPaired(): void {
   shownPairedStatus = signature;
   $('comparison').hidden = false;
   $('comparison-context').textContent = `Paired live runs on ${scene?.name ?? ''}, seed ${paired.seed}, ${paired.perception}. ${paired.status === 'running' ? `Running ${paired.running}…` : paired.status}.`;
-  $('comparison-body').innerHTML = renderReport({ reports: paired.reports, note: paired.note });
+  $('comparison-body').innerHTML = renderReport({ reports: paired.reports, experiment: paired.experiment, note: paired.note });
 }
 
 function recenter(): void {
@@ -942,6 +1070,7 @@ function setupRenderer(): void {
     renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.localClippingEnabled = true;   // scan-mesh cutaway is per material
     const canvas = renderer.domElement;
     canvas.setAttribute('aria-label', 'Scene: walls, robot, simulated survivors, hazards and planned route. Use the cell inspector below for keyboard access.');
     canvas.setAttribute('role', 'img');
@@ -967,6 +1096,7 @@ function setupRenderer(): void {
       smokeClouds.material.uniforms.clock.value = clock;
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
+      sourceCutaway.constant = cutawayOn ? cutawayHeight : NO_CUT;
       renderer.render(world, camera);
     });
     $('scene-empty').hidden = true;
@@ -1177,6 +1307,21 @@ $('focus-fire').addEventListener('click', () => {
 $('orbit').addEventListener('click', () => setView('orbit'));
 $('plan').addEventListener('click', () => setView('plan'));
 $('walls-layer').addEventListener('change', applyWallLayer);
+$('building-use').addEventListener('change', async () => {
+  if (!draft || !idle() || busy || !state || !scene) return;
+  const value = ($('building-use') as HTMLSelectElement).value;
+  if (value) draft.building_use = value; else delete draft.building_use;
+  dirty = JSON.stringify(draft) !== JSON.stringify({ ...state.scenario, scene_id: scene.id });
+  syncBuildingUse(); syncUI();
+  await loadPresets();
+  notify('Building use changed. Pick a preset or Apply to use it; presets now place people for this use.');
+});
+$('furniture-layer').addEventListener('change', () => { obstacleLayer.visible = ($('furniture-layer') as HTMLInputElement).checked; });
+$('cutaway-height').addEventListener('change', () => {
+  const value = ($('cutaway-height') as HTMLSelectElement).value;
+  cutawayOn = value !== 'off';
+  if (cutawayOn) cutawayHeight = Number(value);
+});
 $('expand').addEventListener('click', async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();

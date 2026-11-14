@@ -108,3 +108,26 @@ A mission with no viable route is reported `unresolved`; unseen occupants are no
 `distance` (m), `exposure` (sum over non-evacuated simulated survivors of `(heat + smoke) * dt`,
 including before discovery), `evacuated`, `detections` (confirmed), `false_detections`,
 `route_changes`, `rooms_inspected`. Units have no medical or fire-safety interpretation.
+
+
+## Optional source-asset bundle fields
+
+`rescuetwin.scene/1` remains readable. OBJ mesh entries add `format: "obj"`,
+`materials: string[]`, `textured: boolean`, `frame: "model"`, `transform: number[4][4]`
+(row-major affine source-to-model, including floor-height normalization), and `validation`.
+`assets` maps flat bundle filenames to SHA256 metadata. Asset HTTP access is allowlisted;
+no API credential or signed source URL is sent to the client. Existing GLTF fields remain valid.
+
+Scene preparation accepts an optional `robot_start` cell, validated free and connected
+before publication. Source import adds `blocked.source_obstacles` and
+`blocked.source_unreachable` and `blocked.source_unscanned`, pruning room cells while preserving validated observation points.
+A source mesh cannot be promoted when start, exits or room observation points disconnect.
+
+Capacity presets add `fraction`, `requested_count`, `placed_count`, `truncated`, and
+field-level provenance. `capacity-25`, `capacity-50`, and `capacity-stress` represent
+25/50/100% of marketed capacity, with duplicate requested counts omitted from the list.
+Conflicting known capacities disable the presets. They never alter agent observations.
+
+Paired comparison responses include an `experiment` object with `scenario_sha256`,
+`placed_count`, `marketed_capacity`, `capacity_provenance`, and a hypothetical-load
+disclaimer. These are operator/evaluation metadata, not detector inputs.

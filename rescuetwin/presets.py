@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 
-CAPACITY_LABEL = ('Hypothetical load: survivor count set to the marketed maximum occupants of the matched '
+CAPACITY_LABEL = ('Hypothetical load: survivor count derived from the marketed maximum occupants of the matched '
                   'CoStar floor plan. This is not actual or live occupancy.')
 MAX_PLACEMENTS = 20
 MIN_EXIT_DISTANCE_M = 2.0
@@ -55,33 +55,61 @@ def _walking_steps(scene, start):
     return steps
 
 
-def build(scene, kind, seed=7):
+def _use(building_use):
+    """Only record an explicit building use, so scenarios without one keep their existing hashes."""
+    return {'building_use': building_use} if building_use else {}
+
+
+def _by_prior(scene, building_use, rng, count, spacing):
+    """Place people in rooms drawn in proportion to the building-use prior (illustrative, not occupancy data)."""
+    from . import occupancy
+    prior = occupancy.weights(scene, building_use)['weights']
+    rooms = [r for r in scene.rooms if prior.get(r['id'], 0) > 0]
+    taken, tries = [], 0
+    while len(taken) < count and tries < count * 8:
+        tries += 1
+        room = rng.choices(rooms, weights=[prior[r['id']] for r in rooms])[0]
+        cell = _pick(rng, scene, room, taken, spacing)
+        if cell: taken.append(cell)
+    return taken
+
+
+def build(scene, kind, seed=7, building_use=None):
+    from . import occupancy
+    use, _ = occupancy.resolve(scene, building_use)
     rng = random.Random(seed)
     taken = []
     if kind == 'standard':
         if scene.id == 'development-apartment':
             return dict(id='standard', label='Standard: 2 survivors, 1 ignition', note='Synthetic fixture default.',
-                        scenario=dict(scene_id=scene.id, survivors=[[26, 6], [15, 18]], ignitions=[[25, 18]], seed=seed))
-        bedrooms = _rooms(scene, 'Bedroom') or [r for r in scene.rooms if r.get('label') != 'Kitchen'] or scene.rooms
+                        scenario=dict(scene_id=scene.id, survivors=[[26, 6], [15, 18]], ignitions=[[25, 18]], seed=seed, **_use(building_use)))
         survivors = []
-        for room in bedrooms[-2:]:
-            cell = _pick(rng, scene, room, taken, 1.0)
-            if cell:
-                survivors.append(list(cell)); taken.append(cell)
+        if use == 'residential':
+            bedrooms = _rooms(scene, 'Bedroom') or [r for r in scene.rooms if r.get('label') != 'Kitchen'] or scene.rooms
+            for room in bedrooms[-2:]:
+                cell = _pick(rng, scene, room, taken, 1.0)
+                if cell:
+                    survivors.append(list(cell)); taken.append(cell)
+        else:
+            taken = _by_prior(scene, use, rng, 3, 1.0); survivors = [list(c) for c in taken]
         ignition = _ignition(rng, scene, taken)
-        return dict(id='standard', label=f'Standard: {len(survivors)} survivors, 1 ignition',
+        return dict(id='standard', label=f'Standard: {len(survivors)} survivors, 1 ignition' + ('' if use == 'residential' else f' ({use})'),
                     note='Illustrative placements; survivors and fire are synthetic.',
-                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed))
-    if kind == 'capacity-stress':
+                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed, **_use(building_use)))
+    if kind in ('capacity-stress', 'capacity-25', 'capacity-50'):
         costar = scene.meta.get('costar') or {}
         capacity = costar.get('max_occupants')
-        if not isinstance(capacity, int) or capacity <= 0:
+        if type(capacity) is not int or capacity <= 0 or costar.get('capacity_conflicts'):
             return None
-        count = min(capacity, MAX_PLACEMENTS)
+        fraction = {'capacity-25': .25, 'capacity-50': .5, 'capacity-stress': 1.0}[kind]
+        requested = math.ceil(capacity * fraction)
+        count = min(requested, MAX_PLACEMENTS)
         # Distribute round-robin over bedrooms first, then other rooms; capacity says nothing about where people are.
         order = (_rooms(scene, 'Bedroom') + [r for r in scene.rooms if r.get('label') not in ('Bedroom', 'Bathroom')]
                  + _rooms(scene, 'Bathroom')) or scene.rooms
         survivors, i = [], 0
+        if use != 'residential':
+            taken = _by_prior(scene, use, rng, count, 0.75); survivors = [list(c) for c in taken]
         while len(survivors) < count and i < count * 4:
             cell = _pick(rng, scene, order[i % len(order)], taken, 0.75)
             i += 1
@@ -89,20 +117,36 @@ def build(scene, kind, seed=7):
                 survivors.append(list(cell)); taken.append(cell)
         ignition = _ignition(rng, scene, taken)
         field = next((f for f in costar.get('fields', []) if f['key'] == 'max_occupants'), {})
-        return dict(id='capacity-stress', label=f'Capacity stress: {len(survivors)} survivors (marketed max occupants {capacity})',
-                    note=CAPACITY_LABEL, capacity=capacity,
+        return dict(id=kind, label=f'Capacity {fraction:.0%}: {len(survivors)} survivors (marketed max {capacity})',
+                    note=CAPACITY_LABEL, capacity=capacity, fraction=fraction, requested_count=requested, placed_count=len(survivors),
                     provenance=dict(source_id=field.get('source_id'), field_path=field.get('field_path'), dataset=field.get('dataset')),
-                    truncated=capacity > MAX_PLACEMENTS,
-                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed))
+                    truncated=len(survivors) < requested,
+                    scenario=dict(scene_id=scene.id, survivors=survivors, ignitions=[list(ignition)] if ignition else [], seed=seed, **_use(building_use)))
     raise ValueError(f'Unknown preset {kind!r}')
 
 
-def available(scene, seed=7):
-    presets = [build(scene, 'standard', seed)]
-    stress = build(scene, 'capacity-stress', seed)
+def available(scene, seed=7, building_use=None):
+    presets = [build(scene, 'standard', seed, building_use)]
+    stress = build(scene, 'capacity-stress', seed, building_use)
     if stress:
-        presets.append(stress)
+        seen=set()
+        for kind in ('capacity-25','capacity-50','capacity-stress'):
+            entry=build(scene,kind,seed,building_use)
+            if entry['requested_count'] not in seen:
+                presets.append(entry);seen.add(entry['requested_count'])
     else:
         presets.append(dict(id='capacity-stress', label='Capacity stress unavailable', unavailable=True,
-                            note='No matched CoStar floor-plan maxOccupants for this scene; nothing is inferred.'))
+                            note='No unambiguous matched CoStar floor-plan maxOccupants for this scene; nothing is inferred.'))
     return presets
+
+
+def experiment_context(scene, scenario):
+    """Operator/evaluation provenance only; never part of agent observations."""
+    import hashlib
+    import json
+    costar=scene.meta.get('costar') or {}
+    canonical=json.dumps(scenario,sort_keys=True,separators=(',',':'))
+    return dict(scenario_sha256=hashlib.sha256(canonical.encode()).hexdigest(),
+                placed_count=len(scenario['survivors']),marketed_capacity=costar.get('max_occupants'),
+                capacity_provenance=next((f for f in costar.get('fields',[]) if f['key']=='max_occupants'),None),
+                disclaimer='Scenario survivor count is hypothetical; marketed capacity is not live occupancy.')

@@ -78,7 +78,7 @@ def fetch(model, root, panos):
             saved.append(resource['filename'])
     (out / 'source.json').write_text(json.dumps(strip_urls(data), indent=2))
     print(json.dumps(dict(model=model, saved=saved, matterpak=data['bundle']['availability'],
-                          mesh_downloaded=bool(mesh), note='Exits remain UNVALIDATED until inspected.'), indent=2))
+                          mesh_downloaded=any(r.get('filename') in saved for r in mesh), note='Exits remain UNVALIDATED until inspected.'), indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +264,7 @@ def find_door(schematic, segment):
     return best
 
 
-def build(model, root, annotation_path, kit):
+def _build(model, root, annotation_path, kit):
     import shutil
     from collections import deque
     import numpy as np
@@ -279,6 +279,8 @@ def build(model, root, annotation_path, kit):
     out = root / model / 'bundle'
     out.mkdir(parents=True, exist_ok=True)
     data = json.loads((src / 'source.json').read_text())
+    if len(data['floors']) != 1:
+        raise ValueError('Multi-floor scans require explicitly scoped floor assets; MVP importer accepts one floor')
     floor = next(f for f in data['floors'] if f['label'] == ann['floor_label'])
     plans = {p.get('file', ''): p for p in data['assets']['floorplans']}
     schematic = Schematic(src / next(f for f in plans if f.endswith('_schematic.dxf')), src / next(f for f in plans if f.endswith('_schematic.png')))
@@ -324,6 +326,9 @@ def build(model, root, annotation_path, kit):
                           boundary_distance_m=round(boundary_distance, 3), evidence=spec['evidence'],
                           verified=spec['verified'], beyond=spec['beyond']))
 
+    if ann.get('robot_start') and kind.get(tuple(ann['robot_start'])) != 'free':
+        raise ValueError('Configured robot_start is blocked or outside the scanned floor')
+
     # Keep cells reachable from the first exit; everything else is recorded, not silently traversable.
     start = tuple(exits[0]['cell'])
     seen, queue = {start}, deque([start])
@@ -333,6 +338,8 @@ def build(model, root, annotation_path, kit):
             if kind.get(q) == 'free' and q not in seen:
                 seen.add(q)
                 queue.append(q)
+    if ann.get('robot_start') and tuple(ann['robot_start']) not in seen:
+        raise ValueError('Configured robot_start cannot reach the exit')
     unreachable = [p for p, k in kind.items() if k == 'free' and p not in seen]
     for p in unreachable:
         kind[p] = 'unreachable'
@@ -417,6 +424,8 @@ def build(model, root, annotation_path, kit):
 
     costar = costar_context(kit, model, ann['property_id'], ann['floor_plan_id']) if kit else None
     blocked_cells = {k: sorted([list(p) for p, v in kind.items() if v == k]) for k in ('wall', 'exterior', 'void', 'unreachable')}
+    if failures:
+        raise SystemExit(f'Alignment checks failed: {failures}; scene manifest not replaced')
     scene = {
         'schema': 'rescuetwin.scene/1',
         'id': f"{model}-{floor['label'].lower().replace(' ', '')}",
@@ -431,9 +440,9 @@ def build(model, root, annotation_path, kit):
         'not_exits': ann.get('not_exits', []),
         'rooms': room_out,
         'skipped_rooms': skipped,
-        'robot_start': exits[0]['cell'],
+        'robot_start': ann.get('robot_start', exits[0]['cell']),
         'time_limit': 600,
-        'mesh': dict(file='mesh.gltf', source='derived: walls extruded from the schematic floor plan (MatterPak mesh unavailable)',
+        'mesh': dict(file='mesh.gltf', source='derived: walls extruded from the schematic floor plan; source mesh/material validation not passed',
                      wall_height=wall_height, wall_thickness=WALL_THICKNESS, frame='viewer'),
         'floor_image': floor_image,
         'costar': costar,
@@ -478,6 +487,24 @@ def build(model, root, annotation_path, kit):
                           skipped_rooms=skipped, checks=checks), indent=2))
     if failures:
         raise SystemExit(f'Alignment checks failed: {failures}')
+
+
+def build(model, root, annotation_path, kit):
+    """Prepare in isolation; publish the manifest only after all checks pass."""
+    import tempfile
+    import shutil
+    with tempfile.TemporaryDirectory() as tmp:
+        staging=Path(tmp)
+        (staging/model).mkdir()
+        (staging/model/'source').symlink_to((root/model/'source').resolve(),target_is_directory=True)
+        _build(model,staging,annotation_path,kit)
+        target=root/model/'bundle';target.mkdir(parents=True,exist_ok=True)
+        built=staging/model/'bundle'
+        for file in built.iterdir():
+            if file.name!='scene.json':shutil.copyfile(file,target/file.name)
+        shutil.copyfile(built/'scene.json',target/'scene.json.next')
+        (target/'scene.json.next').replace(target/'scene.json')
+        if (target/'scene.before-source.json').exists():shutil.copyfile(target/'scene.json',target/'scene.before-source.json')
 
 
 if __name__ == '__main__':

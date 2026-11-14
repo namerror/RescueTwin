@@ -14,9 +14,6 @@ def credentials():
             if '=' in line and not line.lstrip().startswith('#'):
                 key,_,value=line.partition('=');values[key.strip()]=value.strip().strip('\"').strip("'")
     values.update(os.environ)
-    for canonical,alias in [('MATTERPORT_API_KEY','MP_API_KEY'),('MATTERPORT_API_TOKEN','MP_API_TOKEN')]:
-        if values.get(canonical) and values.get(alias) and values[canonical]!=values[alias]:
-            raise SystemExit(f'Conflicting {canonical}/{alias}; resolve without logging values')
     key=values.get('MATTERPORT_API_KEY') or values.get('MP_API_KEY')
     token=values.get('MATTERPORT_API_TOKEN') or values.get('MP_API_TOKEN')
     if not key or not token:raise SystemExit('Configure Matterport key/token in environment or .env')
@@ -38,5 +35,9 @@ if __name__=='__main__':
     with urllib.request.urlopen(request,timeout=60) as response:body=json.load(response)
     if body.get('errors'):raise SystemExit('Matterport rejected query; inspect schema/permissions without logging credentials')
     out=Path('data/prepared')/args.model;out.mkdir(parents=True,exist_ok=True)
-    (out/'source.json').write_text(json.dumps(body['data']['model'],indent=2))
+    def sanitized(value):
+        if isinstance(value,dict):return {k:sanitized(v) for k,v in value.items() if k not in ('url','downloadUrl','urlTemplate','children')}
+        if isinstance(value,list):return [sanitized(v) for v in value]
+        return value
+    (out/'source.json').write_text(json.dumps(sanitized(body['data']['model']),indent=2))
     print(f'Saved source metadata to {out}/source.json. Signed asset links expire. Exits remain UNVALIDATED.')

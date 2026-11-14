@@ -196,3 +196,22 @@ def test_costar_context_provenance():
     assert all('email' not in json.dumps(f).lower() for f in ctx['fields'])
     with pytest.raises(ValueError):
         context(KIT, '9A46aT7FCPg', 22572250, 1)
+
+
+def test_capacity_levels_deduplicate_and_keep_counts(mini):
+    entries=[p for p in presets.available(mini,3) if p['id'].startswith('capacity-')]
+    assert [p['requested_count'] for p in entries]==[1,2,4]
+    for p in entries:
+        assert p['placed_count']==len(p['scenario']['survivors'])
+        Simulation(mini,p['scenario'])
+    mini.meta['costar']['capacity_conflicts']=[{'value':9}]
+    assert presets.build(mini,'capacity-stress') is None
+
+
+def test_experiment_context_is_stable_and_reports_actual_placements(mini):
+    scenario=presets.build(mini,'capacity-50',3)['scenario']
+    context=presets.experiment_context(mini,scenario)
+    assert context['placed_count']==2 and context['marketed_capacity']==4
+    assert context['scenario_sha256']==presets.experiment_context(mini,dict(reversed(list(scenario.items()))))['scenario_sha256']
+    scenario['seed']=4
+    assert context['scenario_sha256']!=presets.experiment_context(mini,scenario)['scenario_sha256']

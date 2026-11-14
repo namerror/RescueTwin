@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from . import presets
 from .environment import parse_environment
 from .core import CAMERA_RANGE_M, HAZARD_PREVIEW_LIMIT_S, Simulation, compare
-from .scenes import BUNDLE_FILES, available, default_scene
+from .scenes import asset_file, available, default_scene
 
 FRAME_TIMEOUT_S = float(os.environ.get('RESCUETWIN_FRAME_TIMEOUT', '10'))
 VISION_AVAILABLE = importlib.util.find_spec('ultralytics') is not None
@@ -67,6 +67,7 @@ class Paired:
 
     def public(self):
         return dict(status=self.status, scene_id=self.scene.id, seed=self.scenario['seed'], perception=self.perception,
+                    experiment=presets.experiment_context(self.scene,self.scenario),
                     reports=self.reports, running=None if self.status != 'running' else self.order[len(self.reports)],
                     note=('Live paired runs: same frozen scenario, hazard model, sensors and safety rules; YOLO on rendered '
                           'frames. Illustrative exposure units; hosted agent excluded; differences are not attributable to an LLM.'))
@@ -156,6 +157,7 @@ class Scenario(BaseModel):
     ignitions:list[list[int]]=Field(max_length=20)
     seed:int=7
     scene_id:str|None=None
+    building_use:str|None=None
 
 class Control(BaseModel):
     action:str
@@ -223,13 +225,21 @@ def choose_scene(body:SceneChoice):
 @app.get('/api/scenes/{scene_id}/files/{name}')
 def scene_file(scene_id:str,name:str):
     scene=scenes.get(scene_id)
-    if scene is None or scene.bundle is None or name not in BUNDLE_FILES:raise HTTPException(404,'No such scene file')
-    path=scene.bundle/name
-    if not path.is_file():raise HTTPException(404,'No such scene file')
-    return FileResponse(path,media_type=BUNDLE_FILES[name])
+    if scene is None:raise HTTPException(404,'No such scene file')
+    try:path,mime=asset_file(scene,name)
+    except ValueError:raise HTTPException(404,'No such scene file')
+    return FileResponse(path,media_type=mime)
 
 @app.get('/api/presets')
-def preset_list(seed:int=7):return presets.available(sim.scene,seed)
+def preset_list(seed:int=7,building_use:str|None=None):
+    try:return presets.available(sim.scene,seed,building_use)
+    except ValueError as e:raise HTTPException(422,str(e)) from e
+
+@app.get('/api/building-uses')
+def building_uses():
+    from . import occupancy
+    use,source=occupancy.resolve(sim.scene)
+    return dict(inferred=use,source=source,profiles=[dict(id=k,label=v['label'],rationale=v['rationale']) for k,v in occupancy.PROFILES.items()])
 
 @app.get('/api/perception')
 def perception_status():
@@ -243,6 +253,7 @@ def scenario(body:Scenario):
     global sim
     if sim.status!='idle' or sim.hazards_running or busy():raise HTTPException(409,'Reset before editing a scenario')
     data=body.model_dump();data['scene_id']=data['scene_id'] or sim.scene.id
+    if data.get('building_use') is None:data.pop('building_use',None)
     try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     return sim.state()
@@ -285,7 +296,9 @@ async def comparison(body:CompareRequest|None=None):
     perception=(body.perception if body else None) or sim.perception_mode
     scene,scenario=sim.scene,deepcopy(sim.scenario)
     if perception=='analytic-development':
-        return await asyncio.to_thread(compare,scene,scenario,perception)
+        report=await asyncio.to_thread(compare,scene,scenario,perception)
+        report['experiment']=presets.experiment_context(scene,scenario)
+        return report
     if sim.status=='running' or busy():raise HTTPException(409,'Pause or reset before a paired comparison')
     paired=Paired(scene,scenario,perception);paired.next_run()
     return paired.public()

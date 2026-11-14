@@ -42,3 +42,20 @@ def test_hazard_preview_runs_without_robot_mission():
         paused=client.post('/api/control',json={'action':'pause'}).json()
         assert not paused['hazards_running']
         client.post('/api/control',json={'action':'reset'})
+
+
+def test_building_use_presets_and_scenario_roundtrip():
+    from fastapi.testclient import TestClient
+    from rescuetwin import api
+    client = TestClient(api.app)
+    client.post('/api/control', json={'action': 'reset'})
+    uses = client.get('/api/building-uses').json()
+    assert {p['id'] for p in uses['profiles']} >= {'residential', 'assembly'} and uses['inferred'] == 'residential'
+    plain = client.get('/api/presets').json()[0]['scenario']
+    assert 'building_use' not in plain                                   # unchanged hashes for existing scenarios
+    studio = client.get('/api/presets?building_use=assembly').json()[0]['scenario']
+    assert studio['building_use'] == 'assembly'
+    state = client.post('/api/scenario', json=studio).json()
+    assert state['scenario']['building_use'] == 'assembly'
+    assert client.get('/api/presets?building_use=casino').status_code == 422
+    client.post('/api/scenario', json=plain)
