@@ -29,6 +29,9 @@ def load_bundle(directory: Path) -> Scene:
     meta['exit_info'] = data['exits']
     meta['blocked_kinds'] = {k: len(v) for k, v in data['blocked'].items()}
     meta['exterior'] = data['blocked'].get('exterior', [])
+    # Operator-only overlay: which blocked cells came from scan furniture vs. scan walls/door frames.
+    meta['obstacle_overlay'] = {k: data['blocked'][k] for k in ('furniture', 'source_walls') if k in data['blocked']}
+    meta['reconciliation'] = data.get('reconciliation')
     scene = Scene(id=data['id'], name=data['name'], width=grid['width'], height=grid['height'],
                   resolution=grid['resolution'], walls=blocked, exits=exits, rooms=rooms, source=data['source'],
                   origin=tuple(grid['origin']), robot_start=tuple(data.get('robot_start') or exits[0]),

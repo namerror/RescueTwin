@@ -204,3 +204,98 @@ returns 403 when the API supplies a downloadable OBJ that references it. If the
 MatterPak is expected to provide the bundle, ask whether its unavailable status is an
 account permission, export-generation, or model-asset limitation. No purchase or
 external request has been made.
+
+## Furnished scan geometry (2026-11-14, afternoon)
+
+**Finding.** The "full-footprint 50k" mesh above is Matterport's `defurnished_50k.obj`:
+furniture removed by Matterport's generative model. It cannot supply furniture geometry.
+The only furnished mesh the Model API returns is the partial `lod2_room0_chunk262145.obj`.
+`meshes(formats, resolutions)` returns the same two records for every model view
+(layered, snapshot, defurnished, insights). `textures` also lists a 500k set (34 JPEGs,
+high/low), which probably belongs to the chunked furnished mesh. The MatterPak and OBJ
+resources stay `unavailable` for both shortlisted scans, even though
+`bundle(mp:matterpak).availability` is `unlocked`. The hackathon site's
+`/api/models/<sid>` serves only the exterior drone splat and DJI photos.
+No chunk URLs were guessed.
+
+**Fetch, once unlocked.** Run
+`.venv/bin/python scripts/scene_assets.py matterpak MODEL` from the repo root.
+- It range-reads the zip, extracts only the OBJ, MTLs and textures (no `cloud.xyz`),
+  and records the listing and SHA256 hashes in `source-assets/matterpak-status.json`.
+- It never logs URLs and exits without downloading if there is no link.
+- Then import with `scene_assets.py import MODEL <printed obj path>`.
+
+Import now resolves its extraction directory, which fixes a macOS `/private/var` mismatch
+that rejected every zip entry as unsafe.
+
+**Furniture-aware reconciliation** (`reconcile()` in `scripts/scene_assets.py`, pure function).
+- Mesh triangles in the robot band (0.15–1.10 m) are projected onto the schematic grid.
+  - Cells within one cell of a schematic wall or exterior cell, or inside a schematic door
+    gap, become `source_walls`.
+  - All other cells become `furniture`. Both are added to `blocked`, so they constrain
+    motion, line of sight, placements and hazards like walls.
+- **Portals.** A `source_walls` cell is cleared only if its in-cell obstruction is at most
+  0.15 m thick (door leaf/frame, including the 0.05 m buffer) and it lies in a schematic
+  door gap or a verified exit opening. Doors closed in the scan are assumed openable.
+  Each clearing is recorded with its thickness and reason. Furniture is never cleared.
+- **Observation points.** A point in furniture moves to the nearest reachable cell of its
+  own room, and the move is recorded. A room with no reachable cell is listed in
+  `skipped_rooms` with a reason.
+- **Pass criteria.** The start and exits must be connected, at least one room must remain,
+  and the earlier coverage/agreement thresholds still apply.
+- **Overlay.** `obstacle_overlay` and `reconciliation` are exposed for an operator-only
+  overlay. Textured scans render unlit (baked lighting), and the operator cutaway is
+  adjustable (1.0/1.6/2.2 m/off). Robot RGB-D always uses the full geometry.
+
+A **diagnostic dry run** on the defurnished 9A46aT7FCPg mesh (no bundle written) now passes:
+
+| Measure | Result |
+|---|---|
+| Wall agreement | 99.57% |
+| Floor coverage | 97.9% |
+| Fixture cells | 124 (cabinets/counters/bath fixtures survive defurnishing) |
+| Scan wall cells | 168 |
+| Portals cleared | 24, including the entry door shown closed in the scan (0.12 m thick) |
+| Rooms reachable | 7/7, with no relocations |
+
+The live bundle still uses the DXF-derived scene. Furnished numbers will differ.
+Synthetic tests cover furniture, door-leaf portals, bulky doorway objects, a blocked
+exit, observation relocation and an end-to-end textured zip. These tests are not
+sponsor imagery. Furniture as **fuel** is a hazard-contract change owned by the physics
+teammate and is not implemented.
+
+### Defurnished scan imported as the interim scene (2026-11-14)
+
+At the project owner's request, `9A46aT7FCPg` now uses `defurnished_50k.obj`. It was imported with
+`--allow-untextured`, is labelled "UNTEXTURED geometry experiment", and the previous manifest is kept as
+`bundle/scene.before-source.json`.
+
+**Import results**
+
+| Check | Result |
+|---|---|
+| Wall agreement | 99.57% |
+| Floor coverage | 97.9% |
+| Fixture cells (kind `furniture`) | 124 |
+| Scan wall cells | 168 |
+| Portals | 24 (entry door included) |
+| Rooms reachable | 7/7 |
+
+Movable furniture is absent by construction. Untextured scans get computed normals and flat neutral shading.
+
+**Headless paired runs** (seed 7, analytic-development perception)
+
+| Hypothetical people | Distance-only: evacuated / time / exposure | Risk-aware: evacuated / time / exposure |
+|---|---|---|
+| 2 | 2 / 189.8 s / 314.3 | 2 / 192.8 s / 316.4 |
+| 4 | 4 / 391.8 s / 640.5 | 4 / 396.8 s / 642.8 |
+| 8 | 8 / 551.0 s / 1125.4 | 8 / 559.0 s / 1131.7 |
+
+Exposure is roughly double the DXF-scene runs, so the two are not comparable. Risk-aware routing was again slightly slower with slightly higher exposure.
+
+**Browser check** (`data/validation/defurnished-ui/`)
+- Both scenes loaded.
+- The clear-view YOLO mission completed, evacuating 1/1 with one detection and no degradation.
+- The analytic Standard rehearsal held at 47 s and resumed at 93 s; it was not a completed rescue.
+- Capacity provenance and the scenario hash were visible.
+- There were no page errors.

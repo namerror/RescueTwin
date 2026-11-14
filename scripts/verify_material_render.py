@@ -18,7 +18,8 @@ def verify(url='http://127.0.0.1:5174'):
     cells=[[c,r] for r in range(8) for c in range(8)]
     scene={'id':'material-fixture','name':'SYNTHETIC material fixture','width':8,'height':8,'resolution':.5,'origin':[0,0], 'walls':[],'exterior':[],'exits':[[2,2]],'source':'synthetic','robot_start':[2,2],'time_limit':600,
            'rooms':[{'id':'r','name':'Test','label':'Bedroom','cells':cells,'observe':[[2,2]]}],
-           'mesh':{'file':'source.obj','format':'obj','materials':mtls,'textured':True,'frame':'model','wall_height':3,'source':'SYNTHETIC test OBJ'},'assets':assets}
+           'mesh':{'file':'source.obj','format':'obj','materials':mtls,'textured':True,'frame':'model','wall_height':3,'source':'SYNTHETIC test OBJ'},'assets':assets,
+           'obstacle_overlay':{'furniture':[[5,5],[5,6],[6,5],[6,6]],'source_walls':[[7,r] for r in range(8)]}}
     zeros=[[0]*8 for _ in range(8)];seq=[0];frames=[];errors=[]
     state={'scene_id':scene['id'],'scenario':{'scene_id':scene['id'],'survivors':[],'ignitions':[],'seed':7},'time':0,'status':'idle','robot':[2,2],'heading':0,'pose':{'x':1.25,'y':1.25,'z':1,'yaw':0},'survivors':[], 'heat':zeros,'smoke':zeros,'observed':zeros,'route':[],'events':[],'metrics':{},'mode':'adaptive','perception_mode':'image-yolo','detections':[],'frame_request':None,'degraded':False,'scanning':False,'last_frame':None,'paired':None,'hazard_time':0,'hazards_running':False}
     def respond(route):
@@ -54,10 +55,17 @@ def verify(url='http://127.0.0.1:5174'):
             if len(frames)>count:break
         assert frames[-1]['valid_depth_pixels']==before,'Operator wall toggle changed robot depth'
         page.locator('#walls-layer').check()
+        assert page.locator('#furniture-control').is_visible() and page.locator('#cutaway-control').is_visible()
+        page.locator('#furniture-layer').check(); page.locator('#cutaway-height').select_option('off')
+        count=len(frames)
+        for _ in range(20):
+            page.wait_for_timeout(250)
+            if len(frames)>count:break
+        assert frames[-1]['valid_depth_pixels']==before,'Operator overlay/cutaway changed robot depth'
         page.locator('#plan').click();page.screenshot(path=str(root/'topdown.png'),full_page=True)
         assert frames,'No rendered RGB-D frame'
         rgb=np.array(Image.open(root/'robot-rgb.jpg'));colored=((rgb[:,:,1]>rgb[:,:,0]*1.2)&(rgb[:,:,1]>rgb[:,:,2]*1.2)).mean()
-        result={'synthetic_fixture':True,'green_pixel_fraction':float(colored),'frames':frames[-1:],'page_errors':errors}
+        result={'synthetic_fixture':True,'green_pixel_fraction':float(colored),'frames':frames[-1:],'page_errors':errors,'overlay_and_cutaway_operator_only':True}
         page.route('**/files/*.mtl',lambda route:route.fulfill(status=404))
         page.reload();page.wait_for_timeout(2000)
         result['missing_material_blocks_start']=page.locator('#start').is_disabled()

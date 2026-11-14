@@ -22,6 +22,7 @@ interface SceneData {
   checks?: Record<string, unknown> | null;
   exit_info?: { id: string; label: string; opening_width_m: number; evidence: string[]; beyond: string }[];
   assumptions?: string[]; provenance?: { item: string; source: string; derivation: string }[];
+  obstacle_overlay?: { furniture?: Cell[]; source_walls?: Cell[] } | null;
 }
 interface Pose { x: number; y: number; z: number; yaw: number }
 interface DetectionEntry { id: string; position: [number, number]; cell: Cell; confidence: number; hits: number; status: string; source: string }
@@ -41,6 +42,7 @@ interface Preset { id: string; label: string; note: string; scenario?: Scenario;
 
 let sceneReady = false, sceneLoadVersion = 0;
 const sourceCutaway = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1.6);
+let cutawayOn = true;
 const CAM_W = 512, CAM_H = 384, CAM_HFOV = Math.PI / 2;
 const CAM_VFOV = 2 * Math.atan(Math.tan(CAM_HFOV / 2) * CAM_H / CAM_W);
 const FX = (CAM_W / 2) / Math.tan(CAM_HFOV / 2), FY = (CAM_H / 2) / Math.tan(CAM_VFOV / 2);
@@ -84,6 +86,8 @@ $('app').innerHTML = `
           <div class="segmented view-toggle" role="radiogroup" aria-label="Knowledge view"><label><input type="radio" name="view" value="truth" checked /><span>Operator truth</span></label><label><input type="radio" name="view" value="belief" /><span>Robot belief</span></label></div>
           <div class="layer-controls" aria-label="Scene layers">
             <label><input type="checkbox" id="walls-layer" checked />Walls</label>
+            <label id="cutaway-control" hidden title="Operator view clips the scanned mesh above this height; robot camera always sees full geometry">Cutaway <select id="cutaway-height"><option value="1.0">1.0 m</option><option value="1.6" selected>1.6 m</option><option value="2.2">2.2 m</option><option value="off">Off</option></select></label>
+            <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
             <label><input type="checkbox" id="heat-layer" checked /><span class="swatch heat"></span>Fire / heat</label>
             <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
             <label><input type="checkbox" id="observed-layer" />Unobserved</label>
@@ -169,6 +173,8 @@ const layers = { heat: true, smoke: true, observed: false, route: true };
 // Upstream PR #1 hazard rendering: textured heat (floor) and banded smoke (near ceiling) fields,
 // instanced smoke clouds and flame cones. Fields/clouds are operator-only; flames are physical (camera sees them).
 const wallLayer = new THREE.Group();
+const obstacleLayer = new THREE.Group();  // operator-only furniture/source-wall cells
+world.add(obstacleLayer);
 function createField(order: number) {
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d')!;
@@ -524,6 +530,25 @@ async function loadSceneMesh(current: SceneData, version: number): Promise<void>
         materials.preload(); loader.setMaterials(materials);
       }
       object = await loader.loadAsync(base + encodeURIComponent(mesh.file));
+      // Untextured scans (e.g. the defurnished 50k OBJ) ship without normals: compute them and shade
+      // flat in a neutral plaster tone so walls, floor and fixtures read as 3D instead of flat white.
+      if (!mesh.textured) object.traverse(o => {
+        if (!(o instanceof THREE.Mesh)) return;
+        o.geometry.computeVertexNormals();
+        for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.dispose();
+        o.material = new THREE.MeshLambertMaterial({ color: '#d9d2c6', flatShading: true, side: THREE.DoubleSide });
+      });
+      // Scanned textures already contain the room's lighting; render them unlit so they are not lit twice.
+      if (mesh.textured) object.traverse(o => {
+        if (!(o instanceof THREE.Mesh)) return;
+        const swap = (m: THREE.Material) => {
+          const map = (m as THREE.MeshPhongMaterial).map ?? null;
+          if (map) map.colorSpace = THREE.SRGBColorSpace;
+          const basic = new THREE.MeshBasicMaterial({ map, side: THREE.DoubleSide, name: m.name });
+          m.dispose(); return basic;
+        };
+        o.material = Array.isArray(o.material) ? o.material.map(swap) : swap(o.material);
+      });
       const registration = new THREE.Matrix4();
       if (mesh.transform) registration.set(...mesh.transform.flat() as [number,number,number,number,number,number,number,number,number,number,number,number,number,number,number,number]);
       const viewer = new THREE.Matrix4().set(1,0,0,0, 0,0,1,0, 0,-1,0,0, 0,0,0,1);
@@ -612,6 +637,20 @@ function buildStaticScene(): void {
   heatField.mesh.position.copy(toThree(cx, cy, 0.03));
   smokeField.mesh.position.copy(toThree(cx, cy, wallHeight * 0.9));
   blockedCells = new Set([...scene.walls, ...scene.exterior].map(key));
+  clearGroup(obstacleLayer);
+  const overlay = scene.obstacle_overlay ?? {};
+  const kinds: [Cell[] | undefined, string][] = [[overlay.furniture, '#f0a640'], [overlay.source_walls, '#7f8fa3']];
+  for (const [cells, color] of kinds) {
+    if (!cells?.length) continue;
+    const marks = new THREE.InstancedMesh(new THREE.BoxGeometry(res * 0.9, 0.04, res * 0.9), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.7, depthWrite: false }), cells.length);
+    const matrix = new THREE.Matrix4();
+    cells.forEach((cell, i) => marks.setMatrixAt(i, matrix.makeTranslation(position(cell, 0.05))));
+    obstacleLayer.add(marks);
+  }
+  operatorOnly(obstacleLayer);
+  obstacleLayer.visible = ($('furniture-layer') as HTMLInputElement).checked;
+  $('furniture-control').hidden = !(overlay.furniture?.length || overlay.source_walls?.length);
+  $('cutaway-control').hidden = !sourceMesh;
 }
 
 /** CesiumMan (CC BY 4.0, © Cesium; see public/models/ATTRIBUTION.md): a textured human figure that a
@@ -1007,7 +1046,7 @@ function setupRenderer(): void {
     renderer.setAnimationLoop(() => {
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
-      renderer.clippingPlanes = scene?.mesh?.format === 'obj' ? [sourceCutaway] : [];
+      renderer.clippingPlanes = scene?.mesh?.format === 'obj' && cutawayOn ? [sourceCutaway] : [];
       renderer.render(world, camera);
       renderer.clippingPlanes = [];
     });
@@ -1206,6 +1245,12 @@ $('focus-fire').addEventListener('click', () => {
 $('orbit').addEventListener('click', () => setView('orbit'));
 $('plan').addEventListener('click', () => setView('plan'));
 $('walls-layer').addEventListener('change', applyWallLayer);
+$('furniture-layer').addEventListener('change', () => { obstacleLayer.visible = ($('furniture-layer') as HTMLInputElement).checked; });
+$('cutaway-height').addEventListener('change', () => {
+  const value = ($('cutaway-height') as HTMLSelectElement).value;
+  cutawayOn = value !== 'off';
+  if (cutawayOn) sourceCutaway.constant = Number(value);
+});
 $('expand').addEventListener('click', async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
