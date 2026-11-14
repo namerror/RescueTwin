@@ -102,3 +102,6 @@ main { padding-top: 20px; }
 @media (min-width: 851px) {
   .viewport { height: clamp(490px, calc(100dvh - 210px), 880px); }
 }
+
+.report .report-status{text-transform:uppercase;font-size:9px;letter-spacing:.8px}.report.queued .report-status{color:#ffb46b}.report.delivered .report-status{color:#9fd3ff}.report.acknowledged .report-status{color:#4fd1a5}.report button{margin-left:6px;min-height:22px;padding:2px 8px}
+.warning-hint{color:#ffb46b}

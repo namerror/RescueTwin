@@ -15,6 +15,14 @@ from .core import CAMERA_RANGE_M, HAZARD_PREVIEW_LIMIT_S, Simulation, compare
 from .scenes import asset_file, available, default_scene
 
 FRAME_TIMEOUT_S = float(os.environ.get('RESCUETWIN_FRAME_TIMEOUT', '10'))
+AGENT_PERIOD_S = float(os.environ.get('RESCUETWIN_AGENT_PERIOD', '5'))
+AGENT_TIMEOUT_S = 10.0   # ~3 models x 3 s budget; decisions older than 10 s of mission time are rejected anyway
+# Hosted agent status for the operator UI (no secrets). Excluded from paired comparisons by design.
+agent_status = dict(state='starting', enabled=os.environ.get('RESCUETWIN_AGENT', '1') != '0', model=None,
+                    accepted=0, rejected=0, failed=0, latency_s=None, last=None, last_error=None,
+                    # Decision-quality mode: freeze the mission clock (robot and fire) while the model is thinking.
+                    pause_clock=False, thinking=False)
+PAUSE_LABEL = 'Decision-quality mode: mission clock and fire paused during model inference; not real-time performance.'
 VISION_AVAILABLE = importlib.util.find_spec('ultralytics') is not None
 TICK = .2
 
@@ -111,6 +119,10 @@ async def lifespan(app):
         while True:
             fast = paired is not None and paired.status == 'running'
             current = sim
+            if current.status == 'running' and inference_hold(current):
+                current.metrics['inference_pause_s'] += TICK      # labelled pause, reported with the run
+                await asyncio.sleep(TICK)
+                continue
             if current.status == 'running':
                 frame_timeout_check()
                 current.tick(TICK)
@@ -124,21 +136,40 @@ async def lifespan(app):
             await asyncio.sleep(0 if fast and not current.needs_frame() else TICK / (8 if fast else 1))
 
     async def reason():
-        if not os.environ.get('GEMINI_API_KEY'):return
-        from .agent import MissionAgent,apply_decision
+        """Hosted supervisor: proposes goals; the controller validates and executes. Any failure or rejection falls
+        back to the deterministic policy for that decision (the mission never pauses on the model's account)."""
+        from .agent import BACKOFF_FAILED_S,BACKOFF_REJECTED_S,MissionAgent,apply_decision,decision_options,load_agent_env,scrub,wants_decision
+        load_agent_env()
+        if not os.environ.get('GEMINI_API_KEY'):
+            agent_status.update(state='no-key');return
         try:agent=MissionAgent()
-        except Exception:
+        except Exception as e:
+            agent_status.update(state='unavailable',last_error=scrub(type(e).__name__+': '+str(e)))
             sim.log('Hosted agent unavailable; deterministic development policy active.');return
+        agent_status.update(state='ready',model=agent.model)
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(TICK/2 if agent_status['pause_clock'] else AGENT_PERIOD_S)
             current=sim
-            if current.status!='running' or current.escort:continue
-            observation=deepcopy(current.observations())
+            if not agent_status['enabled'] or busy() or not wants_decision(current):continue
+            if agent_status['pause_clock'] and not getattr(current,'pause_logged',False):
+                current.pause_logged=True;current.log(PAUSE_LABEL)
+            observation=deepcopy(current.observations());options=decision_options(current)
+            started=time.time();agent_status['thinking']=True
             try:
-                decision=await asyncio.wait_for(asyncio.to_thread(agent.decide,observation,current.scene),timeout=8)
-                if current is sim:apply_decision(current,decision,observation['time'])
-            except Exception:
-                if current is sim:current.log('Hosted decision failed/rejected; pausing for operator review.');current.status='paused';current.hazards_running=False
+                decision=await asyncio.wait_for(asyncio.to_thread(agent.decide,observation,current.scene,options),timeout=AGENT_TIMEOUT_S)
+                agent_status['latency_s']=round(time.time()-started,2)
+                if current is not sim:continue
+                apply_decision(current,decision,observation['time'])
+                agent_status['model']=agent.model;agent_status['accepted']+=1;agent_status['last']=dict(kind=decision.get('kind'),id=decision.get('id'),reason=str(decision.get('reason',''))[:300],time=round(current.time,1))
+            except Exception as e:
+                agent_status['latency_s']=round(time.time()-started,2)
+                kind='rejected' if isinstance(e,ValueError) else 'failed'
+                agent_status[kind]+=1;agent_status['last_error']=scrub(f'{type(e).__name__}: {e}' if str(e) else type(e).__name__)
+                if current is sim:
+                    current.agent_backoff_until=current.time+(BACKOFF_REJECTED_S if kind=='rejected' else BACKOFF_FAILED_S)
+                    current.log(f"Hosted decision {kind} ({agent_status['last_error']}); deterministic policy continues.")
+            finally:
+                agent_status['thinking']=False
 
     if VISION_AVAILABLE and os.environ.get('RESCUETWIN_PRELOAD_DETECTOR', '1') == '1':
         asyncio.get_running_loop().run_in_executor(None, load_detector)
@@ -158,6 +189,8 @@ class Scenario(BaseModel):
     seed:int=7
     scene_id:str|None=None
     building_use:str|None=None
+    immobile:list[list[int]]=Field(default_factory=list,max_length=20)
+    comms_outages:list[list[float]]=Field(default_factory=list,max_length=10)
 
 class Control(BaseModel):
     action:str
@@ -243,6 +276,31 @@ def building_uses():
     use,source=occupancy.resolve(sim.scene)
     return dict(inferred=use,source=source,profiles=[dict(id=k,label=v['label'],rationale=v['rationale']) for k,v in occupancy.PROFILES.items()])
 
+@app.get('/api/agent')
+def agent_info():
+    return dict(agent_status,note='Gemini proposes room/survivor/exit goals under docs/ROBOT_CONSTITUTION.md; the controller validates and executes. '
+                'Failures fall back to the deterministic policy. Paired comparisons exclude the hosted agent.')
+
+class AgentToggle(BaseModel):
+    enabled:bool|None=None
+    pause_clock:bool|None=None
+
+def inference_hold(current):
+    """Freeze the clock only in decision-quality mode, for the live run, while the robot waits on the model."""
+    from .agent import wants_decision
+    return (agent_status['pause_clock'] and agent_status['enabled'] and agent_status['state']=='ready' and not busy()
+            and current is sim and (agent_status['thinking'] or wants_decision(current)))
+
+@app.post('/api/agent')
+def agent_toggle(body:AgentToggle):
+    if body.enabled is not None:
+        agent_status['enabled']=body.enabled
+        sim.log(f"Hosted agent {'enabled' if body.enabled else 'disabled'} by operator.")
+    if body.pause_clock is not None:
+        agent_status['pause_clock']=body.pause_clock
+        sim.log(PAUSE_LABEL if body.pause_clock else 'Real-time mode: the mission clock runs during model inference.')
+    return agent_info()
+
 @app.get('/api/perception')
 def perception_status():
     return dict(vision_installed=VISION_AVAILABLE,detector_loaded=detector is not None,error=detector_error,
@@ -255,7 +313,8 @@ def scenario(body:Scenario):
     global sim
     if sim.status!='idle' or sim.hazards_running or busy():raise HTTPException(409,'Reset before editing a scenario')
     data=body.model_dump();data['scene_id']=data['scene_id'] or sim.scene.id
-    if data.get('building_use') is None:data.pop('building_use',None)
+    for key in ('building_use','immobile','comms_outages'):
+        if not data.get(key):data.pop(key,None)   # unset fields stay out, so existing scenario hashes are unchanged
     try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     return sim.state()
@@ -277,6 +336,9 @@ def control(body:Control):
         if sim.status=='idle' and body.perception and body.perception!=sim.perception_mode:
             sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception)
         sim.mode=body.mode or sim.mode;sim.status='running';sim.hazards_running=True
+    elif body.action=='withdraw':
+        if sim.status not in ('running','paused'):raise HTTPException(409,'No active mission to withdraw')
+        sim.withdraw('operator stop');sim.status='running';sim.hazards_running=True
     elif body.action=='pause':
         if sim.status!='running':raise HTTPException(409,'No active run')
         sim.status='paused';sim.hazards_running=False
@@ -291,6 +353,13 @@ def control(body:Control):
 def cancel_paired():
     global paired
     if paired is not None and paired.status=='running':paired.status='cancelled'
+
+@app.post('/api/reports/{report_id}/ack')
+def acknowledge_report(report_id:str):
+    """The operator acknowledges a delivered report on behalf of the outside response team."""
+    try:sim.acknowledge(report_id)
+    except ValueError as e:raise HTTPException(409,str(e)) from e
+    return sim.state()
 
 @app.post('/api/compare')
 async def comparison(body:CompareRequest|None=None):

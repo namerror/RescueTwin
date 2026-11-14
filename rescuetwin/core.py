@@ -24,7 +24,8 @@ ROBOT_SPEED = 0.5            # m/s along the grid
 ROBOT_DASH_SPEED = 1.0       # m/s while the robot (or an escort) is in or entering a hazard cell
 HAZARD_HEAT, HAZARD_SMOKE = 0.3, 0.5   # a cell counts as "in fire/dense smoke" at or above these
 ESCORT_HEAT_LIMIT, ESCORT_SMOKE_LIMIT = .6, .5   # people are not fire-proof
-ESCORT_LAST_RESORT_S = 15.0  # escort cornered this long with no safe route: take the least-hazard route
+# Robot decision constitution (docs/ROBOT_CONSTITUTION.md): human escort limits are never relaxed, by timeout
+# or otherwise. A cornered escort holds, reports the person's location and requests assistance.
 # Demo pacing: the hazard model advances at this fraction of mission time (1.0 = teammate model as-is).
 HAZARD_TIME_SCALE = float(os.environ.get('RESCUETWIN_HAZARD_TIME_SCALE', '0.6'))
 SEARCH_PRIOR_SMOOTHING_M = 3.0   # travel added to every candidate so likelihood, not just proximity, matters
@@ -55,6 +56,14 @@ PAIR_M = 0.75                # robot must reach this close to start an escort
 BELIEF_STALE_S = 60.0        # older hazard readings keep their risk penalty but stop being hard planning blocks
 STALE_HEAT_CAP, STALE_SMOKE_CAP = .59, .49   # just under the strictest (escort) limits
 CONFIRM_HITS = {'analytic-development': 1, 'image-yolo': 2}
+# Constitution support (docs/ROBOT_CONSTITUTION.md).
+ROOM_INSPECTED_FRACTION = 0.8    # share of a room's cells observed for "inspected"; less is "partly observed"
+EXTRA_VIEWPOINTS = 2             # additional viewpoints tried in a partly observed room
+CANDIDATE_RECHECK_S = 3.0        # an unconfirmed single-frame detection this old gets a second-viewpoint check
+RECHECK_RANGE_M = (1.0, 3.0)     # second viewpoint: distance band from the detection, with line of sight
+RECHECK_MIN_SHIFT_M = 1.0        # ... and at least this far from where it was first seen
+WITHDRAW_MARGIN_S = 15.0         # leave for the exit when remaining time < estimated return time + margin
+HANDOFF_RECHECK_S = 30.0         # a handed-off person who can follow is re-checked for a safe route this often
 
 
 @dataclass
@@ -125,19 +134,17 @@ def fixture():
     return s
 
 
-def step_cost(heat, smoke, observed, x, y, adaptive, escort, last_resort=False):
+def step_cost(heat, smoke, observed, x, y, adaptive, escort):
     """None if the cell is impassable for this move; otherwise its traversal cost (cells).
 
-    The robot alone is fire-proof (no hazard limit). An escorted person keeps human limits unless the escort
-    is cornered (last_resort), when the least-hazard route is taken whatever the policy."""
-    if last_resort:
-        return 1 + 20*heat[y][x] + 10*smoke[y][x] + (0 if observed[y][x] else 2)
+    The robot alone is fire-proof (no hazard limit). An escorted person always keeps human limits and only
+    moves through observed cells."""
     if escort and (heat[y][x] >= ESCORT_HEAT_LIMIT or smoke[y][x] >= ESCORT_SMOKE_LIMIT): return None
     if escort and not observed[y][x]: return None
     return 1 + ((8*heat[y][x]+5*smoke[y][x]+(0 if observed[y][x] else 2)) if adaptive else 0)
 
 
-def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False, last_resort=False):
+def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False):
     """A* sees belief fields only; hard limits apply to both policies."""
     start,goal=tuple(start),tuple(goal)
     if not scene.free(start) or not scene.free(goal): return []
@@ -150,7 +157,7 @@ def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False
             while p in previous: p=previous[p]; result.append(p)
             return result[::-1]
         for q in scene.neighbors(p):
-            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort,last_resort)
+            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort)
             if step is None: continue
             c=cost+step
             if c < costs.get(q,math.inf):
@@ -159,14 +166,14 @@ def route(scene, start, goal, heat, smoke, observed, adaptive=True, escort=False
     return []
 
 
-def route_tree(scene, start, heat, smoke, observed, adaptive=True, escort=False, last_resort=False):
+def route_tree(scene, start, heat, smoke, observed, adaptive=True, escort=False):
     """Single-source Dijkstra with the same costs/limits as route(); one pass serves every goal."""
     start=tuple(start); costs={start:0.}; previous={}; queue=[(0.,start)]
     while queue:
         cost,p=heapq.heappop(queue)
         if cost != costs[p]: continue
         for q in scene.neighbors(p):
-            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort,last_resort)
+            step=step_cost(heat,smoke,observed,q[0],q[1],adaptive,escort)
             if step is None: continue
             c=cost+step
             if c < costs.get(q,math.inf):
@@ -222,10 +229,13 @@ class Simulation:
         self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.)
         self.route=[];self.goal=None;self.visited=set();self.escort={}  # person ID to confirmed detection ID
         self.detections=[];self.next_detection=0;self.version=0
-        self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.,detections=0,false_detections=0,route_changes=0,rooms_inspected=0,robot_hazard_s=0.,last_resort_escorts=0)
-        self.escort_blocked_since=None;self.last_resort=False
+        self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.,detections=0,false_detections=0,route_changes=0,rooms_inspected=0,robot_hazard_s=0.,assistance_requests=0,handoffs=0,possible_detections=0,reports=0)
+        self.escort_blocked_since=None;self.assistance_requested=False
         self.searched_points = set()
         self.active_scan = None
+        self.reports=[];self.decisions=[];self.decision_key=None;self.extra_views=[];self.withdraw_reason=None;self.comms_up=True
+        self.immobile={tuple(p) for p in self.scenario.get('immobile',[])}
+        self.agent_backoff_until=0.;self.metrics['inference_pause_s']=0.   # hosted-agent bookkeeping (decision-quality mode)
         self.survivors=[dict(id=f'person-{i}',position=tuple(p),status='unobserved') for i,p in enumerate(self.scenario['survivors'])]
         self.heat_dose = {person['id']: 0.0 for person in self.survivors}
         self.rng=random.Random(self.scenario['seed']);self.steps=0
@@ -236,6 +246,9 @@ class Simulation:
         self.prior=occupancy.weights(self.scene,self.scenario.get('building_use'))
         self.log(occupancy.describe(self.scene,self.prior))
         if HAZARD_TIME_SCALE!=1:self.log(f'Demo pacing: fire and smoke advance at {HAZARD_TIME_SCALE:g}x mission time.')
+        self.rooms_state={r['id']:dict(id=r['id'],name=r['name'],label=r.get('label'),status='unvisited',observed_fraction=0.,
+                                        viewpoints_tried=0,reason=None) for r in self.scene.rooms}
+        self.room_of={tuple(c):r['id'] for r in self.scene.rooms for c in r['cells']}
         for x,y in self.scenario['ignitions']:
             cx,cy=self.scene.world((x,y))
             for yy in range(H):
@@ -264,6 +277,12 @@ class Simulation:
                 seen.add(tuple(p))
         if set(map(tuple,scenario['survivors'])) & set(map(tuple,scenario['ignitions'])): raise ValueError('Survivor and ignition overlap')
         if scenario.get('building_use') is not None and scenario['building_use'] not in occupancy.PROFILES: raise ValueError('Unknown building use')
+        immobile=scenario.get('immobile',[])
+        if not isinstance(immobile,list) or not {tuple(p) for p in immobile if isinstance(p,(list,tuple))}<=set(map(tuple,scenario['survivors'])) or len(immobile)!=len({tuple(p) for p in immobile}):
+            raise ValueError('immobile: list distinct cells that are also survivor placements')
+        outages=scenario.get('comms_outages',[])
+        if not isinstance(outages,list) or len(outages)>10 or any(not isinstance(o,(list,tuple)) or len(o)!=2 or not all(isinstance(v,(int,float)) for v in o) or not 0<=o[0]<o[1] for o in outages):
+            raise ValueError('comms_outages: up to 10 [start, end] second intervals with 0 <= start < end')
 
     def log(self,message):
         self.events.append(dict(time=round(self.time,2),message=message));self.events=self.events[-100:]
@@ -346,9 +365,10 @@ class Simulation:
             cell=min(near)[1]
         # Associate each observation with the nearest track. A frame may update
         # each track once, even when two people stand within the dedup radius.
+        # 'possible' tracks (reported, unconfirmed) can still be confirmed by later evidence.
         radius = 1e-6 if source == 'analytic-fixture' else DEDUP_M
         candidates = [d for d in self.detections
-                      if d['id'] not in matched and d['status'] in ('confirmed', 'candidate')
+                      if d['id'] not in matched and d['status'] in ('confirmed', 'candidate', 'possible')
                       and math.dist(d['position'], position) <= radius]
         if candidates:
             d = min(candidates, key=lambda entry: math.dist(entry['position'], position))
@@ -358,11 +378,11 @@ class Simulation:
             d['confidence'] = max(d['confidence'], confidence)
             d['last_seen'] = self.time
             d['cell'] = list(self.nearest_free(self.scene.cell(*d['position'])))
-            if d['status'] == 'candidate' and d['hits'] >= CONFIRM_HITS[self.perception_mode]:
+            if d['status'] in ('candidate', 'possible') and d['hits'] >= CONFIRM_HITS[self.perception_mode]:
                 self.confirm(d)
             return d
         d=dict(id=f'det-{self.next_detection}',position=list(position),cell=list(cell),confidence=confidence,hits=1,
-               first_seen=self.time,last_seen=self.time,status='candidate',source=source)
+               first_seen=self.time,last_seen=self.time,status='candidate',source=source,seen_from=list(self.robot))
         self.next_detection+=1;self.detections.append(d);self.version+=1
         if CONFIRM_HITS[self.perception_mode]<=1:self.confirm(d)
         return d
@@ -375,6 +395,120 @@ class Simulation:
     def confirm(self,d):
         d['status']='confirmed';self.metrics['detections']+=1;self.version+=1
         self.log(f"Potential survivor confirmed: {d['id']} ({d['source']}, {d['hits']} observation{'s' if d['hits']>1 else ''}).")
+        self.report('confirmed-person',tuple(d['cell']),confirmed=1,mobility='unknown until contact',
+                    action='approaching for contact and a mobility check',detection=d['id'])
+
+    # ---------------------------------------------------------------- reports (outside team)
+    def floor_label(self):
+        return self.scene.name.split('·')[-1].strip() if '·' in self.scene.name else self.scene.name
+
+    def report(self,kind,cell,action,confirmed=0,possible=0,mobility=None,detection=None,**extra):
+        """Queue an outside-team report. Delivery and acknowledgement are tracked; nothing is dropped."""
+        cell=tuple(cell);x,y=self.scene.world(cell);room=self.room_of.get(cell)
+        r=dict(id=f'rep-{len(self.reports)}',kind=kind,time=round(self.time,2),floor=self.floor_label(),
+               room=(self.rooms_state.get(room) or {}).get('name'),cell=list(cell),position=[round(x,2),round(y,2)],
+               confirmed=confirmed,possible=possible,mobility=mobility,detection=detection,
+               hazards=dict(heat=round(float(self.belief_heat[cell[1],cell[0]]),2),smoke=round(float(self.belief_smoke[cell[1],cell[0]]),2)),
+               last_usable_approach=list(self.robot),action=action,status='queued',attempts=0,delivered_at=None,acknowledged_at=None,**extra)
+        self.reports.append(r);self.metrics['reports']+=1;self.version+=1
+        self.log(f"Report queued for outside team: {kind} at {r['room'] or 'cell '+str(list(cell))}; {action}.")
+        self.deliver_reports()
+        return r
+
+    def deliver_reports(self):
+        up=not any(a<=self.time<b for a,b in self.scenario.get('comms_outages',[]))
+        if up!=self.comms_up:
+            self.comms_up=up;self.log('Communications restored; retrying queued reports.' if up else 'Communications lost; reports stay queued for retry.')
+        for r in self.reports:
+            if r['status']!='queued':continue
+            r['attempts']+=1
+            if up:r['status']='delivered';r['delivered_at']=round(self.time,2)
+
+    def acknowledge(self,report_id):
+        r=next((r for r in self.reports if r['id']==report_id),None)
+        if r is None:raise ValueError('Unknown report')
+        if r['status']!='delivered':raise ValueError('Only delivered reports can be acknowledged')
+        r['status']='acknowledged';r['acknowledged_at']=round(self.time,2);self.version+=1
+        self.log(f"Outside team acknowledged {r['id']} ({r['kind']}).")
+        return r
+
+    # ---------------------------------------------------------------- decision record
+    def decide(self,kind,target,options,reason,trigger):
+        """Record a consequential decision once, when the chosen target changes."""
+        key=(kind,tuple(target) if target is not None else None)
+        if key==self.decision_key:return
+        self.decision_key=key
+        self.decisions.append(dict(time=round(self.time,2),decision=kind,target=list(target) if target is not None else None,
+                                   trigger=trigger,options=[dict(target=list(t),cost=round(float(c),1)) for c,t in sorted(options)[:3]],reason=reason))
+        self.decisions=self.decisions[-200:]
+
+    # ---------------------------------------------------------------- room accounting
+    def update_rooms(self):
+        for room in self.scene.rooms:
+            st=self.rooms_state[room['id']]
+            cells=room['cells'];seen=sum(self.observed[y,x]>0 for x,y in cells)
+            st['observed_fraction']=round(seen/max(1,len(cells)),3)
+            if st['status'] in ('inspected','inaccessible'):continue
+            planned=[p for p in self.observe_points(room)]+[c for rid,c in self.extra_views if rid==room['id']]
+            if not any(p in self.visited for p in planned):continue
+            if st['observed_fraction']>=ROOM_INSPECTED_FRACTION:
+                st['status']='inspected';st['reason']=None;self.log(f"Room inspected: {room['name']} ({st['observed_fraction']:.0%} observed).");continue
+            if all(p in self.visited for p in planned) and self.scan_remaining<=0:
+                if st['viewpoints_tried']<EXTRA_VIEWPOINTS and (view:=self.viewpoint_for_room(room)) is not None:
+                    st['viewpoints_tried']+=1;self.extra_views.append((room['id'],view))
+                    self.log(f"{room['name']} only {st['observed_fraction']:.0%} observed; trying another viewpoint.")
+                elif st['status']!='partly-observed':
+                    hidden=[(x,y) for x,y in cells if not self.observed[y,x]]
+                    smoky=sum(self.belief_smoke[y,x]>=.5 for x,y in hidden)>len(hidden)/3
+                    st['status']='partly-observed';st['reason']='smoke limited visibility' if smoky else 'occlusion or obstructions limited visibility'
+                    self.log(f"Room partly observed: {room['name']} ({st['observed_fraction']:.0%}); {st['reason']}. Kept on the outstanding list.")
+
+    def viewpoint_for_room(self,room):
+        """Reachable, unvisited room cell that sees the most still-unobserved room cells."""
+        costs,_=self.tree()
+        hidden=[(x,y) for x,y in room['cells'] if not self.observed[y,x]]
+        if not hidden:return None
+        step=max(1,len(hidden)//60);hidden=hidden[::step]
+        options=[tuple(c) for c in room['cells'] if tuple(c) in costs and tuple(c) not in self.visited]
+        options=options[::max(1,len(options)//40)]
+        reach=CAMERA_RANGE_M if self.perception_mode=='image-yolo' else SENSE_RANGE_M
+        best=None
+        for c in options:
+            gain=sum(1 for h in hidden if math.dist(self.scene.world(c),self.scene.world(h))<=reach and line_visible(self.scene,c,h))
+            if gain and (best is None or (gain,-costs[c])>best[0]):best=((gain,-costs[c]),c)
+        return best[1] if best else None
+
+    def mark_inaccessible(self,costs):
+        for room in self.scene.rooms:
+            st=self.rooms_state[room['id']]
+            if st['status']=='unvisited' and not any(p in costs for p in self.observe_points(room)):
+                st['status']='inaccessible';st['reason']='no traversable route to any observation point'
+                self.log(f"Room inaccessible: {room['name']}; kept on the outstanding list.")
+
+    # ---------------------------------------------------------------- second viewpoint for uncertain detections
+    def recheck_target(self,costs):
+        for d in self.detections:
+            if d['status']!='candidate' or self.time-d['last_seen']<CANDIDATE_RECHECK_S:continue
+            if d.get('recheck_cell') is None:
+                origin=self.scene.world(tuple(d.get('seen_from',self.robot)));where=tuple(d['cell'])
+                options=[]
+                for c,cost in costs.items():
+                    dist=math.dist(self.scene.world(c),d['position'])
+                    if RECHECK_RANGE_M[0]<=dist<=RECHECK_RANGE_M[1] and math.dist(self.scene.world(c),origin)>=RECHECK_MIN_SHIFT_M and line_visible(self.scene,c,where):
+                        options.append((cost,c))
+                if not options:
+                    self.possible(d,'no reachable second viewpoint');continue
+                d['recheck_cell']=list(min(options)[1])
+                self.log(f"Checking uncertain detection {d['id']} from a second viewpoint.")
+            if tuple(d['recheck_cell']) in costs:return d,tuple(d['recheck_cell'])
+            self.possible(d,'second viewpoint no longer reachable')
+        return None,None
+
+    def possible(self,d,reason):
+        d['status']='possible';self.metrics['possible_detections']+=1;self.version+=1
+        self.log(f"Possible detection {d['id']} not confirmed ({reason}); reported as possible.")
+        self.report('possible-detection',tuple(d['cell']),possible=1,mobility='unknown',detection=d['id'],
+                    action=f'not confirmed: {reason}; continuing search')
 
     def hazard_sensor(self):
         rx, ry = self.robot
@@ -397,6 +531,9 @@ class Simulation:
                     hazard_sensor=self.hazard_sensor(),
                     searched_rooms=self.searched_rooms(),
                     survivors=[deepcopy(d) for d in self.detections if d['status'] in ('confirmed','escorting')],
+                    possible=[deepcopy(d) for d in self.detections if d['status'] in ('candidate','possible')],
+                    rooms_state=deepcopy(list(self.rooms_state.values())),
+                    reports=[{k:r[k] for k in ('id','kind','status','time','room','action')} for r in self.reports],
                     perception=self.perception_mode,events=self.events[-8:])
 
     # ---------------------------------------------------------------- planning
@@ -413,9 +550,9 @@ class Simulation:
         heat,smoke=self.planning_fields()
         return route(self.scene,self.robot,goal,heat,smoke,self.observed,self.mode=='adaptive',escort)
 
-    def tree(self,escort=False,last_resort=False):
+    def tree(self,escort=False):
         heat,smoke=self.planning_fields()
-        return route_tree(self.scene,self.robot,heat.tolist(),smoke.tolist(),self.observed.tolist(),self.mode=='adaptive',escort,last_resort)
+        return route_tree(self.scene,self.robot,heat.tolist(),smoke.tolist(),self.observed.tolist(),self.mode=='adaptive',escort)
 
     def observe_points(self,room):
         return [tuple(p) for p in room.get('observe',room['cells'])]
@@ -429,37 +566,64 @@ class Simulation:
             costs,prev=self.tree(True)
             options=[(costs[e],e) for e in self.scene.exits if e in costs]
             if options:
-                self.escort_blocked_since=None;self.last_resort=False
+                self.escort_blocked_since=None
                 return extract(prev,self.robot,min(options)[1])
             if self.escort_blocked_since is None:self.escort_blocked_since=self.time
-            if self.time-self.escort_blocked_since>=ESCORT_LAST_RESORT_S:
-                # Cornered with a person: waiting longer only adds exposure. Take the least-hazard route.
-                costs,prev=self.tree(True,last_resort=True)
-                options=[(costs[e],e) for e in self.scene.exits if e in costs]
-                if options:
-                    if not self.last_resort:
-                        self.last_resort=True;self.metrics['last_resort_escorts']+=1
-                        self.log('Escort cornered: taking the least-fire route to the exit at top speed (last resort).')
-                    return extract(prev,self.robot,min(options)[1])
+            if not self.assistance_requested:
+                # Constitution: no route satisfies escort limits -> report location and request assistance.
+                # Limits are never relaxed; the robot keeps holding with the person and replans as conditions change.
+                self.assistance_requested=True;self.metrics['assistance_requests']+=1
+                x,y=self.scene.world(self.robot);d=', '.join(self.escort.values())
+                self.log(f"Assistance requested: {d} at ({x:.1f}, {y:.1f}) m, cell {list(self.robot)}; "
+                         f"no route to a verified exit within human escort limits. Holding with the person and replanning.")
             self.hold('Escort paused: no observed viable egress route; holding until conditions change.');return []
+        costs,prev=self.tree()
+        exits=[(costs[e],e) for e in self.scene.exits if e in costs]
+        if not exits:
+            self.stop('loss of an eligible return route');return []
+        if self.withdraw_reason is None and self.scene.time_limit-self.time<min(exits)[0]*self.scene.resolution/ROBOT_SPEED+WITHDRAW_MARGIN_S:
+            self.withdraw('controller time limit: leaving while a return route remains')
+        if self.withdraw_reason is not None:
+            self.decide('withdraw',min(exits)[1],exits,self.withdraw_reason,'withdrawal')
+            return extract(prev,self.robot,min(exits)[1])
         if self.goal is not None:
             if self.robot==self.goal or self.goal in self.searched_points:self.goal=None
             else:
                 selected=self.path(self.goal)
                 if selected:return selected
                 self.goal=None
-        costs,prev=self.tree()
+        self.mark_inaccessible(costs)
         targets=[tuple(d['cell']) for d in self.detections if d['status']=='confirmed']
         options=[(costs[t],t) for t in targets if t in costs]
-        if options:return extract(prev,self.robot,min(options)[1])
+        if options:
+            self.decide('approach-person',min(options)[1],options,'confirmed person: contact and mobility check before search continues','confirmed detection')
+            return extract(prev,self.robot,min(options)[1])
+        d,view=self.recheck_target(costs)
+        if view is not None:
+            if view==self.robot:return [self.robot]
+            self.decide('second-viewpoint',view,[(costs[view],view)],f"uncertain detection {d['id']}: check from another viewpoint",'single-frame detection')
+            return extract(prev,self.robot,view)
         # Coverage targets are static geometry, not hidden survivor locations.
         # Prior-weighted coverage: likelihood of people in the room over travel cost. With a uniform prior
         # (residential) this is nearest-first.
         smooth=SEARCH_PRIOR_SMOOTHING_M/self.scene.resolution
         remaining=[(self.prior['weights'].get(room['id'],1.),p) for room in self.scene.rooms for p in self.observe_points(room) if p not in self.searched_points]
+        remaining+=[(self.prior['weights'].get(rid,1.),c) for rid,c in self.extra_views if c not in self.visited]
         options=[(-w/(costs[p]+smooth),costs[p],p) for w,p in remaining if p in costs]
-        if options:return extract(prev,self.robot,min(options)[2])
+        if options:
+            best=min(options);room=self.room_of.get(best[2])
+            self.decide('inspect-room',best[2],[(c,p) for _,c,p in options],
+                        f"{(self.rooms_state.get(room) or {}).get('name','room')}: best likelihood/travel ({self.prior['use']} prior)",'coverage')
+            return extract(prev,self.robot,best[2])
         remaining=[p for _,p in remaining]
+        retry=[(costs[tuple(d['cell'])],tuple(d['cell'])) for d in self.detections
+               if d['status']=='handoff' and d.get('retry') and tuple(d['cell']) in costs]
+        if retry and not options:
+            due=[(c,t) for (c,t),d in zip(retry,[d for d in self.detections if d['status']=='handoff' and d.get('retry') and tuple(d['cell']) in costs]) if self.time>=d.get('retry_after',0)]
+            if due:
+                self.decide('recheck-handoff',min(due)[1],due,'search done; re-check whether a handed-off person now has a human-safe route','handoff pending')
+                return extract(prev,self.robot,min(due)[1])
+            self.hold('Search complete; waiting to re-check handed-off people for a human-safe route.');return []
         if targets or remaining:
             self.hold('No viable route to remaining targets; holding until observed hazards change.')
         return []
@@ -469,6 +633,23 @@ class Simulation:
         (the mission time limit still applies) instead of declaring the mission unresolved at once."""
         if not getattr(self,'was_holding',False):self.log(message)
         self.holding=True
+
+    def withdraw(self,reason):
+        if self.withdraw_reason is None:
+            self.withdraw_reason=reason;self.goal=None;self.log(f'Withdrawing to the exit: {reason}.')
+
+    def stop(self,reason):
+        self.status='stopped';self.withdraw_reason=self.withdraw_reason or reason;self.log(f'Mission stopped: {reason}.');self.end_report(reason)
+
+    def end_report(self,reason):
+        """Best available accounting for each person and room, plus anything not yet delivered."""
+        unresolved=[d['id'] for d in self.detections if d['status'] in ('candidate','possible','confirmed','escorting','handoff')]
+        casualties=[d['id'] for d in self.detections if d['status']=='casualty']
+        outstanding=[st['name'] for st in self.rooms_state.values() if st['status']!='inspected']
+        unsent=sum(r['status']=='queued' for r in self.reports)
+        self.report('mission-end',self.robot,action=f'mission ended: {reason}',
+                    unresolved_detections=unresolved,casualties=casualties,outstanding_rooms=outstanding,unsent_reports=unsent,
+                    evacuated=self.metrics['evacuated'],handoffs=self.metrics['handoffs'])
 
     def path_cost(self,path):
         return sum(1+(8*self.belief_heat[y][x]+5*self.belief_smoke[y][x] if self.mode=='adaptive' else 0) for x,y in path)
@@ -488,6 +669,11 @@ class Simulation:
             turn=min(self.scan_remaining,SCAN_RATE*dt);self.heading=(self.heading+turn)%(2*math.pi);self.scan_remaining-=turn
             if self.scan_remaining<=1e-9:self.scan_done()
         self.sense()
+        self.deliver_reports()
+        for d in self.detections:
+            if d['status']=='candidate' and d.get('recheck_cell')==list(self.robot) and not d.get('rechecking') and self.scan_remaining<=0:
+                d['rechecking']=True;self.scan_remaining=2*math.pi if self.perception_mode=='image-yolo' else 0.
+                if self.scan_remaining<=0:self.scan_done()
         self.visited.add(self.robot)
         if not self.escort and self.active_scan is None and self.robot not in self.searched_points:
             if any(self.robot in self.observe_points(room) for room in self.scene.rooms):
@@ -498,7 +684,10 @@ class Simulation:
                 else:
                     self.scan_done()
         self.pair()
+        self.update_rooms()
         if self.status!='running':return
+        if self.withdraw_reason and self.robot in self.scene.exits and not self.escort:
+            self.status='withdrawn';self.log(f'Withdrawn at the exit: {self.withdraw_reason}.');self.end_report(self.withdraw_reason);return
         moving=self.scan_remaining<=0
         self.was_holding,self.holding=self.holding,False
         new=self.choose() if moving else [self.robot]
@@ -519,13 +708,14 @@ class Simulation:
             q=tuple(self.route[0]);x,y=q
             # Independent immediate interlock, never global planner input. The robot alone is fire-proof;
             # it protects an escorted person unless the escort is cornered (last resort).
-            guard=bool(self.escort) and not self.last_resort
+            guard=bool(self.escort)
             if guard and (self.heat[y,x]>=ESCORT_HEAT_LIMIT or self.smoke[y,x]>=ESCORT_SMOKE_LIMIT):
                 self.belief_heat[y,x]=self.heat[y,x];self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time
                 self.observed[y,x]=1;self.progress=0;self.log('Local interlock stopped motion into hazard.')
             else:
                 self.heading=math.atan2(y-self.robot[1],x-self.robot[0])
                 self.robot=q;self.route=self.route[1:];self.metrics['distance']+=self.scene.resolution
+                if self.escort:self.assistance_requested=False   # moving again: a later block is a new request
                 if self.escort:
                     at_exit = q in self.scene.exits
                     for person in self.survivors:
@@ -543,15 +733,23 @@ class Simulation:
                     if at_exit:
                         self.escort.clear()
                         self.escort_blocked_since = None
-                        self.last_resort = False
+                        self.assistance_requested = False
         elif not self.route:self.progress=0
         self.update_casualties(dt)
-        if self.survivors and all(p['status'] in ('evacuated', 'casualty') for p in self.survivors):
-            self.status = 'completed' if self.metrics['evacuated'] == len(self.survivors) else 'unresolved'
-            self.log('All configured survivors evacuated (simulator evaluation).' if self.status == 'completed'
-                     else 'Mission ended with simulated casualties.')
+        if self.status!='running':return
+        if self.survivors and self.metrics['evacuated']==len(self.survivors):
+            self.status='completed';self.log('All configured survivors evacuated (simulator evaluation).');self.end_report('all configured people evacuated')
+        elif self.survivors and all(p['status'] in ('evacuated','casualty') for p in self.survivors):
+            self.status='unresolved';self.log('Mission ended with simulated casualties.')
+            self.end_report('every configured person evacuated or a simulated casualty')
+        elif (self.survivors and all(p['status'] in ('evacuated','assistance-requested','casualty') for p in self.survivors) and not self.escort
+              and all(st['status']!='unvisited' for st in self.rooms_state.values())
+              and not any(d['status']=='handoff' and d.get('retry') for d in self.detections)):
+            self.status='accounted';self.log('All configured people evacuated or handed off to responders (simulator evaluation).')
+            self.end_report('every configured person evacuated or handed off')
         elif (not new and self.scan_remaining<=0 and not self.holding) or self.time>=self.scene.time_limit:
             self.status='unresolved';self.log('Mission unresolved; unseen occupants are not confirmed absent.')
+            self.end_report('time limit reached' if self.time>=self.scene.time_limit else 'no further reachable targets')
         if self.status=='running' and self.perception_mode=='image-yolo' and int(round(self.time/dt))%max(1,round(PERCEPTION_PERIOD/dt))==0:
             self.request_frame()
 
@@ -573,10 +771,13 @@ class Simulation:
                 self.version += 1
                 if not self.escort:
                     self.escort_blocked_since = None
-                    self.last_resort = False
+                    self.assistance_requested = False
 
     def scan_done(self):
         self.scan_remaining = 0.
+        rechecks=[d for d in self.detections if d.get('rechecking') and d['status']=='candidate']
+        for d in rechecks:self.possible(d,'not confirmed from a second viewpoint')
+        for d in self.detections:d.pop('rechecking',None)
         if self.active_scan is None:
             return
         before = set(self.searched_rooms())
@@ -592,22 +793,39 @@ class Simulation:
         here = self.scene.world(self.robot)
         for d in self.detections:
             cell = tuple(d['cell'])
-            if (d['status'] != 'confirmed' or math.dist(d['position'], here) > PAIR_M
+            retry = d['status'] == 'handoff' and d.get('retry') and self.time >= d.get('retry_after', 0)
+            if ((d['status'] != 'confirmed' and not retry) or math.dist(d['position'], here) > PAIR_M
                     or not line_visible(self.scene, self.robot, cell)):
                 continue
-            candidates = [p for p in self.survivors if p['status'] == 'unobserved'
+            wanted = ('assistance-requested',) if retry else ('unobserved',)
+            candidates = [p for p in self.survivors if p['status'] in wanted
                           and math.dist(self.scene.world(p['position']), here) <= PAIR_M
                           and math.dist(self.scene.world(p['position']), d['position']) <= PAIR_M
                           and line_visible(self.scene, self.robot, p['position'])]
             person = min(candidates, key=lambda p: math.dist(self.scene.world(p['position']), d['position']),
                          default=None)
             if person is None:
-                if cell == self.robot:
+                if cell == self.robot and not retry:   # a handoff re-check never retires the detection
                     d['status'] = 'not-found'
                     self.metrics['false_detections'] += 1
                     self.version += 1
                     self.log(f"No person found at {d['id']} on arrival; detection retired.")
                 continue
+            # Simulated contact check: the scenario says whether this person can follow (truth, evaluated on contact).
+            if tuple(person['position']) in self.immobile:
+                self.handoff(person, d, 'cannot follow the robot (simulated contact check)', 'cannot follow')
+                continue
+            costs, _ = self.tree(True)
+            if not any(e in costs for e in self.scene.exits):
+                if retry:
+                    d['retry_after'] = self.time + HANDOFF_RECHECK_S
+                    self.log(f"Re-checked {d['id']}: still no human-safe route; responders remain requested.")
+                    continue
+                self.handoff(person, d, 'no route to a verified exit within human escort limits', 'can follow')
+                continue
+            if retry:
+                self.metrics['handoffs'] -= 1
+                self.log(f"Re-checked {d['id']}: a human-safe route is now available.")
             person['status'] = 'escorting'
             person['position'] = self.robot
             self.escort[person['id']] = d['id']
@@ -616,7 +834,17 @@ class Simulation:
             self.active_scan = None
             self.goal = None
             self.version += 1
+            self.report('escort-started', self.robot, confirmed=1, mobility='can follow', detection=d['id'],
+                        action='guiding to the verified exit')
             self.log(f"Escort started: {d['id']}")
+
+    def handoff(self,person,d,reason,mobility):
+        """Constitution step 5: report the location and request responders, then continue the search."""
+        person['status']='assistance-requested';d['status']='handoff';self.metrics['handoffs']+=1;self.metrics['assistance_requests']+=1;self.version+=1
+        d['retry']=mobility=='can follow';d['retry_after']=self.time+HANDOFF_RECHECK_S
+        self.log(f"Assistance requested for {d['id']}: {reason}. Continuing search.")
+        self.report('assistance-request',self.robot,confirmed=1,mobility=mobility,detection=d['id'],
+                    action=f'responders needed: {reason}; robot continues search')
 
     def state(self):
         public=[]
@@ -633,7 +861,9 @@ class Simulation:
                     route=self.route,events=self.events,metrics={k:(round(v,3) if isinstance(v,float) else v) for k,v in self.metrics.items()},
                     mode=self.mode,perception_mode=self.perception_mode,detections=self.detections,
                     searched_rooms=self.searched_rooms(),
-                    frame_request=self.frame_request,degraded=self.degraded,scanning=self.scan_remaining>0,holding=self.holding,last_frame=self.last_frame)
+                    frame_request=self.frame_request,degraded=self.degraded,scanning=self.scan_remaining>0,holding=self.holding,last_frame=self.last_frame,
+                    reports=self.reports,rooms_state=list(self.rooms_state.values()),decisions=self.decisions[-30:],
+                    withdraw_reason=self.withdraw_reason,comms_up=self.comms_up)
 
 
 def compare(scene,scenario,perception='analytic-development'):

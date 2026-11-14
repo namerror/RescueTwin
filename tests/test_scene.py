@@ -181,7 +181,7 @@ def test_real_bundle_alignment_and_mission():
     assert (REAL / 'mesh.gltf').exists() and (REAL / 'floor.png').exists()
     preset = presets.build(scene, 'standard')
     report = compare(scene, preset['scenario'])['reports']
-    assert all(r['status'] in ('completed', 'unresolved') for r in report.values())
+    assert all(r['status'] in ('completed', 'accounted', 'withdrawn', 'unresolved') for r in report.values())
 
 
 @pytest.mark.skipif(not KIT.exists(), reason='CoStar kit not present (data/ is ignored)')

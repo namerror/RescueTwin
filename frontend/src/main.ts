@@ -10,8 +10,8 @@ import './styles.css';
 type Cell = [number, number];
 type Mode = 'adaptive' | 'baseline';
 type Perception = 'image-yolo' | 'analytic-development';
-type Tool = 'inspect' | 'survivor' | 'fire' | 'remove';
-interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string }
+type Tool = 'inspect' | 'survivor' | 'immobile' | 'fire' | 'remove';
+interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string; immobile?: Cell[]; comms_outages?: [number, number][] }
 interface CostarField { key: string; label: string; value: unknown; units: string | null; field_path: string; source_id: number; dataset: string; derivation: string; note?: string }
 interface SceneData {
   id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
@@ -42,7 +42,13 @@ interface SimState {
   detections: DetectionEntry[]; frame_request: { seq: number; time: number; pose: Pose } | null; degraded: boolean; scanning: boolean;
   last_frame: FrameResult | null; paired: Paired | null;
   hazard_time: number; hazards_running: boolean; holding?: boolean;
+  reports?: Report[]; rooms_state?: RoomState[]; decisions?: Decision[]; withdraw_reason?: string | null; comms_up?: boolean;
 }
+interface Report { id: string; kind: string; time: number; floor: string; room: string | null; cell: Cell; confirmed: number; possible: number;
+  mobility: string | null; hazards: { heat: number; smoke: number }; last_usable_approach: Cell; action: string; status: string; attempts: number;
+  unresolved_detections?: string[]; outstanding_rooms?: string[]; unsent_reports?: number }
+interface RoomState { id: string; name: string; label: string | null; status: string; observed_fraction: number; reason: string | null }
+interface Decision { time: number; decision: string; target: Cell | null; trigger: string; options: { target: Cell; cost: number }[]; reason: string }
 interface Observation { heat: number[][]; smoke: number[][]; observed: number[][]; survivors: DetectionEntry[] }
 interface Preset { id: string; label: string; note: string; scenario?: Scenario; unavailable?: boolean; capacity?: number }
 
@@ -63,7 +69,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const number = (value: number, digits = 1): string => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 const same = (a: Cell, b: Cell): boolean => a[0] === b[0] && a[1] === b[1];
-const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}) });
+const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}), ...(value.immobile?.length ? { immobile: value.immobile.map(p => [...p] as Cell) } : {}), ...(value.comms_outages?.length ? { comms_outages: value.comms_outages.map(o => [...o] as [number, number]) } : {}) });
 const key = (p: Cell): string => `${p[0]},${p[1]}`;
 
 $('app').innerHTML = `
@@ -117,14 +123,18 @@ $('app').innerHTML = `
         <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Run simulation</h2></div></div>
           <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Risk-aware</span></label><label><input type="radio" name="mode" value="baseline" /><span>Distance-only</span></label></div></fieldset>
           <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" checked /><span>Analytic fixture</span></label></div></fieldset>
+          <label class="seed-label" for="agent-enabled" title="Gemini proposes which room, person or exit to go for next, under the robot decision constitution. The controller validates every choice; failures fall back to the built-in planner."><span><input id="agent-enabled" type="checkbox" /> Gemini supervisor</span></label>
+          <label class="seed-label" for="agent-pause" title="Freezes the mission clock and the fire while Gemini is thinking, and asks Gemini as soon as each goal is reached. Measures decision quality, not real-time performance."><span><input id="agent-pause" type="checkbox" /> Pause clock while Gemini thinks</span></label>
+          <p id="agent-pause-label" class="field-hint warning-hint" hidden>Decision-quality mode: clock and fire paused during model inference. Not real-time performance.</p>
+          <p id="agent-status" class="field-hint">Checking hosted agent…</p>
           <p id="mode-description" class="field-hint">Analytic fixture uses simulator truth and is not image perception.</p>
-          <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
+          <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button><button id="withdraw" class="button subtle small" title="Operator stop: the robot finishes any escort, returns to the exit and files a mission-end report">Withdraw</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
         </section>
         <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Place the conditions</h2></div></div>
           <label class="seed-label" for="building-use" title="Static building information only; it changes where the robot searches first, never what it knows about people">Building use <select id="building-use"><option value="">Auto</option></select></label>
           <p id="building-use-hint" class="field-hint"></p>
           <div id="presets" class="preset-list"></div>
-          <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
+          <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label title="Mark or unmark a placed survivor as unable to follow the robot (checked on contact)"><input name="tool" type="radio" value="immobile" /><span><b aria-hidden="true">♿</b>Can't walk</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
           <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
           <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
@@ -141,6 +151,10 @@ $('app').innerHTML = `
       <section class="panel camera-panel" aria-labelledby="camera-heading"><div class="panel-heading compact"><div><h2 id="camera-heading">Person detection</h2></div><span id="camera-status" class="subtle-label">No frame yet</span></div>
         <div class="camera-body"><canvas id="robot-feed" width="${CAM_W}" height="${CAM_H}" aria-label="Rendered robot camera frame with YOLO detection boxes"></canvas>
           <div class="camera-side"><p class="field-hint" id="camera-explainer">Frames are rendered from the scanned-geometry scene at the simulator's camera pose and sent to the backend, where YOLO runs on the RGB image and depth places each box in the scan frame. Two consistent frames confirm a potential survivor.</p><ol id="detections" class="event-list detection-list"><li class="empty-line">No detections yet.</li></ol></div></div></section>
+      <section class="panel event-panel" aria-labelledby="team-heading"><div class="panel-heading compact"><div><h2 id="team-heading">Outside team</h2><p class="subtle-label">Reports the robot sends to responders. You acknowledge on their behalf. <span id="comms-status"></span></p></div></div>
+        <ol id="reports" class="event-list"><li class="empty-line">No reports yet.</li></ol>
+        <details class="details-block"><summary>Rooms (<span id="rooms-summary">—</span>)</summary><ol id="rooms" class="event-list"></ol></details>
+        <details class="details-block"><summary>Decision record</summary><ol id="decisions" class="event-list"></ol></details></section>
       <section class="panel event-panel" aria-labelledby="events-heading"><div class="panel-heading compact"><div><h2 id="events-heading">Event timeline</h2></div></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
       <section id="comparison" class="panel comparison-panel" aria-labelledby="comparison-heading" hidden><div class="panel-heading compact"><div><h2 id="comparison-heading">Strategy comparison</h2></div><button id="close-comparison" class="button subtle small">Close</button></div><p id="comparison-context" class="field-hint"></p><div id="comparison-body"></div></section>
     </div>
@@ -326,6 +340,7 @@ function syncUI(): void {
   $('start').textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
   ($('start') as HTMLButtonElement).disabled = !sceneReady || !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
   ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running' || pairedRunning();
+  ($('withdraw') as HTMLButtonElement).disabled = !connected || busy || !['running', 'paused'].includes(status ?? '') || pairedRunning() || !!state?.withdraw_reason;
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
   ($('mode-fieldset') as HTMLFieldSetElement).disabled = !editable;
   ($('perception-fieldset') as HTMLFieldSetElement).disabled = !editable;
@@ -468,7 +483,8 @@ function acceptState(next: SimState, newSceneSelection = false): void {
   $('distance').textContent = number(next.metrics.distance, 2);
   $('route-note').textContent = `${next.metrics.route_changes ?? 0} changes · ${next.metrics.rooms_inspected ?? 0} rooms inspected` +
     (next.metrics.robot_hazard_s ? ` · ${number(next.metrics.robot_hazard_s, 1)} s robot in fire/smoke` : '') +
-    (next.metrics.last_resort_escorts ? ` · ${next.metrics.last_resort_escorts} last-resort escort` : '');
+    (next.metrics.assistance_requests ? ` · ${next.metrics.assistance_requests} assistance request${next.metrics.assistance_requests > 1 ? 's' : ''}` : '') +
+    (next.metrics.inference_pause_s ? ` · clock paused ${number(next.metrics.inference_pause_s, 1)} s for Gemini (not real time)` : '');
   syncBuildingUse();
   const image = next.perception_mode === 'image-yolo';
   $('perception-label').textContent = image ? 'YOLO · RGB-D' : 'Analytic fixture';
@@ -484,6 +500,7 @@ function acceptState(next: SimState, newSceneSelection = false): void {
     $('events').innerHTML = next.events.length ? next.events.slice(-60).reverse().map(e => `<li><time>${escape(number(e.time))} s</time><span>${escape(e.message)}</span></li>`).join('') : '<li class="empty-line">No mission events yet. Start a run to collect telemetry.</li>';
   }
   renderDetections();
+  renderTeam(next);
   renderPaired();
   syncUI();
 }
@@ -1175,9 +1192,17 @@ function applyCell(cell: Cell): void {
     if (selectedTool === 'remove') {
       draft.survivors = draft.survivors.filter(p => !same(p, cell));
       draft.ignitions = draft.ignitions.filter(p => !same(p, cell));
+      if (draft.immobile) { draft.immobile = draft.immobile.filter(p => !same(p, cell)); if (!draft.immobile.length) delete draft.immobile; }
     } else {
-      const target = selectedTool === 'survivor' ? draft.survivors : draft.ignitions;
-      if (!target.some(p => same(p, cell))) target.push(cell);
+      if (selectedTool === 'immobile') {
+        if (!draft.survivors.some(p => same(p, cell))) { notify('Place a survivor first, then mark them as unable to walk.', true); return; }
+        const marked = (draft.immobile ?? []).some(p => same(p, cell));
+        draft.immobile = marked ? draft.immobile!.filter(p => !same(p, cell)) : [...(draft.immobile ?? []), cell];
+        if (!draft.immobile.length) delete draft.immobile;
+      } else {
+        const target = selectedTool === 'survivor' ? draft.survivors : draft.ignitions;
+        if (!target.some(p => same(p, cell))) target.push(cell);
+      }
     }
     dirty = JSON.stringify(draft) !== JSON.stringify({ ...state.scenario, scene_id: scene!.id });
     syncUI();
@@ -1193,6 +1218,71 @@ async function mutation(work: () => Promise<void>): Promise<void> {
   catch (error) { notify(error instanceof Error ? error.message : 'The request failed.', true); }
   finally { busy = false; syncUI(); await poll(); }
 }
+
+const REPORT_LABEL: Record<string, string> = { 'confirmed-person': 'Person confirmed', 'possible-detection': 'Possible person', 'assistance-request': 'Assistance needed',
+  'escort-started': 'Escort started', 'mission-end': 'Mission end' };
+let teamSignature = '';
+function renderTeam(next: SimState): void {
+  const signature = JSON.stringify([next.reports, next.rooms_state, next.decisions?.length, next.comms_up]);
+  if (signature === teamSignature) return;
+  teamSignature = signature;
+  $('comms-status').textContent = next.comms_up === false ? 'Communications down: reports are queued.' : '';
+  const reports = next.reports ?? [];
+  $('reports').innerHTML = reports.length ? reports.slice().reverse().map(r => {
+    const where = `${r.floor}${r.room ? ' · ' + r.room : ''} · cell [${r.cell.join(', ')}]`;
+    const counts = r.kind === 'mission-end'
+      ? `Unresolved: ${(r.unresolved_detections ?? []).join(', ') || 'none'} · outstanding rooms: ${(r.outstanding_rooms ?? []).join(', ') || 'none'} · unsent reports: ${r.unsent_reports ?? 0}`
+      : `${r.confirmed ? r.confirmed + ' confirmed' : ''}${r.possible ? r.possible + ' possible' : ''}${r.mobility ? ' · mobility: ' + r.mobility : ''} · heat ${number(r.hazards.heat * 100)}% smoke ${number(r.hazards.smoke * 100)}%`;
+    const ack = r.status === 'delivered' ? `<button class="button subtle small" data-ack="${escape(r.id)}">Acknowledge</button>` : '';
+    return `<li class="report ${escape(r.status)}"><time>${escape(number(r.time))} s</time><span><b>${escape(REPORT_LABEL[r.kind] ?? r.kind)}</b> · <span class="report-status">${escape(r.status)}</span>${r.status === 'queued' && r.attempts > 1 ? ` (retry ${r.attempts})` : ''}<br>${escape(where)}<br>${escape(counts)}<br>${escape(r.action)}${r.kind !== 'mission-end' ? ` · last usable approach [${r.last_usable_approach.join(', ')}]` : ''} ${ack}</span></li>`;
+  }).join('') : '<li class="empty-line">No reports yet.</li>';
+  document.querySelectorAll<HTMLButtonElement>('#reports button[data-ack]').forEach(b => b.addEventListener('click', () => void mutation(async () => {
+    await api(`reports/${encodeURIComponent(b.dataset.ack!)}/ack`, {});
+    notify('Report acknowledged for the outside team.');
+  })));
+  const rooms = next.rooms_state ?? [];
+  const counts = rooms.reduce<Record<string, number>>((acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; }, {});
+  $('rooms-summary').textContent = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ') || '—';
+  $('rooms').innerHTML = rooms.map(r => `<li><time>${escape(number(r.observed_fraction * 100))}%</time><span><b>${escape(r.name)}</b> · ${escape(r.status === 'unvisited' && r.observed_fraction > 0 ? 'not yet visited (seen in passing)' : r.status)}${r.reason ? ' · ' + escape(r.reason) : ''}</span></li>`).join('');
+  $('decisions').innerHTML = (next.decisions ?? []).slice().reverse().map(d => `<li><time>${escape(number(d.time))} s</time><span><b>${escape(d.decision)}</b>${d.target ? ' → [' + d.target.join(', ') + ']' : ''} · ${escape(d.reason)} · trigger: ${escape(d.trigger)} · options: ${d.options.map(o => '[' + o.target.join(', ') + '] ' + number(o.cost)).join('; ')}</span></li>`).join('') || '<li class="empty-line">No decisions yet.</li>';
+}
+
+interface AgentInfo { state: string; enabled: boolean; pause_clock: boolean; thinking: boolean; model: string | null; accepted: number; rejected: number; failed: number;
+  latency_s: number | null; last: { kind: string; id: string; reason: string; time: number } | null; last_error: string | null }
+async function refreshAgent(): Promise<void> {
+  try {
+    const info = await api<AgentInfo>('agent');
+    const box = $('agent-enabled') as HTMLInputElement;
+    box.checked = info.enabled; box.disabled = info.state !== 'ready';
+    const pause = $('agent-pause') as HTMLInputElement;
+    pause.checked = info.pause_clock; pause.disabled = info.state !== 'ready' || !info.enabled;
+    $('agent-pause-label').hidden = !(info.pause_clock && info.enabled && info.state === 'ready');
+    const states: Record<string, string> = { 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
+    $('agent-status').textContent = info.state === 'ready'
+      ? `${info.model} · ${info.enabled ? 'on' : 'off'}${info.thinking ? ' · thinking…' : ''}${info.pause_clock ? ' · clock paused while thinking' : ' · real time'} · ${info.accepted} accepted · ${info.rejected} rejected · ${info.failed} failed${info.latency_s != null ? ` · ${number(info.latency_s, 1)} s` : ''}` +
+        (info.last ? ` · last: ${info.last.kind} ${info.last.id} (“${info.last.reason}”)` : '') + (info.last_error ? ` · last problem: ${info.last_error}` : '') +
+        ' · Paired comparisons exclude it.'
+      : `${states[info.state] ?? info.state}${info.last_error ? ' ' + info.last_error : ''}`;
+  } catch { $('agent-status').textContent = 'Hosted agent status unavailable.'; }
+}
+$('agent-enabled').addEventListener('change', () => void mutation(async () => {
+  const enabled = ($('agent-enabled') as HTMLInputElement).checked;
+  await api('agent', { enabled });
+  await refreshAgent();
+  notify(enabled ? 'Gemini supervisor on: it proposes goals; the controller validates them.' : 'Gemini supervisor off: built-in planner only.');
+}));
+$('agent-pause').addEventListener('change', () => void mutation(async () => {
+  const pause_clock = ($('agent-pause') as HTMLInputElement).checked;
+  await api('agent', { pause_clock });
+  await refreshAgent();
+  notify(pause_clock ? 'Decision-quality mode: the clock and fire pause while Gemini thinks. Not real-time performance.' : 'Real-time mode: the clock runs while Gemini thinks.');
+}));
+window.setInterval(() => { if (connected) void refreshAgent(); }, 1000);
+
+$('withdraw').addEventListener('click', () => void mutation(async () => {
+  await api('control', { action: 'withdraw' });
+  notify('Withdraw requested: the robot finishes any escort, returns to the exit and files a mission-end report.');
+}));
 
 for (const action of ['start', 'pause', 'reset'] as const) {
   $(action).addEventListener('click', () => void mutation(async () => {

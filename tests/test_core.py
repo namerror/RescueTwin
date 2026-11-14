@@ -1,3 +1,4 @@
+import math
 from copy import deepcopy
 import numpy as np
 import pytest
@@ -72,35 +73,37 @@ def test_fire_proof_robot_crosses_fire_at_dash_speed():
 def test_escort_interlock_still_protects_people():
     s=Simulation(scenario=dict(survivors=[[3,6]],ignitions=[[1,6]],seed=1))
     s.status='running';p=s.survivors[0]
+    s.observed[:]=1;s.sense=lambda:None
     s.robot=tuple(p['position']);s.add_evidence(s.scene.world(p['position']),1.,'test');s.pair()
-    s.observed[:]=1;s.sense=lambda:None;s.tick()
+    s.tick()
     assert s.route;q=s.route[0];s.heat[q[1]][q[0]]=1.;s.progress=s.scene.resolution
     here=s.robot;s.tick()
     assert s.robot==here and 'interlock' in s.events[-1]['message']
 
 
-def test_cornered_escort_takes_least_fire_route_after_timeout():
-    from rescuetwin.core import ESCORT_LAST_RESORT_S
+def test_cornered_escort_requests_assistance_and_never_relaxes_limits():
     s=Simulation();s.status='running';p=s.survivors[0]
-    s.robot=tuple(p['position']);s.add_evidence(s.scene.world(p['position']),1.,'test');s.pair()
     s.observed[:]=1;s.sense=lambda:None;s.hazards=lambda dt:None
-    s.belief_heat[:]=.9;s.heat[:]=.9; s.hazard_seen[:]=s.time   # everything on fire: no human-safe route
-    s.tick();assert s.holding and not s.last_resort
-    while s.time<ESCORT_LAST_RESORT_S+.5:s.tick()
-    assert s.last_resort and s.metrics['last_resort_escorts']==1 and s.route
-    assert any('least-fire route' in e['message'] for e in s.events)
+    s.robot=tuple(p['position']);s.add_evidence(s.scene.world(p['position']),1.,'test');s.pair()
+    assert p['id'] in s.escort                                   # route existed at contact
+    s.belief_heat[:]=.9;s.heat[:]=.9;s.hazard_seen[:]=s.time     # then everything catches fire
+    start=s.robot
+    while s.time<120 and s.status=='running':s.tick()            # well past any former timeout
+    assert s.holding and s.robot==start and not s.route         # never escorts through human-unsafe cells
+    assert s.metrics['assistance_requests']==1                  # reported once, not every tick
+    assert sum('Assistance requested' in e['message'] for e in s.events)==1
 
 
-def test_no_viable_escort_route_reports_unresolved():
+def test_no_viable_escort_route_at_contact_hands_off_and_reports():
+    # Upstream test, updated for the constitution: no observed route at contact -> report and request responders.
     s=Simulation();s.status='running';p=s.survivors[0]
     s.robot=tuple(p['position']);d=s.add_evidence(s.scene.world(p['position']),1.,'test')
-    s.pair();assert s.escort=={p['id']:d['id']} and d['status']=='escorting'
-    s.observed=s.grid();s.sense=lambda:None;s.tick()
-    assert s.status=='running' and s.holding                 # waits: upstream fire can burn out
-    assert 'holding' in s.events[-1]['message']
+    s.pair()                                                       # nothing observed yet: no verified escort route
+    assert not s.escort and d['status']=='handoff' and p['status']=='assistance-requested'
+    assert s.reports[-1]['kind']=='assistance-request' and 'no route' in s.reports[-1]['action']
     s.time=s.scene.time_limit;s.tick()
     assert s.status=='unresolved' and s.metrics['evacuated']==0
-    assert 'not confirmed absent' in s.events[-1]['message']
+    assert s.reports[-1]['kind']=='mission-end'
 
 
 @pytest.mark.demo_pacing
@@ -150,6 +153,7 @@ def test_prior_ignores_survivor_placements_and_validates_use():
 def test_two_nearby_confirmed_survivors_escort_together():
     sim = Simulation(scenario=dict(survivors=[[3,6],[3,7],[4,6]], ignitions=[], seed=1))
     sim.robot = (3,6)
+    sim.observed[:] = 1   # constitution: an escort needs an observed route to a verified exit at contact
     first = sim.add_evidence(sim.scene.world((3,6)), 1., 'analytic-fixture')
     second = sim.add_evidence(sim.scene.world((3,7)), 1., 'analytic-fixture')
     sim.pair()
@@ -166,3 +170,109 @@ def test_two_nearby_confirmed_survivors_escort_together():
     assert sim.metrics['evacuated'] == 2
     assert not sim.escort
     assert sim.survivors[2]['status'] == 'unobserved'
+
+def test_hosted_agent_instruction_carries_the_constitution():
+    from rescuetwin.agent import system_instruction
+    text=system_instruction()
+    assert 'A timeout never grants permission to exceed those limits.' in text and 'select_goal' in text
+
+
+# ---- Constitution support: reports, mobility, room states, second viewpoint, withdrawal ----
+
+def _contact(s, cell):
+    s.observed[:]=1;s.sense=lambda:None
+    s.robot=tuple(cell);d=s.add_evidence(s.scene.world(cell),1.,'test');s.pair()
+    return d
+
+
+def test_person_who_cannot_follow_is_reported_and_search_continues():
+    s=Simulation(scenario=dict(survivors=[[26,6],[15,18]],ignitions=[],seed=1,immobile=[[26,6]]));s.status='running'
+    d=_contact(s,(26,6))
+    assert not s.escort and d['status']=='handoff' and s.metrics['handoffs']==1
+    req=[r for r in s.reports if r['kind']=='assistance-request']
+    assert req and req[0]['mobility']=='cannot follow' and req[0]['last_usable_approach']==[26,6] and 'responders' in req[0]['action']
+    assert next(p for p in s.survivors if p['id']=='person-0')['status']=='assistance-requested'
+    s.tick();assert s.status=='running'                                  # keeps searching for the other person
+
+
+def test_mobility_is_unknown_until_contact():
+    s=Simulation(scenario=dict(survivors=[[26,6]],ignitions=[],seed=1));s.status='running'
+    s.add_evidence(s.scene.world((26,6)),1.,'test')
+    assert s.reports[-1]['kind']=='confirmed-person' and s.reports[-1]['mobility']=='unknown until contact'
+
+
+def test_reports_queue_during_comms_outage_and_need_acknowledgement():
+    s=Simulation(scenario=dict(survivors=[[26,6]],ignitions=[],seed=1,comms_outages=[[0,5]]));s.status='running'
+    r=s.report('confirmed-person',(26,6),action='test',confirmed=1)
+    assert r['status']=='queued'
+    with pytest.raises(ValueError):s.acknowledge(r['id'])
+    s.time=5.0;s.deliver_reports()
+    assert r['status']=='delivered' and r['attempts']>=2 and any('restored' in e['message'] for e in s.events)
+    s.acknowledge(r['id']);assert r['status']=='acknowledged'
+    with pytest.raises(ValueError):Simulation(scenario=dict(survivors=[],ignitions=[],seed=1,comms_outages=[[5,1]]))
+    with pytest.raises(ValueError):Simulation(scenario=dict(survivors=[[26,6]],ignitions=[],seed=1,immobile=[[3,3]]))
+
+
+def test_partly_observed_room_tries_another_viewpoint_then_reports_reason():
+    from rescuetwin.core import Scene
+    sc=Scene(id='rooms',name='Rooms · Floor 1',width=12,height=8,resolution=.5)
+    sc.walls={(x,y) for x in range(12) for y in range(8) if x in (0,11) or y in (0,7)}|{(6,y) for y in range(1,6)}
+    sc.exits=[(1,1)];sc.robot_start=(1,1)
+    cells=[(x,y) for x in range(1,11) for y in range(1,7) if (x,y) not in sc.walls]
+    sc.rooms=[dict(id='r',name='Hall',label='Living room',cells=cells,observe=[(2,3)])]
+    s=Simulation(sc,dict(scene_id='rooms',survivors=[],ignitions=[],seed=1));s.status='running'
+    s.observed[:]=0;s.visited.add((2,3));s.observed[3,2]=1
+    s.update_rooms()
+    assert s.rooms_state['r']['viewpoints_tried']==1 and s.extra_views
+    for _,c in s.extra_views:s.visited.add(c)
+    s.rooms_state['r']['viewpoints_tried']=2;s.update_rooms()
+    assert s.rooms_state['r']['status']=='partly-observed' and 'visibility' in s.rooms_state['r']['reason']
+
+
+def test_unconfirmed_detection_gets_second_viewpoint_or_is_reported_possible():
+    s=Simulation(scenario=dict(survivors=[],ignitions=[],seed=1),perception='image-yolo');s.status='running'
+    s.observed[:]=1
+    d=s.add_evidence(s.scene.world((15,6)),.6,'yolo');assert d['status']=='candidate'
+    s.time+=5;costs,_=s.tree()
+    det,view=s.recheck_target(costs)
+    assert det is d and view is not None and math.dist(s.scene.world(view),d['position'])<=3.0
+    d['rechecking']=True;s.scan_done()
+    assert d['status']=='possible' and s.reports[-1]['kind']=='possible-detection' and s.metrics['possible_detections']==1
+
+
+def test_withdrawal_before_time_limit_and_decisions_are_recorded():
+    s=Simulation(scenario=dict(survivors=[[26,6]],ignitions=[],seed=1));s.status='running'
+    for _ in range(20):s.tick()
+    assert s.decisions and {'time','decision','trigger','options','reason'}<=set(s.decisions[0])
+    s.time=s.scene.time_limit-8;s.tick()                       # return (~4 s) + 15 s margin > 8 s left
+    assert s.withdraw_reason and 'time limit' in s.withdraw_reason
+    while s.status=='running' and s.time<s.scene.time_limit+5:s.tick()
+    assert s.status=='withdrawn' and s.reports[-1]['kind']=='mission-end' and 'outstanding_rooms' in s.reports[-1]
+
+
+def test_agent_context_is_belief_only_and_goals_are_committed():
+    import json as _json
+    from rescuetwin.agent import decision_options, needs_decision, summarize
+    a=Simulation(scenario=dict(survivors=[[26,6]],ignitions=[],seed=1));a.status='running'
+    b=Simulation(scenario=dict(survivors=[[5,18]],ignitions=[],seed=1));b.status='running'
+    ctx_a,ctx_b=decision_options(a),decision_options(b)
+    assert ctx_a==ctx_b                                           # survivor placement changes nothing the model sees
+    text=_json.dumps([ctx_a,summarize(a.observations())])
+    assert 'person-' not in text and 'scenario' not in text
+    assert {'travel_cost_m','likelihood_weight','state'}<=set(ctx_a['rooms'][0])
+    assert needs_decision(a)
+    a.goal=(15,6);assert not needs_decision(a)                    # committed until reached
+    a.robot=(15,6);assert needs_decision(a)
+
+
+def test_agent_cannot_deadlock_a_paused_clock_on_the_robots_own_cell():
+    from rescuetwin.agent import apply_decision, decision_options, wants_decision
+    s=Simulation(scenario=dict(survivors=[[26,6]],ignitions=[],seed=1));s.status='running'
+    room=s.scene.rooms[0];s.robot=tuple(s.observe_points(room)[0])        # standing on the room's only point
+    with pytest.raises(ValueError,match='remaining observation point'):
+        apply_decision(s,dict(kind='room',id=room['id'],reason='x'),s.time)
+    assert next(r for r in decision_options(s)['rooms'] if r['id']==room['id'])['remaining_observation_points']==0
+    other=s.scene.rooms[3];apply_decision(s,dict(kind='room',id=other['id'],reason='x'),s.time)
+    assert not wants_decision(s)                                            # committed goal, and a tick is owed first
+    s.goal=None;assert not wants_decision(s)                                # still owed a tick
+    s.tick();assert s.time>=s.agent_backoff_until
