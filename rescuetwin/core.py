@@ -50,6 +50,7 @@ HAZARD_PREVIEW_LIMIT_S = 600.0
 FLAME_VISIBLE_HEAT = 0.3           # flames are drawn and visible to sensing at or above this heat
 IGNITION_RADIUS_M = 0.3
 DEDUP_M = 0.75               # detections closer than this are the same potential survivor
+FATAL_HEAT_DOSE = 12.0       # normalized heat-seconds above the escort heat limit (demo)
 PAIR_M = 0.75                # robot must reach this close to start an escort
 BELIEF_STALE_S = 60.0        # older hazard readings keep their risk penalty but stop being hard planning blocks
 STALE_HEAT_CAP, STALE_SMOKE_CAP = .59, .49   # just under the strictest (escort) limits
@@ -219,11 +220,14 @@ class Simulation:
         self.smoke_decay=.015+.24*exchange
         self.ignition_cells=set();self.hazard_time=0.;self.hazards_running=False
         self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.)
-        self.route=[];self.goal=None;self.visited=set();self.escort=None;self.escort_detection=None
+        self.route=[];self.goal=None;self.visited=set();self.escort={}  # person ID to confirmed detection ID
         self.detections=[];self.next_detection=0;self.version=0
         self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.,detections=0,false_detections=0,route_changes=0,rooms_inspected=0,robot_hazard_s=0.,last_resort_escorts=0)
         self.escort_blocked_since=None;self.last_resort=False
+        self.searched_points = set()
+        self.active_scan = None
         self.survivors=[dict(id=f'person-{i}',position=tuple(p),status='unobserved') for i,p in enumerate(self.scenario['survivors'])]
+        self.heat_dose = {person['id']: 0.0 for person in self.survivors}
         self.rng=random.Random(self.scenario['seed']);self.steps=0
         self.frame_request=None;self.frame_seq=0;self.degraded=False;self.last_frame=None;self.holding=False
         label='Synthetic fixture' if self.scene.source=='synthetic' else 'Scanned geometry with synthetic hazards and people'
@@ -332,7 +336,7 @@ class Simulation:
                     self.add_evidence(self.scene.world((x,y)),1.,'analytic-fixture')
         if changed:self.version+=1
 
-    def add_evidence(self,position,confidence,source):
+    def add_evidence(self,position,confidence,source,matched=()):
         """Merge a world-frame person observation into belief; returns the detection entry."""
         position=(float(position[0]),float(position[1]))
         cell=self.scene.cell(*position)
@@ -340,13 +344,23 @@ class Simulation:
             near=[(abs(dx)+abs(dy),(cell[0]+dx,cell[1]+dy)) for dx in range(-2,3) for dy in range(-2,3) if self.scene.free((cell[0]+dx,cell[1]+dy))]
             if not near: return None
             cell=min(near)[1]
-        for d in self.detections:
-            if d['status'] in ('confirmed','candidate') and math.dist(d['position'],position)<=DEDUP_M:
-                n=d['hits'];d['position']=[(d['position'][0]*n+position[0])/(n+1),(d['position'][1]*n+position[1])/(n+1)]
-                d['hits']+=1;d['confidence']=max(d['confidence'],confidence);d['last_seen']=self.time
-                d['cell']=list(self.nearest_free(self.scene.cell(*d['position'])))
-                if d['status']=='candidate' and d['hits']>=CONFIRM_HITS[self.perception_mode]:self.confirm(d)
-                return d
+        # Associate each observation with the nearest track. A frame may update
+        # each track once, even when two people stand within the dedup radius.
+        radius = 1e-6 if source == 'analytic-fixture' else DEDUP_M
+        candidates = [d for d in self.detections
+                      if d['id'] not in matched and d['status'] in ('confirmed', 'candidate')
+                      and math.dist(d['position'], position) <= radius]
+        if candidates:
+            d = min(candidates, key=lambda entry: math.dist(entry['position'], position))
+            n = d['hits']
+            d['position'] = [(old * n + new) / (n + 1) for old, new in zip(d['position'], position)]
+            d['hits'] += 1
+            d['confidence'] = max(d['confidence'], confidence)
+            d['last_seen'] = self.time
+            d['cell'] = list(self.nearest_free(self.scene.cell(*d['position'])))
+            if d['status'] == 'candidate' and d['hits'] >= CONFIRM_HITS[self.perception_mode]:
+                self.confirm(d)
+            return d
         d=dict(id=f'det-{self.next_detection}',position=list(position),cell=list(cell),confidence=confidence,hits=1,
                first_seen=self.time,last_seen=self.time,status='candidate',source=source)
         self.next_detection+=1;self.detections.append(d);self.version+=1
@@ -381,6 +395,7 @@ class Simulation:
         return dict(time=self.time,version=self.version,robot=self.robot,heading=self.heading,observed=self.observed.tolist(),
                     heat=self.belief_heat.round(3).tolist(),smoke=self.belief_smoke.round(3).tolist(),
                     hazard_sensor=self.hazard_sensor(),
+                    searched_rooms=self.searched_rooms(),
                     survivors=[deepcopy(d) for d in self.detections if d['status'] in ('confirmed','escorting')],
                     perception=self.perception_mode,events=self.events[-8:])
 
@@ -405,6 +420,10 @@ class Simulation:
     def observe_points(self,room):
         return [tuple(p) for p in room.get('observe',room['cells'])]
 
+    def searched_rooms(self):
+        return [room['id'] for room in self.scene.rooms
+                if (points := self.observe_points(room)) and all(p in self.searched_points for p in points)]
+
     def choose(self):
         if self.escort:
             costs,prev=self.tree(True)
@@ -424,7 +443,7 @@ class Simulation:
                     return extract(prev,self.robot,min(options)[1])
             self.hold('Escort paused: no observed viable egress route; holding until conditions change.');return []
         if self.goal is not None:
-            if self.robot==self.goal:self.goal=None
+            if self.robot==self.goal or self.goal in self.searched_points:self.goal=None
             else:
                 selected=self.path(self.goal)
                 if selected:return selected
@@ -437,7 +456,7 @@ class Simulation:
         # Prior-weighted coverage: likelihood of people in the room over travel cost. With a uniform prior
         # (residential) this is nearest-first.
         smooth=SEARCH_PRIOR_SMOOTHING_M/self.scene.resolution
-        remaining=[(self.prior['weights'].get(room['id'],1.),p) for room in self.scene.rooms for p in self.observe_points(room) if p not in self.visited]
+        remaining=[(self.prior['weights'].get(room['id'],1.),p) for room in self.scene.rooms for p in self.observe_points(room) if p not in self.searched_points]
         options=[(-w/(costs[p]+smooth),costs[p],p) for w,p in remaining if p in costs]
         if options:return extract(prev,self.robot,min(options)[2])
         remaining=[p for _,p in remaining]
@@ -469,12 +488,15 @@ class Simulation:
             turn=min(self.scan_remaining,SCAN_RATE*dt);self.heading=(self.heading+turn)%(2*math.pi);self.scan_remaining-=turn
             if self.scan_remaining<=1e-9:self.scan_done()
         self.sense()
-        if self.robot not in self.visited:
-            self.visited.add(self.robot)
-            if any(self.robot in self.observe_points(r) for r in self.scene.rooms):
-                if self.perception_mode=='image-yolo' and not self.escort:
-                    self.scan_remaining=2*math.pi;self.log('Scanning room from observation point.')
-                else:self.metrics['rooms_inspected']+=1
+        self.visited.add(self.robot)
+        if not self.escort and self.active_scan is None and self.robot not in self.searched_points:
+            if any(self.robot in self.observe_points(room) for room in self.scene.rooms):
+                self.active_scan = self.robot
+                if self.perception_mode == 'image-yolo':
+                    self.scan_remaining = 2 * math.pi
+                    self.log('Scanning room from observation point.')
+                else:
+                    self.scan_done()
         self.pair()
         if self.status!='running':return
         moving=self.scan_remaining<=0
@@ -497,7 +519,7 @@ class Simulation:
             q=tuple(self.route[0]);x,y=q
             # Independent immediate interlock, never global planner input. The robot alone is fire-proof;
             # it protects an escorted person unless the escort is cornered (last resort).
-            guard=self.escort is not None and not self.last_resort
+            guard=bool(self.escort) and not self.last_resort
             if guard and (self.heat[y,x]>=ESCORT_HEAT_LIMIT or self.smoke[y,x]>=ESCORT_SMOKE_LIMIT):
                 self.belief_heat[y,x]=self.heat[y,x];self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time
                 self.observed[y,x]=1;self.progress=0;self.log('Local interlock stopped motion into hazard.')
@@ -505,40 +527,96 @@ class Simulation:
                 self.heading=math.atan2(y-self.robot[1],x-self.robot[0])
                 self.robot=q;self.route=self.route[1:];self.metrics['distance']+=self.scene.resolution
                 if self.escort:
-                    p=next(p for p in self.survivors if p['id']==self.escort);p['position']=q
-                    if q in self.scene.exits:
-                        p['status']='evacuated';self.metrics['evacuated']+=1;self.escort=None
-                        d=next(d for d in self.detections if d['id']==self.escort_detection);d['status']='evacuated';self.escort_detection=None
-                        self.log(f"Evacuated: {d['id']}");self.version+=1
-                        self.escort_blocked_since=None;self.last_resort=False
+                    at_exit = q in self.scene.exits
+                    for person in self.survivors:
+                        detection_id = self.escort.get(person['id'])
+                        if detection_id is None:
+                            continue
+                        person['position'] = q
+                        if at_exit:
+                            person['status'] = 'evacuated'
+                            self.metrics['evacuated'] += 1
+                            detection = next(d for d in self.detections if d['id'] == detection_id)
+                            detection['status'] = 'evacuated'
+                            self.log(f"Evacuated: {detection_id}")
+                            self.version += 1
+                    if at_exit:
+                        self.escort.clear()
+                        self.escort_blocked_since = None
+                        self.last_resort = False
         elif not self.route:self.progress=0
-        for p in self.survivors:
-            if p['status']!='evacuated':
-                x,y=p["position"];self.metrics["exposure"]+=float(dt*(self.heat[y,x]+self.smoke[y,x]))
-        if self.survivors and self.metrics['evacuated']==len(self.survivors):self.status='completed';self.log('All configured survivors evacuated (simulator evaluation).')
+        self.update_casualties(dt)
+        if self.survivors and all(p['status'] in ('evacuated', 'casualty') for p in self.survivors):
+            self.status = 'completed' if self.metrics['evacuated'] == len(self.survivors) else 'unresolved'
+            self.log('All configured survivors evacuated (simulator evaluation).' if self.status == 'completed'
+                     else 'Mission ended with simulated casualties.')
         elif (not new and self.scan_remaining<=0 and not self.holding) or self.time>=self.scene.time_limit:
             self.status='unresolved';self.log('Mission unresolved; unseen occupants are not confirmed absent.')
         if self.status=='running' and self.perception_mode=='image-yolo' and int(round(self.time/dt))%max(1,round(PERCEPTION_PERIOD/dt))==0:
             self.request_frame()
 
+    def update_casualties(self, dt):
+        for person in self.survivors:
+            if person['status'] in ('evacuated', 'casualty'):
+                continue
+            x, y = person['position']
+            heat, smoke = self.heat[y, x], self.smoke[y, x]
+            self.metrics['exposure'] += float(dt * (heat + smoke))
+            person_id = person['id']
+            self.heat_dose[person_id] += float(dt * max(0., heat - ESCORT_HEAT_LIMIT))
+            if self.heat_dose[person_id] < FATAL_HEAT_DOSE:
+                continue
+            person['status'] = 'casualty'
+            detection_id = self.escort.pop(person_id, None)
+            if detection_id is not None:
+                next(d for d in self.detections if d['id'] == detection_id)['status'] = 'casualty'
+                self.version += 1
+                if not self.escort:
+                    self.escort_blocked_since = None
+                    self.last_resort = False
+
     def scan_done(self):
-        self.scan_remaining=0.;self.metrics['rooms_inspected']+=1;self.log('Room scan complete.')
+        self.scan_remaining = 0.
+        if self.active_scan is None:
+            return
+        before = set(self.searched_rooms())
+        self.searched_points.add(self.active_scan)
+        self.active_scan = None
+        for room_id in sorted(set(self.searched_rooms()) - before):
+            self.metrics['rooms_inspected'] += 1
+            room = next(room for room in self.scene.rooms if room['id'] == room_id)
+            self.log(f"Room search complete: {room['name']}.")
 
     def pair(self):
         """Simulator-side contact: the robot reaches a confirmed detection; truth decides who is there."""
-        if self.escort:return
-        here=self.scene.world(self.robot)
+        here = self.scene.world(self.robot)
         for d in self.detections:
-            if d['status']!='confirmed' or math.dist(self.scene.world(tuple(d['cell'])),here)>PAIR_M:continue
-            person=next((p for p in self.survivors if p['status']=='unobserved' and math.dist(self.scene.world(p['position']),here)<=PAIR_M),None)
+            cell = tuple(d['cell'])
+            if (d['status'] != 'confirmed' or math.dist(d['position'], here) > PAIR_M
+                    or not line_visible(self.scene, self.robot, cell)):
+                continue
+            candidates = [p for p in self.survivors if p['status'] == 'unobserved'
+                          and math.dist(self.scene.world(p['position']), here) <= PAIR_M
+                          and math.dist(self.scene.world(p['position']), d['position']) <= PAIR_M
+                          and line_visible(self.scene, self.robot, p['position'])]
+            person = min(candidates, key=lambda p: math.dist(self.scene.world(p['position']), d['position']),
+                         default=None)
             if person is None:
-                if tuple(d['cell'])==self.robot:
-                    d['status']='not-found';self.metrics['false_detections']+=1;self.version+=1
+                if cell == self.robot:
+                    d['status'] = 'not-found'
+                    self.metrics['false_detections'] += 1
+                    self.version += 1
                     self.log(f"No person found at {d['id']} on arrival; detection retired.")
                 continue
-            person['status']='escorting';person['position']=self.robot;self.escort=person['id']
-            d['status']='escorting';self.escort_detection=d['id'];self.scan_remaining=0;self.version+=1
-            self.log(f"Escort started: {d['id']}");return
+            person['status'] = 'escorting'
+            person['position'] = self.robot
+            self.escort[person['id']] = d['id']
+            d['status'] = 'escorting'
+            self.scan_remaining = 0
+            self.active_scan = None
+            self.goal = None
+            self.version += 1
+            self.log(f"Escort started: {d['id']}")
 
     def state(self):
         public=[]
@@ -554,6 +632,7 @@ class Simulation:
                     heat=self.heat.round(3).tolist(),smoke=self.smoke.round(3).tolist(),observed=self.observed.astype(int).tolist(),
                     route=self.route,events=self.events,metrics={k:(round(v,3) if isinstance(v,float) else v) for k,v in self.metrics.items()},
                     mode=self.mode,perception_mode=self.perception_mode,detections=self.detections,
+                    searched_rooms=self.searched_rooms(),
                     frame_request=self.frame_request,degraded=self.degraded,scanning=self.scan_remaining>0,holding=self.holding,last_frame=self.last_frame)
 
 
