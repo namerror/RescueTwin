@@ -2,12 +2,13 @@
 
 ## Current status and first gate
 
-The repository includes a synthetic grid simulator, a local Three.js scenario editor,
-REST/WebSocket interfaces, a deterministic mission policy, an optional Gemini tool adapter,
-and an independent YOLO detector adapter. The YOLO adapter is not wired into a rendered RGB-D
-pipeline. The runtime fixture is not a sponsor property. Real scene preparation, verified
-exits, camera inference, uncertainty growth/forecasting, and validated hosted inference
-remain incomplete. Physical motion is grid-based, not a continuous rigid-body simulation.
+The default scene is a scanned sponsor property: `9A46aT7FCPg` (1276 W 38th St, unit 2, Floor 1),
+joined to CoStar PropertyId 22572250 and floor plan 6106437. Its collision grid, rooms, single
+verified exit, derived wall mesh and floor texture share the Matterport model frame (see
+[scene selection](SCENE_SELECTION.md) and [contracts](CONTRACTS.md)). Survivor detection in image
+mode is YOLO on browser-rendered RGB-D frames. The synthetic fixture and the analytic detector
+remain as labelled development/CI modes. MatterPak meshes were unavailable, so the rendered mesh
+is derived from the schematic plan. Motion is grid-based, not a continuous rigid-body simulation.
 
 ```bash
 python3 -m venv .venv
@@ -22,6 +23,12 @@ npm run dev
 python3 -m pytest -q
 # frontend check: cd frontend && npm run build
 ```
+
+Prepare the scene (needs Matterport credentials and the ignored CoStar kit):
+`pip install -e '.[scene]'`, then `python scripts/prepare_scene.py fetch 9A46aT7FCPg` and
+`python scripts/prepare_scene.py build 9A46aT7FCPg`. Image perception needs `.[vision]`; YOLO
+weights download on first use (ignored `*.pt`). Keep a browser tab open during image-mode runs:
+it renders the robot camera.
 
 Optional extras: `pip install -e '.[agent,vision]'`. Export `GEMINI_API_KEY` and a
 verified `GEMINI_MODEL` before server startup to enable hosted decisions. Backend
@@ -117,15 +124,23 @@ Final handoff should include verified setup/check commands, asset provenance, kn
 failures, demonstration configuration and recording, metric definitions, and outstanding
 work. Never describe the application as complete solely because these documents exist.
 
-## Verification recorded for this baseline
+## Verification recorded (2026-11-14, after merging upstream PR #1)
 
-- Python 3.12 / Node 24: 13 backend tests pass, including HTTP controls, observation
-  privacy, WebSocket snapshots, deterministic hazards, routing, interlocks, escort,
-  stale/hidden agent goals, placement validation, and exact sponsor joins.
-- `npm run build` passes TypeScript checking and Vite production compilation.
-- Default synthetic mission evacuates both survivors; this is fixture evidence only.
-- `git diff --check` passes.
-- The frontend build reports a non-blocking bundle-size warning; TestClient reports
-  an upstream httpx deprecation warning. No browser surface was available for visual QA.
-- Hosted Gemini calls, pretrained detector weights/GPU execution, and real scene loading
-  have not been verified. These checks do not satisfy full MVP acceptance yet.
+Environment: macOS (Apple M5), Python 3.12 venv, Node 24.22.3, ultralytics 8.4.212, torch MPS.
+Working tree: uncommitted changes on top of `origin/main` 930d175 (PR #1 fire model and hazard preview).
+
+- `python -m pytest -q`: 38 passed, 1 skipped (opt-in real-YOLO test; passes with `RESCUETWIN_YOLO_TEST=1`).
+  New: the NumPy fire port equals upstream's per-cell loop at 0.5 m (also checked over 600 s for three
+  ignition layouts, max difference about 8e-16); fire never enters walls, crosses only through doorways
+  and burns out; the hazard-preview API; the hold-then-resolve rule. Earlier coverage is unchanged.
+- `npm run build` passes (bundle-size warning only).
+- Analytic paired comparisons (upstream fire): scanned scene, standard preset, distance-only 2/2 in 260 s,
+  risk-aware 2/2 in 317 s; capacity stress (8 survivors), distance-only 8/8 in 578 s, risk-aware 8/8 in 588 s;
+  fixture 2/2 for both.
+- Headless Chromium on the merged UI: hazard preview runs fire without the robot (about 90 m² fire at 70 s,
+  stopping at walls), 3D/Plan, the walls toggle and pause work, with no page errors. Detection gate unchanged:
+  YOLO26n 0.92/0.91 on a rendered person, projected 0.14 m from truth. Paired live YOLO comparison, standard
+  preset: distance-only 2/2 at 310 s (exposure 323.7), risk-aware 2/2 at 313 s (exposure 324.8).
+- Not verified: hosted Gemini decisions, real (non-rendered) imagery, a second egress endpoint,
+  calibrated fire behaviour, and visual QA on a physical display. Exposure is illustrative, and the planner
+  difference is not attributable to an LLM.

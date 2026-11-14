@@ -1,28 +1,46 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import './styles.css';
 
 type Cell = [number, number];
 type Mode = 'adaptive' | 'baseline';
+type Perception = 'image-yolo' | 'analytic-development';
 type Tool = 'inspect' | 'survivor' | 'fire' | 'remove';
-interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number }
-interface SimState {
-  scene: { id: string; name: string; width: number; height: number; resolution: number; walls: Cell[]; exits: Cell[]; rooms: { id: string; name: string; cells: Cell[] }[]; source: string };
-  scenario: Scenario;
-  time: number;
-  hazard_time?: number;
-  hazards_running?: boolean;
-  status: string;
-  robot: Cell;
-  survivors: { id: string | number; position: Cell; status: string }[];
-  heat: number[][];
-  smoke: number[][];
-  observed: number[][];
-  route: Cell[];
-  events: { time: number; message: string }[];
-  metrics: { evacuated: number; exposure: number; distance: number };
-  mode: Mode;
+interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string }
+interface CostarField { key: string; label: string; value: unknown; units: string | null; field_path: string; source_id: number; dataset: string; derivation: string; note?: string }
+interface SceneData {
+  id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
+  walls: Cell[]; exterior: Cell[]; exits: Cell[]; source: string; robot_start: Cell; time_limit: number;
+  rooms: { id: string; name: string; label?: string; cells: Cell[]; observe?: Cell[]; polygon?: [number, number][] }[];
+  mesh?: { file: string; source: string; wall_height: number } | null;
+  floor_image?: { file: string; origin: [number, number]; pixels_per_metre: number; width: number; height: number; source: string } | null;
+  costar?: { fields: CostarField[]; max_occupants: number; disclaimer: string; property_id: number; floor_plan_id: number } | null;
+  checks?: Record<string, unknown> | null;
+  exit_info?: { id: string; label: string; opening_width_m: number; evidence: string[]; beyond: string }[];
+  assumptions?: string[]; provenance?: { item: string; source: string; derivation: string }[];
 }
+interface Pose { x: number; y: number; z: number; yaw: number }
+interface DetectionEntry { id: string; position: [number, number]; cell: Cell; confidence: number; hits: number; status: string; source: string }
+interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
+interface Paired { status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
+interface SimState {
+  scene_id: string; scenario: Scenario; time: number; status: string; robot: Cell; heading: number; pose: Pose;
+  survivors: { id: string; position: Cell; status: string }[];
+  heat: number[][]; smoke: number[][]; observed: number[][]; route: Cell[];
+  events: { time: number; message: string }[]; metrics: Record<string, number>; mode: Mode; perception_mode: Perception;
+  detections: DetectionEntry[]; frame_request: { seq: number; time: number; pose: Pose } | null; degraded: boolean; scanning: boolean;
+  last_frame: FrameResult | null; paired: Paired | null;
+  hazard_time: number; hazards_running: boolean; holding?: boolean;
+}
+interface Observation { heat: number[][]; smoke: number[][]; observed: number[][]; survivors: DetectionEntry[] }
+interface Preset { id: string; label: string; note: string; scenario?: Scenario; unavailable?: boolean; capacity?: number }
+
+const CAM_W = 512, CAM_H = 384, CAM_HFOV = Math.PI / 2;
+const CAM_VFOV = 2 * Math.atan(Math.tan(CAM_HFOV / 2) * CAM_H / CAM_W);
+const FX = (CAM_W / 2) / Math.tan(CAM_HFOV / 2), FY = (CAM_H / 2) / Math.tan(CAM_VFOV / 2);
+const OPERATOR_LAYER = 1, CAMERA_ONLY_LAYER = 2;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -32,7 +50,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const number = (value: number, digits = 1): string => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 const same = (a: Cell, b: Cell): boolean => a[0] === b[0] && a[1] === b[1];
-const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p]), ignitions: value.ignitions.map(p => [...p]), seed: value.seed });
+const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id });
 const key = (p: Cell): string => `${p[0]},${p[1]}`;
 
 $('app').innerHTML = `
@@ -46,6 +64,7 @@ $('app').innerHTML = `
       <div><h1 id="scene-heading">Waiting for scene</h1><p id="scene-size" class="subtle-label"></p></div>
       <div class="run-badge"><span id="run-status">Awaiting backend</span><strong id="clock">—</strong></div>
     </section>
+    <p class="disclosure-line" role="note"><b id="disclosure-tag">Loading</b> <span id="disclosure-body">Waiting for the backend.</span></p>
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div class="workspace-grid" id="workspace" tabindex="-1">
       <section class="panel scene-panel" aria-labelledby="scene-heading">
@@ -58,6 +77,7 @@ $('app').innerHTML = `
             <button id="focus-fire" class="button subtle small" disabled>Find fire</button>
             <button id="expand" class="button subtle small">Fullscreen</button>
           </div>
+          <div class="segmented view-toggle" role="radiogroup" aria-label="Knowledge view"><label><input type="radio" name="view" value="truth" checked /><span>Operator truth</span></label><label><input type="radio" name="view" value="belief" /><span>Robot belief</span></label></div>
           <div class="layer-controls" aria-label="Scene layers">
             <label><input type="checkbox" id="walls-layer" checked />Walls</label>
             <label><input type="checkbox" id="heat-layer" checked /><span class="swatch heat"></span>Fire / heat</label>
@@ -67,103 +87,143 @@ $('app').innerHTML = `
           </div>
         </div>
         <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
-        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor proxy</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Exit</span><span><i class="legend-fire"></i>Ignition</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
-        <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates start at (0, 0). Choose an editing tool in Scenario setup, then apply it here or click the map. Heat and smoke display with intensity clamped to 0–1; inspection shows raw values.</p></details>
+        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+        <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates are grid cells; the scene's origin and resolution convert them to metres in the scan frame. Choose an editing tool in Scenario setup, then apply it here or click the map.</p></details>
       </section>
       <aside class="sidebar">
+        <section class="panel" aria-labelledby="property-heading"><div class="panel-heading compact"><div><h2 id="property-heading">Property context</h2></div></div>
+          <label class="seed-label" for="scene-select">Scene <select id="scene-select"></select></label>
+          <div id="property-card" class="property-card"><p class="field-hint">No CoStar record for this scene.</p></div>
+          <details class="details-block"><summary>Provenance & scene checks</summary><div id="provenance"></div></details>
+        </section>
         <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Run simulation</h2></div></div>
-          <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Adaptive</span></label><label><input type="radio" name="mode" value="baseline" /><span>Baseline</span></label></div></fieldset><p id="mode-description" class="field-hint">Strategy sent to the backend when starting a run.</p>
+          <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Risk-aware</span></label><label><input type="radio" name="mode" value="baseline" /><span>Distance-only</span></label></div></fieldset>
+          <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" checked /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" /><span>Analytic fixture</span></label></div></fieldset>
+          <p id="mode-description" class="field-hint">Analytic fixture uses simulator truth and is not image perception.</p>
           <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
         </section>
-        <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Scenario</h2></div></div>
+        <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Place the conditions</h2></div></div>
+          <div id="presets" class="preset-list"></div>
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
           <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
           <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
         </section>
-        <section class="panel compare-callout"><h2>Compare runs</h2><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">Apply scenario changes before comparing.</p></section>
+        <section class="panel compare-callout"><h2>Compare runs</h2><p id="compare-text" class="field-hint">Distance-only vs risk-aware from the same frozen scenario, sensors, hazard model and safety rules.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">Apply scenario changes before comparing.</p></section>
       </aside>
       <dl class="run-summary" aria-label="Mission metrics">
-        <div><dt>Evacuated</dt><dd><strong id="evacuated">—</strong> <span id="population"></span></dd></div>
+        <div><dt>Evacuated</dt><dd><strong id="evacuated">—</strong> <span id="population"></span> <span id="unresolved-note" class="subtle-label"></span></dd></div>
         <div><dt>Exposure (normalized)</dt><dd id="exposure">—</dd></div>
         <div><dt>Distance (m)</dt><dd id="distance">—</dd></div>
+        <div><dt>Route</dt><dd id="route-note">—</dd></div>
+        <div><dt>Perception</dt><dd><span class="tiny-dot" id="perception-dot"></span> <span id="perception-label">—</span> · <span id="perception-note">—</span></dd></div>
       </dl>
+      <section class="panel camera-panel" aria-labelledby="camera-heading"><div class="panel-heading compact"><div><h2 id="camera-heading">Person detection</h2></div><span id="camera-status" class="subtle-label">No frame yet</span></div>
+        <div class="camera-body"><canvas id="robot-feed" width="${CAM_W}" height="${CAM_H}" aria-label="Rendered robot camera frame with YOLO detection boxes"></canvas>
+          <div class="camera-side"><p class="field-hint" id="camera-explainer">Frames are rendered from the scanned-geometry scene at the simulator's camera pose and sent to the backend, where YOLO runs on the RGB image and depth places each box in the scan frame. Two consistent frames confirm a potential survivor.</p><ol id="detections" class="event-list detection-list"><li class="empty-line">No detections yet.</li></ol></div></div></section>
       <section class="panel event-panel" aria-labelledby="events-heading"><div class="panel-heading compact"><div><h2 id="events-heading">Event timeline</h2></div></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
       <section id="comparison" class="panel comparison-panel" aria-labelledby="comparison-heading" hidden><div class="panel-heading compact"><div><h2 id="comparison-heading">Strategy comparison</h2></div><button id="close-comparison" class="button subtle small">Close</button></div><p id="comparison-context" class="field-hint"></p><div id="comparison-body"></div></section>
     </div>
-
   </main>`;
 
 let state: SimState | null = null;
+let scene: SceneData | null = null;
+let belief: Observation | null = null;
 let draft: Scenario | null = null;
 let dirty = false;
 let busy = false;
 let connected = false;
 let selectedTool: Tool = 'inspect';
-let sceneIdentity = '';
 let eventSignature = '';
 let selectedCell: Cell | null = null;
 let pollInFlight = false;
-let comparisonAbort: AbortController | null = null;
 let renderer: THREE.WebGLRenderer | null = null;
 let controls: OrbitControls | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
+let view: 'truth' | 'belief' = 'truth';
+let frameInFlight = false;
+let lastFrameSeq = -1;
+let lastFrameImage: ImageData | null = null;
+let shownPairedStatus = '';
 const world = new THREE.Scene();
-world.background = new THREE.Color('#20262d');
+const background = new THREE.Color('#0d151f');
+world.background = background;
 const staticLayer = new THREE.Group();
+const dynamicLayer = new THREE.Group();
+const avatarLayer = new THREE.Group();
+world.add(staticLayer, dynamicLayer, avatarLayer);
+const hemi = new THREE.HemisphereLight(0xf2f6ff, 0x5b5248, 2.2);
+const sunlight = new THREE.DirectionalLight(0xffffff, 1.6);
+sunlight.position.set(-10, 30, 15);
+world.add(hemi, sunlight);
+for (const light of [hemi, sunlight]) { light.layers.enableAll(); }
+const raycaster = new THREE.Raycaster();
+raycaster.layers.enableAll();
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const pointer = new THREE.Vector2();
+const layers = { heat: true, smoke: true, observed: false, route: true };
+// Upstream PR #1 hazard rendering: textured heat (floor) and banded smoke (near ceiling) fields,
+// instanced smoke clouds and flame cones. Fields/clouds are operator-only; flames are physical (camera sees them).
 const wallLayer = new THREE.Group();
-function createField(altitude: number, order: number) {
+function createField(order: number) {
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d')!;
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({
-    map: texture, transparent: true, depthWrite: false, side: THREE.DoubleSide,
-  }));
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
   mesh.rotation.x = -Math.PI / 2;
-  mesh.position.y = altitude;
   mesh.renderOrder = order;
+  mesh.layers.set(OPERATOR_LAYER);
   return { canvas, context, texture, mesh };
 }
-
-const heatField = createField(0.027, 1);
-const smokeField = createField(1, 2);
-const smokeLimit = 320;
-const smokeClouds = new THREE.InstancedMesh(
-  new THREE.SphereGeometry(1, 8, 5),
-  new THREE.MeshBasicMaterial({ color: '#c6d1dc', transparent: true, opacity: 0.24, depthWrite: false }),
-  smokeLimit,
-);
+const heatField = createField(1);
+const smokeField = createField(2);
+const smokeLimit = 600;
+const smokeClouds = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 5), new THREE.MeshBasicMaterial({ color: '#c6d1dc', transparent: true, opacity: 0.24, depthWrite: false }), smokeLimit);
 smokeClouds.count = 0;
 smokeClouds.frustumCulled = false;
 smokeClouds.renderOrder = 3;
+smokeClouds.layers.set(OPERATOR_LAYER);
 const smokeTransform = new THREE.Object3D();
 const heatColor = new THREE.Color();
-const flameLimit = 256;
-const flames = new THREE.InstancedMesh(
-  new THREE.ConeGeometry(0.34, 1, 6),
-  new THREE.MeshStandardMaterial({ color: '#ff962e', emissive: '#ed4c0a', emissiveIntensity: 1.25 }),
-  flameLimit,
-);
+const flameLimit = 4096;
+const flames = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 6), new THREE.MeshStandardMaterial({ color: '#ff962e', emissive: '#ed4c0a', emissiveIntensity: 1.25 }), flameLimit);
 flames.count = 0;
 flames.frustumCulled = false;
 const flameTransform = new THREE.Object3D();
 let focusCell: Cell | null = null;
 const hotColor = new THREE.Color('#e6451d');
-let view: 'orbit' | 'plan' = 'orbit';
-const dynamicLayer = new THREE.Group();
-world.add(staticLayer, wallLayer, heatField.mesh, smokeField.mesh, smokeClouds, flames, dynamicLayer);
-world.add(new THREE.HemisphereLight(0xd6ebff, 0x24344a, 2.5));
-const sunlight = new THREE.DirectionalLight(0xffffff, 3);
-sunlight.position.set(-10, 30, 15);
-world.add(sunlight);
-const raycaster = new THREE.Raycaster();
-const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-const pointer = new THREE.Vector2();
+let cameraView: 'orbit' | 'plan' = 'orbit';
 let blockedCells = new Set<string>();
-const layers = { heat: true, smoke: true, observed: false, route: true };
+const FLAME_HEAT = 0.3;   // matches the backend's FLAME_VISIBLE_HEAT
+world.add(wallLayer, heatField.mesh, smokeField.mesh, smokeClouds, flames);
+const avatars = new Map<string, THREE.Group>();
+const robotCamera = new THREE.PerspectiveCamera(THREE.MathUtils.radToDeg(CAM_VFOV), CAM_W / CAM_H, 0.05, 40);
+robotCamera.layers.set(0);
+robotCamera.layers.enable(CAMERA_ONLY_LAYER);
+const rgbTarget = new THREE.WebGLRenderTarget(CAM_W, CAM_H, { type: THREE.UnsignedByteType, colorSpace: THREE.SRGBColorSpace });
+const depthTarget = new THREE.WebGLRenderTarget(CAM_W, CAM_H, { type: THREE.FloatType, format: THREE.RGBAFormat });
+const depthMaterial = new THREE.ShaderMaterial({
+  vertexShader: `#include <common>
+    #include <skinning_pars_vertex>
+    varying float vDepth;
+    void main() {
+      #include <skinbase_vertex>
+      #include <begin_vertex>
+      #include <skinning_vertex>
+      vec4 local = vec4(transformed, 1.0);
+      #ifdef USE_INSTANCING
+        local = instanceMatrix * local;
+      #endif
+      vec4 mv = modelViewMatrix * local;
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `varying float vDepth; void main() { gl_FragColor = vec4(vDepth, 0.0, 0.0, 1.0); }`,
+  side: THREE.DoubleSide,
+});
 
 function notify(message: string, error = false): void {
   $('notice').textContent = message;
@@ -193,74 +253,144 @@ function validCell(value: unknown): value is Cell {
 
 function validateState(value: unknown): asserts value is SimState {
   const s = value as SimState | null;
-  if (!s || !s.scene || !Number.isInteger(s.scene.width) || !Number.isInteger(s.scene.height) || s.scene.width < 1 || s.scene.height < 1 || !Number.isFinite(s.scene.resolution) || s.scene.resolution <= 0 || !s.metrics || !s.scenario || !Number.isSafeInteger(s.scenario.seed) || !Number.isFinite(s.time) || typeof s.status !== 'string' || !validCell(s.robot) || !['adaptive', 'baseline'].includes(s.mode)) throw new Error('The backend returned an invalid simulation state.');
-  const cellLists = [s.scene.walls, s.scene.exits, s.scenario.survivors, s.scenario.ignitions, s.route];
-  if (cellLists.some(list => !Array.isArray(list) || !list.every(validCell)) || !Array.isArray(s.scene.rooms) || !s.scene.rooms.every(r => typeof r.name === 'string' && Array.isArray(r.cells) && r.cells.every(validCell)) || !Array.isArray(s.survivors) || !s.survivors.every(p => validCell(p.position) && typeof p.status === 'string') || !Array.isArray(s.events) || !s.events.every(e => Number.isFinite(e.time) && typeof e.message === 'string') || ![s.heat, s.smoke, s.observed].every(matrix => Array.isArray(matrix) && matrix.every(row => Array.isArray(row) && row.every(n => typeof n === 'number' && Number.isFinite(n))))) throw new Error('The backend returned malformed scene or telemetry data.');
+  if (!s || typeof s.scene_id !== 'string' || !s.metrics || !s.scenario || !Number.isSafeInteger(s.scenario.seed) || !Number.isFinite(s.time) || typeof s.status !== 'string' || !validCell(s.robot) || !['adaptive', 'baseline'].includes(s.mode)) throw new Error('The backend returned an invalid simulation state.');
+  if (![s.scenario.survivors, s.scenario.ignitions, s.route].every(list => Array.isArray(list) && list.every(validCell)) || !Array.isArray(s.survivors) || !Array.isArray(s.events) || ![s.heat, s.smoke, s.observed].every(m => Array.isArray(m) && m.every(Array.isArray))) throw new Error('The backend returned malformed telemetry.');
+}
+
+function validateScene(value: unknown): asserts value is SceneData {
+  const s = value as SceneData | null;
+  if (!s || !Number.isInteger(s.width) || !Number.isInteger(s.height) || !(s.resolution > 0) || !Array.isArray(s.origin) || ![s.walls, s.exterior, s.exits].every(l => Array.isArray(l) && l.every(validCell)) || !Array.isArray(s.rooms)) throw new Error('The backend returned an invalid scene.');
+}
+
+function blocked(cell: Cell): boolean {
+  return !!scene && (scene.walls.some(p => same(p, cell)) || scene.exterior.some(p => same(p, cell)));
 }
 
 function validateScenario(value: unknown): Scenario {
-  if (!state) throw new Error('Load a backend scene before importing a scenario.');
+  if (!state || !scene) throw new Error('Load a backend scene before importing a scenario.');
   if (!value || typeof value !== 'object') throw new Error('Expected a scenario JSON object.');
   const candidate = value as Scenario;
   if (!Number.isSafeInteger(candidate.seed)) throw new Error('Seed must be a safe integer.');
-  const walls = new Set(state.scene.walls.map(key));
+  if (candidate.scene_id !== undefined && candidate.scene_id !== scene.id) throw new Error(`This scenario belongs to scene ${candidate.scene_id}; select that scene first.`);
+  const walls = new Set([...scene.walls, ...scene.exterior].map(key));
   for (const field of ['survivors', 'ignitions'] as const) {
     if (!Array.isArray(candidate[field])) throw new Error(`${field} must be an array of [x, y] cells.`);
     const seen = new Set<string>();
     for (const cell of candidate[field]) {
       if (!validCell(cell) || !cell.every(Number.isInteger) || !inBounds(cell)) throw new Error(`${field} contains an invalid or out-of-bounds cell.`);
-      if (walls.has(key(cell))) throw new Error(`${field} cannot be placed inside walls.`);
+      if (walls.has(key(cell))) throw new Error(`${field} cannot be placed inside walls or outside the floor.`);
       if (seen.has(key(cell))) throw new Error(`${field} contains duplicate cells.`);
       seen.add(key(cell));
     }
   }
-  return copyScenario(candidate);
+  return { ...copyScenario(candidate), scene_id: scene.id };
 }
 
 function inBounds(cell: Cell): boolean {
-  return !!state && cell[0] >= 0 && cell[1] >= 0 && cell[0] < state.scene.width && cell[1] < state.scene.height;
+  return !!scene && cell[0] >= 0 && cell[1] >= 0 && cell[0] < scene.width && cell[1] < scene.height;
 }
 
-function idle(): boolean { return connected && state?.status.toLowerCase() === 'idle'; }
+function idle(): boolean { return connected && state?.status.toLowerCase() === 'idle' && !pairedRunning(); }
+function pairedRunning(): boolean { return state?.paired?.status === 'running'; }
+function chosen<T extends string>(name: string): T { return document.querySelector<HTMLInputElement>(`input[name="${name}"]:checked`)!.value as T; }
 
 function syncUI(): void {
   const editable = idle() && !busy;
   const status = state?.status.toLowerCase();
   $('connection').className = `connection ${connected ? 'online' : 'offline'}`;
   $('connection').innerHTML = `<i></i>${connected ? 'Backend connected' : state ? 'Connection lost' : 'Backend offline'}`;
-  $('run-status').textContent = state ? state.status.toUpperCase() : 'AWAITING BACKEND';
+  $('run-status').textContent = state ? (pairedRunning() ? `PAIRED · ${state.paired!.running?.toUpperCase()}` : state.status.toUpperCase()) : 'AWAITING BACKEND';
   $('run-status').classList.toggle('running', status === 'running');
   const preview = $<HTMLButtonElement>('preview-hazards');
-  preview.disabled = !connected || busy || dirty || status === 'running' || state?.hazard_time === undefined || state.hazard_time >= 600;
-  preview.textContent = state?.hazards_running ? 'Pause hazards' : 'Preview hazards';
-  $('start') .textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
-  ($('start') as HTMLButtonElement).disabled = !connected || busy || dirty || !['idle', 'paused'].includes(status ?? '');
-  ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running';
+  preview.disabled = !connected || busy || dirty || status === 'running' || pairedRunning() || !state || state.hazard_time >= 600;
+  preview.textContent = state?.hazards_running && status !== 'running' ? 'Pause hazards' : 'Preview hazards';
+  $('start').textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
+  ($('start') as HTMLButtonElement).disabled = !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
+  ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running' || pairedRunning();
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
   ($('mode-fieldset') as HTMLFieldSetElement).disabled = !editable;
+  ($('perception-fieldset') as HTMLFieldSetElement).disabled = !editable;
+  ($('scene-select') as HTMLSelectElement).disabled = !connected || busy || status === 'running' || pairedRunning();
   document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => { input.disabled = input.value !== 'inspect' && !editable; });
+  document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => { b.disabled = !editable || b.dataset.unavailable === '1'; });
   ($('seed') as HTMLInputElement).disabled = !editable;
   ($('apply') as HTMLButtonElement).disabled = !editable || !dirty;
   ($('discard') as HTMLButtonElement).disabled = busy || !dirty;
   ($('import') as HTMLButtonElement).disabled = !editable;
   ($('export') as HTMLButtonElement).disabled = !draft;
-  ($('compare') as HTMLButtonElement).disabled = !connected || busy || dirty || !['idle', 'paused', 'completed', 'complete', 'finished'].includes(status ?? '');
-  $('control-hint').textContent = !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? `Running ${state?.mode} strategy. Pause to inspect.` : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
-  $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Select a tool, then click a floor cell. Changes stay local until applied.';
+  ($('compare') as HTMLButtonElement).disabled = !connected || busy || dirty || pairedRunning() || status === 'running';
+  $('control-hint').textContent = !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
+  $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Pick a preset or a tool, then click a floor cell. Changes stay local until applied.';
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
   $('survivor-count').textContent = draft ? String(draft.survivors.length) : '—';
   $('fire-count').textContent = draft ? String(draft.ignitions.length) : '—';
   $('apply-cell').textContent = selectedTool === 'inspect' ? 'Inspect cell' : selectedTool === 'remove' ? 'Remove from cell' : `Place ${selectedTool === 'fire' ? 'ignition' : 'survivor'}`;
 }
 
+async function loadScene(): Promise<void> {
+  const next = await api<unknown>('scene');
+  validateScene(next);
+  scene = next;
+  selectedCell = null;
+  buildStaticScene();
+  recenter();
+  renderSceneInfo();
+  await loadPresets();
+  const list = await api<{ id: string; name: string; source: string; checks_passed: boolean | null }[]>('scenes');
+  ($('scene-select') as HTMLSelectElement).innerHTML = list.map(s => `<option value="${escape(s.id)}"${s.id === scene!.id ? ' selected' : ''}>${escape(s.name)}${s.source === 'synthetic' ? ' (synthetic)' : ''}</option>`).join('');
+}
+
+async function loadPresets(): Promise<void> {
+  const presets = await api<Preset[]>(`presets?seed=${draft?.seed ?? 7}`);
+  $('presets').innerHTML = presets.map((p, i) => `<button class="button subtle small preset" data-index="${i}" data-unavailable="${p.unavailable ? 1 : 0}" title="${escape(p.note)}">${escape(p.label)}</button>`).join('') +
+    presets.filter(p => p.id === 'capacity-stress').map(p => `<p class="field-hint capacity-note">${escape(p.note)}</p>`).join('');
+  document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => b.addEventListener('click', () => {
+    const preset = presets[Number(b.dataset.index)];
+    if (!preset.scenario || !idle()) return;
+    draft = validateScenario(preset.scenario);
+    ($('seed') as HTMLInputElement).value = String(draft.seed);
+    dirty = JSON.stringify(draft) !== JSON.stringify({ ...state!.scenario, scene_id: scene!.id });
+    drawDynamic();
+    syncUI();
+    notify(`${preset.label}. ${preset.note} Apply to use it.`);
+  }));
+  syncUI();
+}
+
+function renderSceneInfo(): void {
+  if (!scene) return;
+  const real = scene.source !== 'synthetic';
+  $('scene-heading').textContent = scene.name;
+  $('scene-size').textContent = `${number(scene.width * scene.resolution)} × ${number(scene.height * scene.resolution)} m · ${number(scene.resolution, 3)} m/cell`;
+  $('disclosure-body').textContent = real
+    ? `Real: CoStar record and scan-derived floor geometry (derived mesh). Synthetic: fire, smoke, people, robot. ${scene.exits.length === 1 ? 'Single verified exit; corridor beyond assumed available. ' : ''}Not a fire-safety assessment.`
+    : 'Simulated geometry, people and hazard fields. Not a property.';
+  $('disclosure-tag').textContent = real ? 'Scanned property, synthetic emergency.' : 'Synthetic fixture.';
+  const c = scene.costar;
+  const pick = (k: string): CostarField | undefined => c?.fields.find(f => f.key === k);
+  const show = (f: CostarField | undefined): string => {
+    if (!f) return '';
+    const value = f.value === null || f.value === undefined ? 'Unknown (null)' : `${f.value}${f.units && !['bedrooms', 'bathrooms', 'stories', 'units', 'year'].includes(f.units) ? ` ${f.units}` : ''}`;
+    return `<div class="property-row"><dt>${escape(f.label)}</dt><dd>${escape(value)}${f.note ? `<small>${escape(f.note)}</small>` : ''}</dd></div>`;
+  };
+  $('property-card').innerHTML = c
+    ? `<dl class="property-list">${['address', 'property_type', 'stories', 'total_units', 'year_built', 'floor_plan', 'beds', 'baths', 'area', 'max_occupants', 'sprinkler_type', 'construction_material'].map(k => show(pick(k))).join('')}</dl><p class="field-hint">${escape(c.disclaimer)}</p>`
+    : '<p class="field-hint">No CoStar record for this scene; capacity presets are unavailable.</p>';
+  const checks = scene.checks ? Object.entries(scene.checks).filter(([k]) => !['failed'].includes(k)) : [];
+  $('provenance').innerHTML = `
+    ${c ? `<h3>CoStar fields</h3><ul class="provenance-list">${c.fields.map(f => `<li><b>${escape(f.label)}</b> · ${escape(f.dataset)} #${escape(f.source_id)} · <code>${escape(f.field_path)}</code> · ${escape(f.derivation)}</li>`).join('')}</ul>` : ''}
+    ${scene.provenance ? `<h3>Scene sources</h3><ul class="provenance-list">${scene.provenance.map(p => `<li><b>${escape(p.item)}</b>: ${escape(p.source)} — ${escape(p.derivation)}</li>`).join('')}</ul>` : ''}
+    ${scene.exit_info ? `<h3>Exits</h3><ul class="provenance-list">${scene.exit_info.map(e => `<li><b>${escape(e.label)}</b> (${number(e.opening_width_m, 2)} m opening): ${e.evidence.map(escape).join('; ')}. Beyond: ${escape(e.beyond)}.</li>`).join('')}</ul>` : ''}
+    ${checks.length ? `<h3>Alignment checks</h3><ul class="provenance-list">${checks.map(([k, v]) => `<li>${escape(k.replace(/_/g, ' '))}: <b>${escape(v)}</b></li>`).join('')}</ul>` : ''}
+    ${scene.assumptions ? `<h3>Assumptions</h3><ul class="provenance-list">${scene.assumptions.map(a => `<li>${escape(a)}</li>`).join('')}</ul>` : ''}`;
+}
+
 function acceptState(next: SimState): void {
-  const identity = JSON.stringify([next.scene.id, next.scene.width, next.scene.height, next.scene.resolution, next.scene.walls, next.scene.exits, next.scene.rooms]);
-  const changed = identity !== sceneIdentity;
-  const lostEdits = dirty && (changed || next.status.toLowerCase() !== 'idle');
+  const lostEdits = dirty && (next.status.toLowerCase() !== 'idle' || (draft?.scene_id && draft.scene_id !== next.scene_id));
   state = next;
   connected = true;
   if (!draft || !dirty || lostEdits) {
-    draft = copyScenario(next.scenario);
+    draft = { ...copyScenario(next.scenario), scene_id: next.scene_id };
     dirty = false;
     ($('seed') as HTMLInputElement).value = String(draft.seed);
   }
@@ -269,30 +399,32 @@ function acceptState(next: SimState): void {
     selectedTool = 'inspect';
     document.querySelector<HTMLInputElement>('input[name="tool"][value="inspect"]')!.checked = true;
   }
-  if (!dirty && next.status.toLowerCase() !== 'idle') document.querySelector<HTMLInputElement>(`input[name="mode"][value="${next.mode}"]`)!.checked = true;
-  $('scene-heading').textContent = next.scene.name;
-  $('scene-size').textContent = `${number(next.scene.width * next.scene.resolution)} × ${number(next.scene.height * next.scene.resolution)} m · ${number(next.scene.resolution, 3)} m/cell`;
-  $('clock').innerHTML = `${number(next.time)}<small> s SIM TIME</small>`;
+  if (!dirty && next.status.toLowerCase() !== 'idle') {
+    document.querySelector<HTMLInputElement>(`input[name="mode"][value="${next.mode}"]`)!.checked = true;
+    document.querySelector<HTMLInputElement>(`input[name="perception"][value="${next.perception_mode}"]`)!.checked = true;
+  }
+  $('clock').textContent = `${number(next.time)} s`;
   $('evacuated').textContent = number(next.metrics.evacuated, 0);
   $('population').textContent = `/ ${next.scenario.survivors.length} people`;
+  $('unresolved-note').textContent = next.status === 'unresolved' ? 'unresolved: remaining people not confirmed absent' : next.holding ? 'holding: no viable route yet' : '';
   $('exposure').textContent = number(next.metrics.exposure, 2);
   $('distance').textContent = number(next.metrics.distance, 2);
-  ($('cell-x') as HTMLInputElement).max = String(next.scene.width - 1);
-  ($('cell-y') as HTMLInputElement).max = String(next.scene.height - 1);
-  if (changed) {
-    sceneIdentity = identity;
-    selectedCell = null;
-    buildStaticScene();
-    recenter();
+  $('route-note').textContent = `${next.metrics.route_changes ?? 0} changes · ${next.metrics.rooms_inspected ?? 0} rooms inspected`;
+  const image = next.perception_mode === 'image-yolo';
+  $('perception-label').textContent = image ? 'YOLO · RGB-D' : 'Analytic fixture';
+  $('perception-dot').classList.toggle('warning', !image || next.degraded);
+  $('perception-note').textContent = image ? (next.degraded ? 'Degraded: frames missed; no new detections' : `${next.metrics.detections ?? 0} confirmed · ${next.metrics.false_detections ?? 0} retired`) : 'Labelled fixture: driven by simulator truth, not images';
+  if (scene) {
+    drawDynamic();
+    if (selectedCell) inspectCell(selectedCell);
   }
-  if (renderer) $('scene-empty').hidden = true;
-  drawDynamic();
-  if (selectedCell) inspectCell(selectedCell);
   const signature = JSON.stringify(next.events);
   if (signature !== eventSignature) {
     eventSignature = signature;
     $('events').innerHTML = next.events.length ? next.events.slice(-60).reverse().map(e => `<li><time>${escape(number(e.time))} s</time><span>${escape(e.message)}</span></li>`).join('') : '<li class="empty-line">No mission events yet. Start a run to collect telemetry.</li>';
   }
+  renderDetections();
+  renderPaired();
   syncUI();
 }
 
@@ -302,7 +434,10 @@ async function poll(): Promise<void> {
   try {
     const next = await api<unknown>('state', undefined, AbortSignal.timeout(4000));
     validateState(next);
+    if (!scene || scene.id !== next.scene_id) { state = next; await loadScene(); }
+    if (view === 'belief') belief = await api<Observation>('observations', undefined, AbortSignal.timeout(4000));
     acceptState(next);
+    if (next.frame_request && next.frame_request.seq !== lastFrameSeq && !frameInFlight) void sendFrame(next);
   } catch (error) {
     if (connected || !state) {
       $('scene-empty').querySelector('p')!.textContent = `Cannot load /api/state. Run the backend on port 8000. ${error instanceof Error ? error.message : ''}`;
@@ -325,127 +460,220 @@ function clearGroup(group: THREE.Group): void {
   group.clear();
 }
 
-function position(cell: Cell, altitude = 0): THREE.Vector3 {
-  return new THREE.Vector3(cell[0] - (state!.scene.width - 1) / 2, altitude, cell[1] - (state!.scene.height - 1) / 2);
+function cellWorld(cell: Cell): [number, number] {
+  return [scene!.origin[0] + (cell[0] + 0.5) * scene!.resolution, scene!.origin[1] + (cell[1] + 0.5) * scene!.resolution];
 }
+/** Model frame (x, y, z up) -> three.js (x, z, -y): the scene bundle's declared viewer transform. */
+function toThree(x: number, y: number, z = 0): THREE.Vector3 { return new THREE.Vector3(x, z, -y); }
+function position(cell: Cell, altitude = 0): THREE.Vector3 { const [x, y] = cellWorld(cell); return toThree(x, y, altitude); }
+function operatorOnly<T extends THREE.Object3D>(object: T): T { object.traverse(o => o.layers.set(OPERATOR_LAYER)); return object; }
 
-function box(group: THREE.Group, cell: Cell, width: number, height: number, depth: number, color: THREE.ColorRepresentation, altitude: number, opacity = 1): THREE.Mesh {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), new THREE.MeshStandardMaterial({ color, roughness: 0.7, transparent: opacity < 1, opacity, depthWrite: opacity === 1 }));
+function cellBox(group: THREE.Group, cell: Cell, size: number, height: number, color: THREE.ColorRepresentation, altitude: number, opacity = 1): THREE.Mesh {
+  const r = scene!.resolution;
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(size * r, height, size * r), new THREE.MeshStandardMaterial({ color, roughness: 0.7, transparent: opacity < 1, opacity, depthWrite: opacity === 1 }));
   mesh.position.copy(position(cell, altitude));
   group.add(mesh);
   return mesh;
 }
 
+function wallHeightOf(): number { return scene?.mesh?.wall_height ?? 1.15; }
+
+/** Walls toggle hides walls from the operator only; the robot camera always sees them. */
+function applyWallLayer(): void {
+  const shown = ($('walls-layer') as HTMLInputElement).checked;
+  wallLayer.traverse(o => o.layers.set(shown ? 0 : CAMERA_ONLY_LAYER));
+}
+
 function buildStaticScene(): void {
   clearGroup(staticLayer);
   clearGroup(wallLayer);
-  if (!state) return;
-  const { width, height, walls, exits, rooms } = state.scene;
+  avatars.forEach(a => avatarLayer.remove(a));
+  avatars.clear();
+  if (!scene) return;
+  const { width, height, resolution: res, origin } = scene;
+  const real = !!scene.mesh;
+  const wallHeight = wallHeightOf();
+  const gridW = width * res, gridH = height * res;
+  const cx = origin[0] + gridW / 2, cy = origin[1] + gridH / 2;
+  // Floor: scanned floor-plan image in its own georeference, else a plain slab.
+  const fi = scene.floor_image;
+  if (fi) {
+    const w = fi.width / fi.pixels_per_metre, h = fi.height / fi.pixels_per_metre;
+    const texture = new THREE.TextureLoader().load(`/api/scenes/${encodeURIComponent(scene.id)}/files/${fi.file}`);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({ map: texture, transparent: true, roughness: 0.95 }));
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.copy(toThree(fi.origin[0] + w / 2, fi.origin[1] + h / 2, 0));
+    staticLayer.add(floor);
+    const base = new THREE.Mesh(new THREE.PlaneGeometry(gridW, gridH), new THREE.MeshStandardMaterial({ color: '#a89f92', roughness: 1 }));
+    base.rotation.x = -Math.PI / 2;
+    base.position.copy(toThree(cx, cy, -0.01));
+    base.layers.set(CAMERA_ONLY_LAYER);
+    staticLayer.add(base);
+  } else {
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(gridW, 0.16, gridH), new THREE.MeshStandardMaterial({ color: '#182633', roughness: 1 }));
+    floor.position.copy(toThree(cx, cy, -0.08));
+    staticLayer.add(floor);
+  }
+  if (real) {
+    new GLTFLoader().load(`/api/scenes/${encodeURIComponent(scene.id)}/files/${scene.mesh!.file}`, gltf => {
+      gltf.scene.traverse(o => { if (o instanceof THREE.Mesh) { o.material = new THREE.MeshStandardMaterial({ color: '#d9dcdf', roughness: 0.9, side: THREE.DoubleSide }); } });
+      wallLayer.add(gltf.scene);
+      applyWallLayer();
+    }, undefined, () => notify('Could not load the scene mesh; walls are shown from the collision grid only.', true));
+    // Ceiling for the robot camera only, so the operator keeps the cutaway view.
+    const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(gridW, gridH), new THREE.MeshStandardMaterial({ color: '#eceae6', emissive: '#bdbab4', emissiveIntensity: 0.55, side: THREE.DoubleSide }));
+    ceiling.rotation.x = Math.PI / 2;
+    ceiling.position.copy(toThree(cx, cy, wallHeight));
+    ceiling.layers.set(CAMERA_ONLY_LAYER);
+    staticLayer.add(ceiling);
+    for (const room of scene.rooms) {
+      if (!room.polygon) continue;
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(room.polygon.map(([x, y]) => toThree(x, y, 0.02))), new THREE.LineBasicMaterial({ color: '#4fc3a1', transparent: true, opacity: 0.55 }));
+      staticLayer.add(operatorOnly(line));
+    }
+  } else {
+    // Upstream: one instanced box per wall cell that borders open floor.
+    const blockedSet = new Set(scene.walls.map(key));
+    const exposed = scene.walls.filter(([x, y]) => [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].some(([c, r]) => c >= 0 && c < width && r >= 0 && r < height && !blockedSet.has(key([c, r]))));
+    if (exposed.length) {
+      const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(res, wallHeight, res), new THREE.MeshStandardMaterial({ color: '#acb4b8', roughness: 0.85 }), exposed.length);
+      const matrix = new THREE.Matrix4();
+      exposed.forEach((cell, i) => mesh.setMatrixAt(i, matrix.makeTranslation(position(cell, wallHeight / 2))));
+      wallLayer.add(mesh);
+    }
+    applyWallLayer();
+    scene.rooms.forEach(room => (room.observe ?? room.cells).forEach(cell => operatorOnly(cellBox(staticLayer, cell, 0.98, 0.025, '#2b3946', 0.01))));
+  }
+  scene.exits.forEach(cell => {
+    operatorOnly(cellBox(staticLayer, cell, 1.6, 0.05, '#2bcba1', 0.03));
+    const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), position(cell, 0.1), 1.2, '#d0fff0', 0.3, 0.2);
+    staticLayer.add(operatorOnly(arrow));
+  });
   for (const field of [heatField, smokeField]) {
     field.canvas.width = width * 4;
     field.canvas.height = height * 4;
-    field.mesh.scale.set(width, height, 1);
+    field.mesh.scale.set(gridW, gridH, 1);
   }
-  smokeField.mesh.position.y = Math.min(5, 1.15 / state.scene.resolution) * 0.9;
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(width, 0.16, height), new THREE.MeshStandardMaterial({ color: '#39434d', roughness: 1 }));
-  floor.position.y = -0.12;
-  staticLayer.add(floor);
-  const roomColors = ['#233746', '#253b47', '#203746', '#2b3946'];
-  rooms.forEach((room, i) => room.cells.forEach(cell => box(staticLayer, cell, 0.98, 0.025, 0.98, roomColors[i % roomColors.length], -0.025)));
-  // A rectangular grid keeps x/y coordinates consistent with backend cell arrays.
-  const points: THREE.Vector3[] = [];
-  for (let x = 0; x <= width; x++) points.push(new THREE.Vector3(x - width / 2, 0.005, -height / 2), new THREE.Vector3(x - width / 2, 0.005, height / 2));
-  for (let y = 0; y <= height; y++) points.push(new THREE.Vector3(-width / 2, 0.005, y - height / 2), new THREE.Vector3(width / 2, 0.005, y - height / 2));
-  staticLayer.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: '#3b5062', transparent: true, opacity: 0.3 })));
-  const blocked = blockedCells = new Set(walls.map(key));
-  const exposed = walls.filter(([x, y]) =>
-    [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].some(([col, row]) =>
-      col >= 0 && col < width && row >= 0 && row < height && !blocked.has(key([col, row]))
-    )
-  );
-  const wallHeight = Math.min(5, 1.15 / state.scene.resolution);
-  if (exposed.length) {
-    const mesh = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(1, wallHeight, 1),
-      new THREE.MeshStandardMaterial({ color: '#acb4b8', roughness: 0.85 }),
-      exposed.length,
-    );
-    const matrix = new THREE.Matrix4();
-    exposed.forEach((cell, i) => mesh.setMatrixAt(i, matrix.setPosition(position(cell, wallHeight / 2))));
-    wallLayer.add(mesh);
-  }
-  exits.forEach(cell => {
-    box(staticLayer, cell, 0.9, 0.045, 0.9, '#2bcba1', 0.045);
-    const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), position(cell, 0.1).add(new THREE.Vector3(0, 0, 0.28)), 0.6, '#d0fff0', 0.22, 0.22);
-    staticLayer.add(arrow);
-  });
+  heatField.mesh.position.copy(toThree(cx, cy, 0.03));
+  smokeField.mesh.position.copy(toThree(cx, cy, wallHeight * 0.9));
+  blockedCells = new Set([...scene.walls, ...scene.exterior].map(key));
 }
 
-function human(cell: Cell, rescued: boolean): void {
-  const color = rescued ? '#5ee3ae' : '#78bcff';
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.2, 3, 6), new THREE.MeshStandardMaterial({ color }));
-  body.position.copy(position(cell, 0.42));
-  dynamicLayer.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), new THREE.MeshStandardMaterial({ color: '#e0efff' }));
-  head.position.copy(position(cell, 0.77));
-  dynamicLayer.add(head);
-  const ring = new THREE.Mesh(new THREE.RingGeometry(0.28, 0.34, 20), new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide }));
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.copy(position(cell, 0.075));
-  dynamicLayer.add(ring);
+/** CesiumMan (CC BY 4.0, © Cesium; see public/models/ATTRIBUTION.md): a textured human figure that a
+ *  COCO-trained detector can recognise, unlike primitive mannequins (which failed the detection gate). */
+let humanTemplate: { scene: THREE.Group; clip: THREE.AnimationClip | null; scale: number; lift: number } | null = null;
+new GLTFLoader().load('/models/CesiumMan.glb', gltf => {
+  const box = new THREE.Box3().setFromObject(gltf.scene);
+  const height = box.max.y - box.min.y;
+  humanTemplate = { scene: gltf.scene, clip: gltf.animations[0] ?? null, scale: 1.72 / Math.max(height, 1e-3), lift: -box.min.y };
+  avatars.forEach(a => avatarLayer.remove(a));
+  avatars.clear();
+  if (state) drawDynamic();
+}, undefined, () => notify('Human model unavailable; using primitive mannequins, which the detector does not recognise.', true));
+
+function makeHuman(id: string): THREE.Group | null {
+  if (!humanTemplate) return null;
+  const body = SkeletonUtils.clone(humanTemplate.scene) as THREE.Group;
+  if (humanTemplate.clip) {
+    // Freeze the walk cycle mid-stride for a natural standing posture.
+    const mixer = new THREE.AnimationMixer(body);
+    const action = mixer.clipAction(humanTemplate.clip);
+    action.play();
+    mixer.setTime((Number(id.replace(/\D/g, '')) % 4) * 0.13 + 0.1);
+  }
+  body.scale.setScalar(humanTemplate.scale);
+  body.position.y = humanTemplate.lift * humanTemplate.scale;
+  body.traverse(o => { if (o instanceof THREE.Mesh) o.frustumCulled = false; });
+  const group = new THREE.Group();
+  group.add(body);
+  group.userData.id = id;
+  return group;
 }
 
-function drawHazardField(sim: SimState): void {
-  const { width, height } = sim.scene;
+function hashAngle(text: string): number { let h = 0; for (const c of text) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 360) * Math.PI / 180; }
+
+/** Procedural standing person (~1.72 m) built from primitives; a simulated survivor, not a real person. */
+function makeAvatar(id: string): THREE.Group {
+  const palette = ['#c0392b', '#2e86c1', '#27ae60', '#8e44ad', '#d35400', '#16a085', '#b7950b', '#5d6d7e'];
+  const index = Number(id.replace(/\D/g, '')) || 0;
+  const shirt = new THREE.MeshStandardMaterial({ color: palette[index % palette.length], roughness: 0.8 });
+  const trousers = new THREE.MeshStandardMaterial({ color: index % 2 ? '#2c3e50' : '#3b3b3b', roughness: 0.9 });
+  const skin = new THREE.MeshStandardMaterial({ color: ['#e0ac69', '#c68642', '#8d5524', '#f1c27d'][index % 4], roughness: 0.7 });
+  const hair = new THREE.MeshStandardMaterial({ color: '#2b1d14', roughness: 0.9 });
+  const shoes = new THREE.MeshStandardMaterial({ color: '#1b1b1b' });
+  const group = new THREE.Group();
+  const part = (geometry: THREE.BufferGeometry, material: THREE.Material, x: number, y: number, z = 0, rz = 0): void => {
+    const mesh = new THREE.Mesh(geometry, material); mesh.position.set(x, y, z); mesh.rotation.z = rz; group.add(mesh);
+  };
+  for (const side of [-1, 1]) {
+    part(new THREE.CapsuleGeometry(0.075, 0.72, 4, 10), trousers, side * 0.1, 0.47);
+    part(new THREE.BoxGeometry(0.12, 0.07, 0.24), shoes, side * 0.1, 0.035, 0.04);
+    part(new THREE.CapsuleGeometry(0.055, 0.52, 4, 10), shirt, side * 0.255, 1.12, 0, side * 0.12);
+    part(new THREE.SphereGeometry(0.055, 10, 8), skin, side * 0.29, 0.8);
+  }
+  part(new THREE.CapsuleGeometry(0.17, 0.42, 6, 14), shirt, 0, 1.17);
+  part(new THREE.CylinderGeometry(0.05, 0.06, 0.1, 10), skin, 0, 1.5);
+  part(new THREE.SphereGeometry(0.11, 16, 12), skin, 0, 1.62);
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.115, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2), hair); cap.position.set(0, 1.64, -0.01); group.add(cap);
+  group.scale.setScalar(0.98 + (index % 3) * 0.03);
+  group.rotation.y = hashAngle(id);
+  group.userData.id = id;
+  return group;
+}
+
+function drawHazardField(): void {
+  if (!scene || !state) return;
+  const useBelief = view === 'belief' && !!belief;
+  const heatGrid = useBelief ? belief!.heat : state.heat;
+  const smokeGrid = useBelief ? belief!.smoke : state.smoke;
+  const observedGrid = useBelief ? belief!.observed : state.observed;
+  const { width, height, resolution: res } = scene;
   const heatPixels = heatField.context.createImageData(width * 4, height * 4);
   const smokePixels = smokeField.context.createImageData(width * 4, height * 4);
-  let burning = 0;
-  let smoky = 0;
-  let flameCount = 0;
+  let burning = 0, smoky = 0, flameCount = 0, hottest = 0;
   const denseSmoke: { cell: Cell; density: number }[] = [];
-  let hottest = 0;
   focusCell = null;
   const smokeBand = (value: number) => value >= 0.5 ? 3 : value >= 0.2 ? 2 : value >= 0.015 ? 1 : 0;
   const smokeColors = [[0, 0, 0, 0], [212, 221, 229, 130], [173, 186, 201, 180], [129, 144, 161, 225]];
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
       if (blockedCells.has(key([col, row]))) continue;
-      const heat = sim.heat[row]?.[col] ?? 0;
-      const density = sim.smoke[row]?.[col] ?? 0;
+      const heat = heatGrid[row]?.[col] ?? 0;
+      const density = smokeGrid[row]?.[col] ?? 0;
       const smoke = smokeBand(density);
       if (layers.smoke && density >= 0.06) denseSmoke.push({ cell: [col, row], density });
       if (smoke) smoky++;
-      if (heat >= 0.3) {
+      if (heat >= FLAME_HEAT) {
         burning++;
-        if (heat > hottest) {
-          hottest = heat;
-          focusCell = [col, row];
-        }
+        if (heat > hottest) { hottest = heat; focusCell = [col, row]; }
         if (layers.heat && flameCount < flameLimit) {
-          const height = 0.75 + Math.min(heat, 1) * 1.6;
-          flameTransform.position.copy(position([col, row], height / 2));
-          flameTransform.scale.set(1, height, 1);
+          const flameHeight = (0.75 + Math.min(heat, 1) * 1.6) * 0.5;   // upstream proportions at 0.5 m cells
+          flameTransform.position.copy(position([col, row], flameHeight / 2));
+          flameTransform.scale.set(0.34 * res, flameHeight, 0.34 * res);
           flameTransform.updateMatrix();
           flames.setMatrixAt(flameCount++, flameTransform.matrix);
         }
       }
       const band = layers.smoke ? smoke : 0;
       let color = smokeColors[0];
-      if (layers.observed && !sim.observed[row]?.[col] && !band) color = [7, 11, 17, 155];
+      if (layers.observed && !observedGrid[row]?.[col] && !band) color = [7, 11, 17, 155];
       if (layers.heat && heat >= 0.04) {
         heatColor.set('#f7ba57').lerp(hotColor, THREE.MathUtils.clamp(heat, 0, 1));
         const hex = heatColor.getHex();
         color = [hex >> 16, (hex >> 8) & 255, hex & 255, Math.max(color[3], 90 + 150 * heat)];
       }
-      const left = band >= 1 && smokeBand(sim.smoke[row]?.[col - 1] ?? 0) < band;
-      const right = band >= 1 && smokeBand(sim.smoke[row]?.[col + 1] ?? 0) < band;
-      const top = band >= 1 && smokeBand(sim.smoke[row - 1]?.[col] ?? 0) < band;
-      const bottom = band >= 1 && smokeBand(sim.smoke[row + 1]?.[col] ?? 0) < band;
+      // Texture row 0 is the top of the plane = max model y, so the texture row above a cell is row + 1.
+      const left = band >= 1 && smokeBand(smokeGrid[row]?.[col - 1] ?? 0) < band;
+      const right = band >= 1 && smokeBand(smokeGrid[row]?.[col + 1] ?? 0) < band;
+      const top = band >= 1 && smokeBand(smokeGrid[row + 1]?.[col] ?? 0) < band;
+      const bottom = band >= 1 && smokeBand(smokeGrid[row - 1]?.[col] ?? 0) < band;
       if (!color[3] && !band) continue;
+      const texRow = height - 1 - row;
       for (let y = 0; y < 4; y++) {
         for (let x = 0; x < 4; x++) {
           const edge = (left && x === 0) || (right && x === 3) || (top && y === 0) || (bottom && y === 3);
-          const offset = ((row * 4 + y) * heatPixels.width + col * 4 + x) * 4;
+          const offset = ((texRow * 4 + y) * heatPixels.width + col * 4 + x) * 4;
           if (color[3]) heatPixels.data.set(color, offset);
           if (band) smokePixels.data.set(edge ? [236, 242, 248, 225] : smokeColors[band], offset);
         }
@@ -456,89 +684,226 @@ function drawHazardField(sim: SimState): void {
   let cloudCount = 0;
   for (let i = 0; i < denseSmoke.length; i += stride) {
     const { cell, density } = denseSmoke[i];
-    const spread = 0.48 + Math.min(1, density) * 0.42;
-    smokeTransform.position.copy(position(cell, smokeField.mesh.position.y - 0.45));
-    smokeTransform.scale.set(spread, 0.4 + spread * 0.3, spread);
+    const spread = (0.48 + Math.min(1, density) * 0.42) * 0.5 * Math.sqrt(stride);
+    smokeTransform.position.copy(position(cell, smokeField.mesh.position.y - 0.225));
+    smokeTransform.scale.set(spread, (0.4 + spread * 0.3) * 0.5, spread);
     smokeTransform.updateMatrix();
     smokeClouds.setMatrixAt(cloudCount++, smokeTransform.matrix);
   }
   smokeClouds.count = cloudCount;
-  smokeClouds.visible = view === 'orbit';
+  smokeClouds.visible = cameraView === 'orbit';
   smokeClouds.instanceMatrix.needsUpdate = true;
   flames.count = flameCount;
   flames.instanceMatrix.needsUpdate = true;
-  $<HTMLButtonElement>('focus-fire').disabled = focusCell === null;
-  $('hazard-readout').textContent = `${number(sim.hazard_time ?? sim.time)} s hazards · ${burning} fire cells · ${smoky} smoke cells`;
+  ($('focus-fire') as HTMLButtonElement).disabled = focusCell === null;
+  const area = res * res;
+  $('hazard-readout').textContent = `${useBelief ? 'Robot belief · ' : ''}${number(state.hazard_time ?? state.time)} s hazards · ${number(burning * area)} m² fire · ${number(smoky * area)} m² smoke`;
   heatField.context.putImageData(heatPixels, 0, 0);
   smokeField.context.putImageData(smokePixels, 0, 0);
   heatField.texture.needsUpdate = true;
   smokeField.texture.needsUpdate = true;
 }
 
+function placeAvatars(): void {
+  if (!scene || !state) return;
+  const editing = state.status.toLowerCase() === 'idle';
+  const people: { id: string; position: Cell; status: string }[] = editing && draft
+    ? draft.survivors.map((p, i) => ({ id: `person-${i}`, position: p, status: 'unobserved' }))
+    : state.survivors;
+  const keep = new Set<string>();
+  for (const person of people) {
+    if (person.status === 'evacuated') continue;
+    keep.add(person.id);
+    let avatar = avatars.get(person.id);
+    if (!avatar) { avatar = makeHuman(person.id) ?? makeAvatar(person.id); avatars.set(person.id, avatar); avatarLayer.add(avatar); }
+    const [x, y] = cellWorld(person.position);
+    if (person.status === 'escorting') {
+      // Follower stands behind the robot along its heading.
+      avatar.position.copy(toThree(x - Math.cos(state.heading) * 0.55, y - Math.sin(state.heading) * 0.55, 0));
+      avatar.rotation.y = state.heading - Math.PI / 2;
+    } else {
+      avatar.position.copy(toThree(x, y, 0));
+      avatar.rotation.y = hashAngle(person.id);
+    }
+    // Operator view hides people in robot-belief mode; the rendered camera always sees them.
+    avatar.traverse(o => { o.layers.set(0); if (view === 'belief') o.layers.disable(0), o.layers.enable(CAMERA_ONLY_LAYER); });
+  }
+  for (const [id, avatar] of avatars) if (!keep.has(id)) { avatarLayer.remove(avatar); avatars.delete(id); }
+}
+
 function drawDynamic(): void {
   clearGroup(dynamicLayer);
-  if (!state) return;
-  drawHazardField(state);
-  if (layers.route && state.route.length > 1) {
-    // Thin tubes remain visible on high-DPI displays, unlike WebGL line widths.
+  if (!state || !scene) return;
+  drawHazardField();
+  placeAvatars();
+  if (layers.route && state.route.length > 0) {
     const material = new THREE.MeshBasicMaterial({ color: '#55e3c2' });
-    for (let i = 1; i < state.route.length; i++) {
-      const a = position(state.route[i - 1], 0.49);
-      const b = position(state.route[i], 0.49);
+    const points = [state.robot, ...state.route];
+    for (let i = 1; i < points.length; i++) {
+      const a = position(points[i - 1], 0.12), b = position(points[i], 0.12);
       const delta = b.clone().sub(a);
       if (delta.length() === 0) continue;
       const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, delta.length(), 5), material.clone());
       tube.position.copy(a.add(b).multiplyScalar(0.5));
       tube.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), delta.normalize());
-      dynamicLayer.add(tube);
+      dynamicLayer.add(operatorOnly(tube));
     }
     material.dispose();
   }
   const editing = state.status.toLowerCase() === 'idle';
-  if (editing && draft) draft.survivors.forEach(cell => human(cell, false));
-  else state.survivors.forEach(person => {
-    if (!['evacuated', 'dead', 'deceased'].includes(person.status.toLowerCase())) human(person.position, person.status.toLowerCase() === 'rescued');
+  (editing && draft ? draft.ignitions : state.scenario.ignitions).forEach(cell => {
+    const marker = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.5, 6), new THREE.MeshStandardMaterial({ color: '#ff9a46', emissive: '#da3d13', emissiveIntensity: 0.7 }));
+    marker.position.copy(position(cell, 0.25));
+    dynamicLayer.add(operatorOnly(marker));
   });
-  if (editing && layers.heat && draft) {
-    draft.ignitions.forEach(cell => box(dynamicLayer, cell, 0.6, 0.14, 0.6, '#ff9a46', 0.1));
+  if (!editing) {
+    for (const d of state.detections) {
+      if (!['candidate', 'confirmed', 'escorting'].includes(d.status)) continue;
+      const pin = new THREE.Mesh(new THREE.TorusGeometry(0.32, d.status === 'candidate' ? 0.02 : 0.045, 6, 24), new THREE.MeshBasicMaterial({ color: d.status === 'candidate' ? '#a3b5c9' : '#59d7ff' }));
+      pin.rotation.x = -Math.PI / 2;
+      pin.position.copy(toThree(d.position[0], d.position[1], 0.08));
+      dynamicLayer.add(operatorOnly(pin));
+    }
   }
-  box(dynamicLayer, state.robot, 0.53, 0.27, 0.6, '#5ce0ca', 0.24);
-  box(dynamicLayer, state.robot, 0.26, 0.13, 0.24, '#d9fff7', 0.44);
-  for (const side of [-0.29, 0.29]) {
-    const wheel = box(dynamicLayer, state.robot, 0.11, 0.18, 0.58, '#111c2a', 0.17);
-    wheel.position.x += side;
-  }
+  const robot = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.45), new THREE.MeshStandardMaterial({ color: '#5ce0ca' }));
+  body.position.y = 0.25;
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.7, 8), new THREE.MeshStandardMaterial({ color: '#d9fff7' }));
+  mast.position.set(0.15, 0.7, 0);
+  const lens = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.08, 0.14), new THREE.MeshStandardMaterial({ color: '#10202c' }));
+  lens.position.set(0.22, 1.0, 0);
+  robot.add(body, mast, lens);
+  robot.position.copy(position(state.robot, 0));
+  robot.rotation.y = state.heading;
+  dynamicLayer.add(operatorOnly(robot));
   if (selectedCell && inBounds(selectedCell)) {
-    const outline = new THREE.Mesh(new THREE.RingGeometry(0.39, 0.46, 4), new THREE.MeshBasicMaterial({ color: '#ffffff', side: THREE.DoubleSide, depthTest: false }));
+    const outline = new THREE.Mesh(new THREE.RingGeometry(0.39 * scene.resolution * 2, 0.46 * scene.resolution * 2, 4), new THREE.MeshBasicMaterial({ color: '#ffffff', side: THREE.DoubleSide, depthTest: false }));
     outline.rotation.set(-Math.PI / 2, 0, Math.PI / 4);
-    outline.position.copy(position(selectedCell, 0.85));
+    outline.position.copy(position(selectedCell, 0.3));
     outline.renderOrder = 10;
-    dynamicLayer.add(outline);
+    dynamicLayer.add(operatorOnly(outline));
   }
 }
 
+/** Render RGB and linear depth from the requested camera pose and send them for YOLO inference. */
+async function sendFrame(snapshot: SimState): Promise<void> {
+  const request = snapshot.frame_request;
+  if (!renderer || !scene || !request) return;
+  frameInFlight = true;
+  lastFrameSeq = request.seq;
+  try {
+    const pose = request.pose;
+    robotCamera.position.copy(toThree(pose.x, pose.y, pose.z));
+    robotCamera.lookAt(toThree(pose.x + Math.cos(pose.yaw), pose.y + Math.sin(pose.yaw), pose.z));
+    robotCamera.updateMatrixWorld();
+    const smokeHere = snapshot.smoke[snapshot.robot[1]]?.[snapshot.robot[0]] ?? 0;
+    const previousBackground = world.background;
+    // Smoke attenuates the rendered image (not depth); simple exponential fog at the robot's local density.
+    world.fog = smokeHere > 0.02 ? new THREE.FogExp2(0x8d9299, 0.15 + smokeHere * 1.6) : null;
+    world.background = new THREE.Color('#e9e7e3');
+    renderer.setRenderTarget(rgbTarget);
+    renderer.render(world, robotCamera);
+    const rgba = new Uint8Array(CAM_W * CAM_H * 4);
+    renderer.readRenderTargetPixels(rgbTarget, 0, 0, CAM_W, CAM_H, rgba);
+    world.fog = null;
+    world.background = null;
+    world.overrideMaterial = depthMaterial;
+    const clear = renderer.getClearColor(new THREE.Color()); const clearAlpha = renderer.getClearAlpha();
+    renderer.setClearColor(0x000000, 0);
+    renderer.setRenderTarget(depthTarget);
+    renderer.render(world, robotCamera);
+    const depthRGBA = new Float32Array(CAM_W * CAM_H * 4);
+    renderer.readRenderTargetPixels(depthTarget, 0, 0, CAM_W, CAM_H, depthRGBA);
+    world.overrideMaterial = null;
+    renderer.setRenderTarget(null);
+    renderer.setClearColor(clear, clearAlpha);
+    world.background = previousBackground;
+    // GL rows are bottom-up; the frame contract is row 0 = top.
+    const image = new ImageData(CAM_W, CAM_H);
+    const depth = new Float32Array(CAM_W * CAM_H);
+    for (let row = 0; row < CAM_H; row++) {
+      const src = (CAM_H - 1 - row) * CAM_W;
+      image.data.set(rgba.subarray(src * 4, (src + CAM_W) * 4), row * CAM_W * 4);
+      for (let col = 0; col < CAM_W; col++) depth[row * CAM_W + col] = depthRGBA[(src + col) * 4];
+    }
+    const canvas = document.createElement('canvas'); canvas.width = CAM_W; canvas.height = CAM_H;
+    canvas.getContext('2d')!.putImageData(image, 0, 0);
+    const rgb = canvas.toDataURL('image/jpeg', 0.92);
+    const bytes = new Uint8Array(depth.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    lastFrameImage = image;
+    const result = await api<FrameResult>('frames', { seq: request.seq, width: CAM_W, height: CAM_H, rgb, depth: btoa(binary), intrinsics: [FX, FY, CAM_W / 2, CAM_H / 2], pose }, AbortSignal.timeout(20000));
+    drawFeed(result);
+    $('camera-status').textContent = `Frame ${result.seq} · t=${number(result.time)} s · ${result.accepted.length} person${result.accepted.length === 1 ? '' : 's'}`;
+    void poll();
+  } catch (error) {
+    $('camera-status').textContent = `Frame not accepted: ${error instanceof Error ? error.message.slice(0, 120) : 'error'}`;
+  } finally {
+    frameInFlight = false;
+  }
+}
+
+function drawFeed(result: FrameResult | null): void {
+  const canvas = $('robot-feed') as HTMLCanvasElement;
+  const ctx = canvas.getContext('2d')!;
+  if (lastFrameImage) ctx.putImageData(lastFrameImage, 0, 0);
+  if (!result) return;
+  ctx.lineWidth = 2;
+  ctx.font = '12px DM Sans, sans-serif';
+  for (const d of result.rejected) {
+    ctx.strokeStyle = '#9aa5b1'; ctx.setLineDash([5, 4]);
+    ctx.strokeRect(d.box[0], d.box[1], d.box[2] - d.box[0], d.box[3] - d.box[1]);
+  }
+  ctx.setLineDash([]);
+  for (const d of result.accepted) {
+    ctx.strokeStyle = '#59d7ff';
+    ctx.strokeRect(d.box[0], d.box[1], d.box[2] - d.box[0], d.box[3] - d.box[1]);
+    const label = `${d.detection ?? 'person'} ${(d.confidence * 100).toFixed(0)}%`;
+    ctx.fillStyle = '#59d7ff'; ctx.fillRect(d.box[0], Math.max(0, d.box[1] - 16), ctx.measureText(label).width + 8, 16);
+    ctx.fillStyle = '#07202b'; ctx.fillText(label, d.box[0] + 4, Math.max(12, d.box[1] - 4));
+  }
+}
+
+function renderDetections(): void {
+  if (!state) return;
+  const image = state.perception_mode === 'image-yolo';
+  $('camera-explainer').hidden = !image;
+  if (!image) $('camera-status').textContent = 'Analytic fixture mode: no camera frames';
+  const items = state.detections.slice().reverse();
+  $('detections').innerHTML = items.length ? items.map(d => `<li><time>${escape(d.id)}</time><span>${escape(d.status)} · ${d.hits} obs · ${(d.confidence * 100).toFixed(0)}% · (${number(d.position[0], 2)}, ${number(d.position[1], 2)}) m · ${escape(d.source)}</span></li>`).join('') : '<li class="empty-line">No detections yet. Unobserved rooms are not confirmed empty.</li>';
+}
+
+function renderPaired(): void {
+  const paired = state?.paired;
+  if (!paired) return;
+  const signature = `${paired.status}:${Object.keys(paired.reports).join(',')}:${paired.running}`;
+  if (signature === shownPairedStatus) return;
+  shownPairedStatus = signature;
+  $('comparison').hidden = false;
+  $('comparison-context').textContent = `Paired live runs on ${scene?.name ?? ''}, seed ${paired.seed}, ${paired.perception}. ${paired.status === 'running' ? `Running ${paired.running}…` : paired.status}.`;
+  $('comparison-body').innerHTML = renderReport({ reports: paired.reports, note: paired.note });
+}
+
 function recenter(): void {
-  if (!camera || !controls) return;
-  const direction = view === 'plan' ? new THREE.Vector3(0, 1, 0.0001) : new THREE.Vector3(0.72, 0.8, 1);
+  if (!camera || !controls || !scene) return;
+  const direction = cameraView === 'plan' ? new THREE.Vector3(0, 1, 0.0001) : new THREE.Vector3(0.72, 0.8, 1);
   direction.normalize();
-  const width = state?.scene.width ?? 20;
-  const height = state?.scene.height ?? 20;
-  const target = new THREE.Vector3(0, 0.5, 0);
+  const w = scene.width * scene.resolution, h = scene.height * scene.resolution;
+  const x0 = scene.origin[0], y0 = scene.origin[1];
+  const target = toThree(x0 + w / 2, y0 + h / 2, 0.3);
   camera.position.copy(target).add(direction);
   camera.lookAt(target);
   const inverse = camera.quaternion.clone().invert();
   const slopeY = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.88;
   const slopeX = slopeY * Math.max(camera.aspect, 0.1);
   let distance = 2;
-  for (const x of [-width / 2, width / 2]) {
-    for (const z of [-height / 2, height / 2]) {
-      for (const y of [0, 5]) {
-        const corner = new THREE.Vector3(x, y, z).sub(target).applyQuaternion(inverse);
-        distance = Math.max(distance, corner.z + Math.max(Math.abs(corner.x) / slopeX, Math.abs(corner.y) / slopeY));
-      }
-    }
+  for (const x of [x0, x0 + w]) for (const y of [y0, y0 + h]) for (const z of [0, wallHeightOf()]) {
+    const corner = toThree(x, y, z).sub(target).applyQuaternion(inverse);
+    distance = Math.max(distance, corner.z + Math.max(Math.abs(corner.x) / slopeX, Math.abs(corner.y) / slopeY));
   }
   camera.position.copy(target).addScaledVector(direction, distance);
+  camera.near = 0.05;
   camera.far = Math.max(1000, distance * 10);
   camera.updateProjectionMatrix();
   controls.target.copy(target);
@@ -547,8 +912,8 @@ function recenter(): void {
   controls.update();
 }
 
-function setView(next: typeof view): void {
-  view = next;
+function setView(next: typeof cameraView): void {
+  cameraView = next;
   smokeClouds.visible = next === 'orbit';
   if (controls) {
     controls.enableRotate = next === 'orbit';
@@ -563,18 +928,18 @@ function setView(next: typeof view): void {
 
 function setupRenderer(): void {
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     const canvas = renderer.domElement;
-    canvas.setAttribute('aria-label', '3D scene: walls, robot, survivor proxies, hazards and planned route. Use the cell inspector below for keyboard access.');
+    canvas.setAttribute('aria-label', 'Scene: walls, robot, simulated survivors, hazards and planned route. Use the cell inspector below for keyboard access.');
     canvas.setAttribute('role', 'img');
     $('viewport').prepend(canvas);
     camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+    camera.layers.enable(OPERATOR_LAYER);
     controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true;
-    controls.maxPolarAngle = Math.PI / 2.4;
-    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI / 2.2;
     const resize = () => {
       const { width, height } = $('viewport').getBoundingClientRect();
       renderer!.setSize(width, height);
@@ -583,44 +948,47 @@ function setupRenderer(): void {
     };
     resize();
     new ResizeObserver(resize).observe($('viewport'));
-    setView(view);
+    setView(cameraView);
     renderer.setAnimationLoop(() => {
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
       renderer.render(world, camera);
     });
+    $('scene-empty').hidden = true;
     let down: { x: number; y: number } | null = null;
     canvas.addEventListener('pointerdown', event => { if (event.button === 0) down = { x: event.clientX, y: event.clientY }; });
     canvas.addEventListener('pointercancel', () => { down = null; });
     canvas.addEventListener('pointerup', event => {
       if (!down || event.button !== 0 || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5) { down = null; return; }
       down = null;
-      if (!state || !camera) return;
+      if (!scene || !camera) return;
       const bounds = canvas.getBoundingClientRect();
       pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
       raycaster.setFromCamera(pointer, camera);
       const point = new THREE.Vector3();
       if (!raycaster.ray.intersectPlane(groundPlane, point)) return;
-      const cell: Cell = [Math.floor(point.x + state.scene.width / 2), Math.floor(point.z + state.scene.height / 2)];
-      applyCell(cell);
+      applyCell([Math.floor((point.x - scene.origin[0]) / scene.resolution), Math.floor((-point.z - scene.origin[1]) / scene.resolution)]);
     });
     canvas.addEventListener('webglcontextlost', event => {
       event.preventDefault();
-      notify('The 3D graphics context was lost. Reload to restore the map. The keyboard cell editor remains available.', true);
+      notify('The 3D graphics context was lost. Reload to restore the map and robot camera.', true);
     });
   } catch {
     renderer?.dispose();
     renderer = null;
-    $('scene-empty').innerHTML = '<strong>3D rendering unavailable</strong><p>This browser could not initialize WebGL. You can still use mission controls and the keyboard cell inspector below.</p>';
+    $('scene-empty').innerHTML = '<strong>3D rendering unavailable</strong><p>This browser could not initialize WebGL, so the robot camera cannot render frames. Use the analytic fixture mode and the keyboard cell inspector.</p>';
   }
 }
 
 function inspectCell(cell: Cell): void {
-  if (!state) return;
+  if (!state || !scene) return;
   const [x, y] = cell;
-  const room = state.scene.rooms.find(r => r.cells.some(p => same(p, cell)));
-  const labels = [state.scene.walls.some(p => same(p, cell)) ? 'Wall' : 'Floor', state.scene.exits.some(p => same(p, cell)) ? 'Exit' : '', room?.name].filter(Boolean).join(' · ');
-  $('cell-readout').textContent = `(${x}, ${y}) ${labels} | Heat ${number(state.heat[y]?.[x], 3)} · Smoke ${number(state.smoke[y]?.[x], 3)} · ${state.observed[y]?.[x] > 0 ? 'Observed' : 'Unobserved'}`;
+  const room = scene.rooms.find(r => r.cells.some(p => same(p, cell)));
+  const exterior = scene.exterior.some(p => same(p, cell));
+  const labels = [exterior ? 'Outside floor' : scene.walls.some(p => same(p, cell)) ? 'Wall / blocked' : 'Floor', scene.exits.some(p => same(p, cell)) ? 'Exit' : '', room?.name].filter(Boolean).join(' · ');
+  const [wx, wy] = cellWorld(cell);
+  const source = view === 'belief' && belief ? belief : state;
+  $('cell-readout').textContent = `(${x}, ${y}) ≈ (${number(wx, 2)}, ${number(wy, 2)}) m ${labels} | ${view === 'belief' ? 'Belief' : 'Truth'} heat ${number(source.heat[y]?.[x], 3)} · smoke ${number(source.smoke[y]?.[x], 3)} · ${source.observed[y]?.[x] > 0 ? 'Observed' : 'Unobserved'}`;
   ($('cell-x') as HTMLInputElement).value = String(x);
   ($('cell-y') as HTMLInputElement).value = String(y);
 }
@@ -631,7 +999,8 @@ function applyCell(cell: Cell): void {
   inspectCell(cell);
   if (selectedTool !== 'inspect') {
     if (!idle() || busy || !draft) { notify('Scenario editing is available only while idle and connected.', true); return; }
-    if (state.scene.walls.some(p => same(p, cell))) { notify('Choose a floor cell; walls cannot contain survivors or ignitions.', true); return; }
+    if (blocked(cell)) { notify('Choose a floor cell; walls and outside cells cannot contain survivors or ignitions.', true); return; }
+    if (scene!.exits.some(p => same(p, cell))) { notify('Keep egress endpoints clear.', true); return; }
     if (selectedTool === 'remove') {
       draft.survivors = draft.survivors.filter(p => !same(p, cell));
       draft.ignitions = draft.ignitions.filter(p => !same(p, cell));
@@ -639,7 +1008,7 @@ function applyCell(cell: Cell): void {
       const target = selectedTool === 'survivor' ? draft.survivors : draft.ignitions;
       if (!target.some(p => same(p, cell))) target.push(cell);
     }
-    dirty = JSON.stringify(draft) !== JSON.stringify(state.scenario);
+    dirty = JSON.stringify(draft) !== JSON.stringify({ ...state.scenario, scene_id: scene!.id });
     syncUI();
   }
   drawDynamic();
@@ -654,28 +1023,29 @@ async function mutation(work: () => Promise<void>): Promise<void> {
   finally { busy = false; syncUI(); await poll(); }
 }
 
-$('preview-hazards').addEventListener('click', () => {
-  void mutation(async () => {
-    const next = await api<unknown>('control', { action: 'toggle_hazards' });
-    validateState(next);
-    acceptState(next);
-  });
-});
-
 for (const action of ['start', 'pause', 'reset'] as const) {
   $(action).addEventListener('click', () => void mutation(async () => {
     if (action === 'start' && dirty) throw new Error('Apply or discard your scenario changes first.');
-    const mode = document.querySelector<HTMLInputElement>('input[name="mode"]:checked')!.value as Mode;
-    await api('control', action === 'start' ? { action, mode } : { action });
-    if (action === 'reset') { dirty = false; draft = null; }
+    await api('control', action === 'start' ? { action, mode: chosen<Mode>('mode'), perception: chosen<Perception>('perception') } : action === 'reset' ? { action, perception: chosen<Perception>('perception') } : { action });
+    if (action === 'reset') { dirty = false; draft = null; lastFrameSeq = -1; }
     notify(action === 'reset' ? 'Reset requested. Waiting for the backend state.' : `${action === 'start' ? 'Start' : 'Pause'} requested.`);
   }));
 }
 
+$('scene-select').addEventListener('change', () => void mutation(async () => {
+  await api('scene', { id: ($('scene-select') as HTMLSelectElement).value });
+  scene = null; draft = null; dirty = false; lastFrameSeq = -1;
+  notify('Scene loaded with its standard preset.');
+}));
 document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => input.addEventListener('change', () => {
   selectedTool = input.value as Tool;
   $('viewport').classList.toggle('editing', selectedTool !== 'inspect');
   syncUI();
+}));
+document.querySelectorAll<HTMLInputElement>('input[name="view"]').forEach(input => input.addEventListener('change', () => {
+  view = input.value as 'truth' | 'belief';
+  belief = null;
+  void poll();
 }));
 $('apply-cell').addEventListener('click', () => {
   const x = $('cell-x') as HTMLInputElement;
@@ -698,7 +1068,7 @@ $('apply').addEventListener('click', () => void mutation(async () => {
 }));
 $('discard').addEventListener('click', () => {
   if (!state) return;
-  draft = copyScenario(state.scenario);
+  draft = { ...copyScenario(state.scenario), scene_id: state.scene_id };
   dirty = false;
   ($('seed') as HTMLInputElement).value = String(draft.seed);
   drawDynamic();
@@ -711,7 +1081,7 @@ $('export').addEventListener('click', () => {
     const url = URL.createObjectURL(new Blob([JSON.stringify(scenario, null, 2) + '\n'], { type: 'application/json' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = `rescuetwin-scenario-${scenario.seed}.json`;
+    link.download = `rescuetwin-${scenario.scene_id}-${scenario.seed}.json`;
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     notify('Scenario JSON saved locally.');
@@ -736,8 +1106,7 @@ $('scenario-file').addEventListener('change', async () => {
   } catch (error) { notify(`Could not load scenario: ${(error as Error).message}`, true); }
 });
 
-// The paired-report schema is deliberately open: render backend keys and values
-// without inventing metrics, strategy outcomes, or a winner.
+// The report schema is open: render backend keys and values without inventing a winner.
 function renderReport(value: unknown, depth = 0): string {
   if (depth > 8) return `<pre>${escape(JSON.stringify(value, null, 2))}</pre>`;
   if (value === null || typeof value !== 'object') return `<span class="report-value">${escape(value ?? 'null')}</span>`;
@@ -749,42 +1118,37 @@ function renderReport(value: unknown, depth = 0): string {
 }
 $('compare').addEventListener('click', () => void mutation(async () => {
   if (dirty) throw new Error('Apply your scenario changes before comparing.');
-  comparisonAbort = new AbortController();
-  const timeout = window.setTimeout(() => comparisonAbort?.abort(), 120000);
+  const perception = chosen<Perception>('perception');
   $('comparison').hidden = false;
-  $('comparison-body').textContent = 'Computing paired report on the backend…';
-  $('comparison-body').setAttribute('aria-busy', 'true');
-  $('comparison-context').textContent = `Requested for scene ${state!.scene.name}, seed ${state!.scenario.seed}. Results remain a snapshot of this request.`;
-  try {
-    const report = await api<unknown>('compare', {}, comparisonAbort.signal);
-    if (report === undefined) throw new Error('The backend returned an empty comparison report.');
+  $('comparison-body').textContent = perception === 'image-yolo' ? 'Starting paired live runs; this tab renders the robot camera for both.' : 'Computing paired report on the backend…';
+  $('comparison-context').textContent = `Requested for ${scene!.name}, seed ${state!.scenario.seed}, ${perception}.`;
+  const report = await api<unknown>('compare', { perception }, AbortSignal.timeout(180000));
+  if (perception !== 'image-yolo') {
     $('comparison-body').innerHTML = renderReport(report);
-    $('comparison').scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'nearest' });
     notify('Paired strategy report received from the backend.');
-  } catch (error) {
-    $('comparison-body').textContent = 'Comparison did not complete. You can request another report.';
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    comparisonAbort = null;
-    $('comparison-body').removeAttribute('aria-busy');
+  } else {
+    shownPairedStatus = '';
+    notify('Paired live comparison started.');
   }
 }));
 $('close-comparison').addEventListener('click', () => { $('comparison').hidden = true; });
 $('recenter').addEventListener('click', recenter);
+$('preview-hazards').addEventListener('click', () => void mutation(async () => {
+  const next = await api<unknown>('control', { action: 'toggle_hazards' });
+  validateState(next);
+  acceptState(next);
+}));
 $('focus-fire').addEventListener('click', () => {
   if (!focusCell || !camera || !controls) return;
   const target = position(focusCell);
-  const offset = camera.position.clone().sub(controls.target).setLength(13);
+  const offset = camera.position.clone().sub(controls.target).setLength(7);
   controls.target.copy(target);
   camera.position.copy(target).add(offset);
   controls.update();
 });
 $('orbit').addEventListener('click', () => setView('orbit'));
 $('plan').addEventListener('click', () => setView('plan'));
-$('walls-layer').addEventListener('change', () => {
-  wallLayer.visible = $<HTMLInputElement>('walls-layer').checked;
-});
+$('walls-layer').addEventListener('change', applyWallLayer);
 $('expand').addEventListener('click', async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
@@ -805,3 +1169,5 @@ setupRenderer();
 syncUI();
 void poll();
 window.setInterval(() => void poll(), 200);
+// Exposed for automated end-to-end checks (headless browser); read-only accessors.
+(window as unknown as { rescuetwin: object }).rescuetwin = { state: () => state, scene: () => scene, lastFrameSeq: () => lastFrameSeq };
