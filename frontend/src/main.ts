@@ -914,7 +914,6 @@ function drawHazardField(): void {
     smokeClouds.setMatrixAt(cloudCount++, smokeTransform.matrix);
   }
   smokeClouds.count = cloudCount;
-  smokeClouds.visible = cameraView === 'orbit';
   smokeClouds.instanceMatrix.needsUpdate = true;
   flames.count = flameCount;
   flames.instanceMatrix.needsUpdate = true;
@@ -1167,6 +1166,7 @@ function recenter(): void {
 function setView(next: typeof cameraView): void {
   cameraView = next;
   smokeClouds.visible = next === 'orbit';
+  smokeField.mesh.visible = next === 'plan';
   if (controls) {
     controls.enableRotate = next === 'orbit';
     controls.mouseButtons.LEFT = next === 'orbit' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
