@@ -1,26 +1,127 @@
 """Local-only API. /state is operator truth; /observations is the agent boundary."""
 import asyncio
+import importlib.util
+import math
 import os
+import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from .core import Simulation, compare
+from . import presets
 from .environment import parse_environment
+from .core import CAMERA_RANGE_M, HAZARD_PREVIEW_LIMIT_S, Simulation, compare
+from .scenes import BUNDLE_FILES, available, default_scene
 
-sim=Simulation()
+FRAME_TIMEOUT_S = float(os.environ.get('RESCUETWIN_FRAME_TIMEOUT', '10'))
+VISION_AVAILABLE = importlib.util.find_spec('ultralytics') is not None
+TICK = .2
+
+scenes = available()
+
+
+def default_perception(scene):
+    return 'image-yolo' if scene.source != 'synthetic' and VISION_AVAILABLE else 'analytic-development'
+
+
+uploaded_scenarios = {}
+
+
+def new_simulation(scene, scenario=None, mode='adaptive', perception=None):
+    if scenario is None:
+        scenario = uploaded_scenarios.get(scene.id)
+    if scenario is None:
+        scenario = presets.build(scene, 'standard')['scenario']
+    return Simulation(scene, scenario, mode, perception or default_perception(scene))
+
+
+sim = new_simulation(default_scene(scenes))
+detector = None
+detector_error = None
+frame_requested_at = None
+paired = None   # live paired comparison (image perception), see /api/compare
+
+
+class Paired:
+    """Baseline then adaptive as live runs from one frozen scenario, so both use the same rendered perception."""
+
+    def __init__(self, scene, scenario, perception):
+        self.scene, self.scenario, self.perception = scene, deepcopy(scenario), perception
+        self.order, self.reports, self.status, self.started = ['baseline', 'adaptive'], {}, 'running', time.time()
+
+    def next_run(self):
+        global sim
+        mode = self.order[len(self.reports)]
+        sim = Simulation(self.scene, self.scenario, mode, self.perception)
+        sim.status = 'running'
+        sim.log(f'Paired comparison: {mode} run ({len(self.reports) + 1}/2) from frozen scenario.')
+
+    def record(self, finished):
+        self.reports[finished.mode] = dict(status=finished.status, time=round(finished.time, 2), degraded=finished.degraded,
+                                           **{k: (round(v, 3) if isinstance(v, float) else v) for k, v in finished.metrics.items()})
+        if len(self.reports) == 2:
+            self.status = 'complete'
+        else:
+            self.next_run()
+
+    def public(self):
+        return dict(status=self.status, scene_id=self.scene.id, seed=self.scenario['seed'], perception=self.perception,
+                    reports=self.reports, running=None if self.status != 'running' else self.order[len(self.reports)],
+                    note=('Live paired runs: same frozen scenario, hazard model, sensors and safety rules; YOLO on rendered '
+                          'frames. Illustrative exposure units; hosted agent excluded; differences are not attributable to an LLM.'))
+
+
+def load_detector():
+    global detector, detector_error
+    if detector is not None or not VISION_AVAILABLE:
+        return detector
+    try:
+        from PIL import Image
+        from .perception import PersonDetector
+        model = PersonDetector()
+        model.detect(Image.new('RGB', (512, 384), 'gray'))   # warm-up: first GPU inference is slow
+        detector = model
+    except Exception as error:   # weights unavailable, etc.
+        detector_error = f'{type(error).__name__}: {error}'[:300]
+    return detector
+
+
+def frame_timeout_check():
+    """Never block the mission on the renderer: degrade visibly instead."""
+    global frame_requested_at
+    if sim.frame_request is None:
+        frame_requested_at = None
+        return
+    if frame_requested_at is None or frame_requested_at[0] != sim.frame_request['seq']:
+        frame_requested_at = (sim.frame_request['seq'], time.monotonic())
+    elif time.monotonic() - frame_requested_at[1] > FRAME_TIMEOUT_S:
+        if not sim.degraded:
+            sim.log('No rendered frame received in time; image perception degraded (no new detections).')
+        sim.degraded = True
+        sim.frame_request = None
+        frame_requested_at = None
+
 
 @asynccontextmanager
 async def lifespan(app):
     async def clock():
+        global sim
         while True:
-            if sim.status == 'running':
-                sim.tick()
-            elif sim.hazards_running:
-                sim.hazards(.2)
-            if sim.status != 'running' and sim.hazard_time >= 600 - 1e-8:
-                sim.hazards_running = False
-            await asyncio.sleep(.2)
+            fast = paired is not None and paired.status == 'running'
+            current = sim
+            if current.status == 'running':
+                frame_timeout_check()
+                current.tick(TICK)
+            elif current.hazards_running:
+                # Upstream PR #1: hazards can be previewed while the robot mission is idle or paused.
+                current.hazards(TICK)
+            if current.status != 'running' and current.hazard_time >= HAZARD_PREVIEW_LIMIT_S - 1e-8:
+                current.hazards_running = False
+            if fast and current is sim and current.status not in ('running', 'paused'):
+                paired.record(current)
+            await asyncio.sleep(0 if fast and not current.needs_frame() else TICK / (8 if fast else 1))
+
     async def reason():
         if not os.environ.get('GEMINI_API_KEY'):return
         from .agent import MissionAgent,apply_decision
@@ -37,13 +138,16 @@ async def lifespan(app):
                 if current is sim:apply_decision(current,decision,observation['time'])
             except Exception:
                 if current is sim:current.log('Hosted decision failed/rejected; pausing for operator review.');current.status='paused';current.hazards_running=False
-    agent_task=asyncio.create_task(reason())
-    task=asyncio.create_task(clock())
+
+    if VISION_AVAILABLE and os.environ.get('RESCUETWIN_PRELOAD_DETECTOR', '1') == '1':
+        asyncio.get_running_loop().run_in_executor(None, load_detector)
+    tasks = [asyncio.create_task(reason()), asyncio.create_task(clock())]
     yield
-    agent_task.cancel()
-    task.cancel()
-    try:await task
-    except asyncio.CancelledError:pass
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:await task
+        except asyncio.CancelledError:pass
 
 app=FastAPI(title='RescueTwin local development API',lifespan=lifespan)
 
@@ -51,69 +155,172 @@ class Scenario(BaseModel):
     survivors:list[list[int]]=Field(max_length=20)
     ignitions:list[list[int]]=Field(max_length=20)
     seed:int=7
+    scene_id:str|None=None
 
 class Control(BaseModel):
     action:str
     mode:str|None=None
+    perception:str|None=None
+
+class SceneChoice(BaseModel):
+    id:str
+
+class CompareRequest(BaseModel):
+    perception:str|None=None
+
+class Frame(BaseModel):
+    seq:int
+    width:int=Field(gt=0,le=1280)
+    height:int=Field(gt=0,le=960)
+    rgb:str=Field(max_length=8_000_000)
+    depth:str=Field(max_length=8_000_000)
+    intrinsics:list[float]=Field(min_length=4,max_length=4)
+    pose:dict[str,float]
+
+def busy():
+    return paired is not None and paired.status=='running'
 
 @app.get('/api/state')
-def state():return sim.state()
+def state():
+    s=sim.state();s['paired']=paired.public() if paired else None;return s
 
 @app.get('/api/observations')
 def observations():return sim.observations()
 
 @app.get('/api/scenes')
-def scenes():return [sim.scene.public()]
+def scene_list():return [s.summary() for s in scenes.values()]
+
+@app.get('/api/scene')
+def scene():return sim.scene.public()
 
 @app.post('/api/environment')
 def environment(body: dict):
     global sim
-    if sim.status == 'running' or sim.hazards_running:
+    if sim.status == 'running' or sim.hazards_running or busy():
         raise HTTPException(409, 'Pause or reset before loading a floor plan')
     try:
         scene, scenario = parse_environment(body)
-        sim = Simulation(scene, scenario, sim.mode)
+        if scene.id in scenes:
+            from dataclasses import replace
+            from uuid import uuid4
+            scene = replace(scene, id=f'uploaded-{uuid4().hex}')
+        next_sim = new_simulation(scene, scenario, sim.mode, 'analytic-development')
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise HTTPException(422, f'Invalid floor plan: {error}') from error
+    scenes[scene.id] = scene
+    uploaded_scenarios[scene.id] = scenario
+    sim = next_sim
     return sim.state()
 
+
+@app.post('/api/scene')
+def choose_scene(body:SceneChoice):
+    global sim
+    if body.id not in scenes:raise HTTPException(404,'Unknown scene')
+    if sim.status=='running' or sim.hazards_running or busy():raise HTTPException(409,'Pause or reset before switching scenes')
+    sim=new_simulation(scenes[body.id]);return sim.state()
+
+@app.get('/api/scenes/{scene_id}/files/{name}')
+def scene_file(scene_id:str,name:str):
+    scene=scenes.get(scene_id)
+    if scene is None or scene.bundle is None or name not in BUNDLE_FILES:raise HTTPException(404,'No such scene file')
+    path=scene.bundle/name
+    if not path.is_file():raise HTTPException(404,'No such scene file')
+    return FileResponse(path,media_type=BUNDLE_FILES[name])
+
+@app.get('/api/presets')
+def preset_list(seed:int=7):return presets.available(sim.scene,seed)
+
+@app.get('/api/perception')
+def perception_status():
+    return dict(vision_installed=VISION_AVAILABLE,detector_loaded=detector is not None,error=detector_error,
+                weights=getattr(detector,'weights',None),device=getattr(detector,'device',None),
+                modes=['image-yolo','analytic-development'] if VISION_AVAILABLE else ['analytic-development'],
+                note='analytic-development is a labelled fixture detector driven by simulator truth; it is not image-based.')
 
 @app.post('/api/scenario')
 def scenario(body:Scenario):
     global sim
-    if sim.status!='idle' or sim.hazards_running:raise HTTPException(409,'Reset before editing a scenario')
-    try:sim=Simulation(sim.scene,body.model_dump(),sim.mode)
+    if sim.status!='idle' or sim.hazards_running or busy():raise HTTPException(409,'Reset before editing a scenario')
+    data=body.model_dump();data['scene_id']=data['scene_id'] or sim.scene.id
+    try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     return sim.state()
 
 @app.post('/api/control')
 def control(body:Control):
     global sim
+    if busy() and body.action!='reset':raise HTTPException(409,'Paired comparison in progress')
     if body.mode is not None and body.mode not in ('adaptive','baseline'):raise HTTPException(422,'Invalid mode')
-    if body.action=='reset':sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode)
-    elif body.action=='toggle_hazards':
-        if sim.status == 'running':
-            raise HTTPException(409, 'Pause the robot mission before previewing hazards separately')
-        if sim.hazard_time >= 600 - 1e-8:
-            raise HTTPException(409, 'Reset before previewing hazards again')
-        sim.hazards_running = not sim.hazards_running
-        if sim.status == 'idle':
-            sim.status = 'paused'
+    if body.perception is not None and body.perception not in ('image-yolo','analytic-development'):raise HTTPException(422,'Invalid perception mode')
+    if body.perception=='image-yolo' and not VISION_AVAILABLE:raise HTTPException(422,'Vision extra not installed')
+    if body.action=='reset':
+        cancel_paired()
+        sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode)
     elif body.action=='start':
         if sim.status not in ('idle','paused'):raise HTTPException(409,'Reset a finished run first')
-        if body.mode and body.mode!=sim.mode and sim.status!='idle':raise HTTPException(409,'Reset before changing policy')
+        if sim.status!='idle' and ((body.mode and body.mode!=sim.mode) or (body.perception and body.perception!=sim.perception_mode)):
+            raise HTTPException(409,'Reset before changing policy or perception')
+        if sim.status=='idle' and body.perception and body.perception!=sim.perception_mode:
+            sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception)
         sim.mode=body.mode or sim.mode;sim.status='running';sim.hazards_running=True
     elif body.action=='pause':
         if sim.status!='running':raise HTTPException(409,'No active run')
-        sim.status='paused'
-        sim.hazards_running=False
+        sim.status='paused';sim.hazards_running=False
+    elif body.action=='toggle_hazards':
+        if sim.status=='running':raise HTTPException(409,'Pause the robot mission before previewing hazards separately')
+        if sim.hazard_time>=HAZARD_PREVIEW_LIMIT_S-1e-8:raise HTTPException(409,'Reset before previewing hazards again')
+        sim.hazards_running=not sim.hazards_running
+        if sim.status=='idle':sim.status='paused'
     else:raise HTTPException(422,'Unknown control action')
     return sim.state()
 
+def cancel_paired():
+    global paired
+    if paired is not None and paired.status=='running':paired.status='cancelled'
+
 @app.post('/api/compare')
-async def comparison():
-    scene,scenario=deepcopy(sim.scene),deepcopy(sim.scenario)
-    return await asyncio.to_thread(compare,scene,scenario)
+async def comparison(body:CompareRequest|None=None):
+    global paired,sim
+    perception=(body.perception if body else None) or sim.perception_mode
+    scene,scenario=sim.scene,deepcopy(sim.scenario)
+    if perception=='analytic-development':
+        return await asyncio.to_thread(compare,scene,scenario,perception)
+    if sim.status=='running' or busy():raise HTTPException(409,'Pause or reset before a paired comparison')
+    paired=Paired(scene,scenario,perception);paired.next_run()
+    return paired.public()
+
+@app.get('/api/compare')
+def comparison_status():
+    if paired is None:raise HTTPException(404,'No paired comparison started')
+    return paired.public()
+
+@app.post('/api/frames')
+async def frame(body:Frame):
+    current=sim
+    request=current.frame_request
+    if current.perception_mode!='image-yolo' or request is None or body.seq!=request['seq']:
+        raise HTTPException(409,'Stale or unrequested frame')
+    expected=request['pose']
+    if any(abs(body.pose.get(k,math.inf)-expected[k])>1e-3 for k in ('x','y','z')) or abs(math.remainder(body.pose.get('yaw',math.inf)-expected['yaw'],2*math.pi))>1e-3:
+        raise HTTPException(409,'Frame pose does not match the requested pose')
+    from .perception import decode_depth,decode_rgb,process_frame
+    try:
+        image=decode_rgb(body.rgb);depth=decode_depth(body.depth,body.width,body.height)
+    except (ValueError,OSError) as error:raise HTTPException(422,f'Bad frame: {error}') from error
+    if image.size!=(body.width,body.height):raise HTTPException(422,'RGB size does not match declared dimensions')
+    model=await asyncio.to_thread(load_detector)
+    if model is None:
+        raise HTTPException(503,f'Detector unavailable: {detector_error or "vision extra not installed"}')
+    accepted,rejected=await asyncio.to_thread(process_frame,model,image,depth,body.intrinsics,expected,CAMERA_RANGE_M)
+    if current is not sim or current.frame_request is not request:
+        raise HTTPException(409,'Simulation moved on while the frame was processed')
+    for item in accepted:
+        d=current.add_evidence(item['world'][:2],item['confidence'],'yolo')
+        item['detection']=d['id'] if d else None
+    current.last_frame=dict(seq=body.seq,time=request['time'],accepted=accepted,rejected=rejected)
+    current.frame_request=None
+    return current.last_frame
 
 @app.websocket('/api/stream')
 async def stream(ws:WebSocket):
@@ -121,5 +328,5 @@ async def stream(ws:WebSocket):
     from starlette.websockets import WebSocketDisconnect
     try:
         while True:
-            await ws.send_json(sim.state());await asyncio.sleep(.2)
+            await ws.send_json(state());await asyncio.sleep(.2)
     except WebSocketDisconnect:pass

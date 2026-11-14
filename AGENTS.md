@@ -6,7 +6,7 @@ The accepted hackathon design is documented in [architecture](docs/ARCHITECTURE.
 [MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md). These are
 implementation targets, not evidence that the application is complete. Inspect the
 current source and executable checks before reporting any capability as working.
-A runnable synthetic baseline exists in `rescuetwin/` and `frontend/`. Actual RGB-D perception and validated sponsor-scene loading remain integration gates.
+The runnable app defaults to the prepared sponsor scene `9A46aT7FCPg` (single verified exit; see docs/SCENE_SELECTION.md) with YOLO on browser-rendered RGB-D. Rendered derived geometry is not real imagery, and the synthetic fixture/analytic detector are labelled development modes.
 
 Priorities: risk detection, potential-survivor identification, and adaptive evacuation
 routing. One floor, one kinematic robot, fire/smoke, and simple survivor escort.
@@ -71,7 +71,7 @@ the LLM or describe normalized simulated exposure as real-world safety validatio
 
 ## Verification and handoff
 
-Install with `pip install -e '.[test]'`; run `uvicorn rescuetwin.api:app --host 127.0.0.1 --port 8000`.
+Install with `pip install -e '.[test,scene,vision]'`; run `uvicorn rescuetwin.api:app --host 127.0.0.1 --port 8000`.
 Run the frontend with `cd frontend && npm install && npm run dev`.
 Check with `python3 -m pytest -q` and `cd frontend && npm run build`.
 Optional extras `agent` and `vision` require external credentials/weights and separate validation.

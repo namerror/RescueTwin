@@ -26,5 +26,19 @@ def test_operator_websocket_snapshot():
     with TestClient(app) as client:
         with client.websocket_connect('/api/stream') as stream:
             state=stream.receive_json()
-            assert state['scene']['source']=='synthetic'
+            assert state['scene_id']=='development-apartment'
             assert 'scenario' in state
+        assert client.get('/api/scene').json()['source']=='synthetic'
+
+
+def test_hazard_preview_runs_without_robot_mission():
+    with TestClient(app) as client:
+        client.post('/api/control',json={'action':'reset'})
+        state=client.post('/api/control',json={'action':'toggle_hazards'}).json()
+        assert state['hazards_running'] and state['status']=='paused'
+        assert client.post('/api/scenario',json={'survivors':[],'ignitions':[],'seed':1}).status_code==409
+        assert client.post('/api/control',json={'action':'start'}).status_code==200
+        assert client.post('/api/control',json={'action':'toggle_hazards'}).status_code==409   # robot running
+        paused=client.post('/api/control',json={'action':'pause'}).json()
+        assert not paused['hazards_running']
+        client.post('/api/control',json={'action':'reset'})

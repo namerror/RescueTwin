@@ -106,10 +106,12 @@ def parse_environment(plan):
             if inside(x, y, box):
                 materials[col, row] = material
     scene = Scene(
-        default_material=default, materials=materials,
+        origin=(xmin, ymin), default_material=default, materials=materials,
         vents={index(point, "Vent", reachable) for point in config.get("vents", [])},
         id=config["id"], name=config["name"], width=width, height=height,
         resolution=cell, exits=exits, rooms=rooms, source=config["source"],
+        meta={"exterior": [(x, y) for y in range(height) for x in range(width)
+                           if not any(inside(xmin+(x+.5)*cell, ymin+(y+.5)*cell, box) for box in footprint)]},
         walls={(x, y) for y in range(height) for x in range(width)} - reachable,
     )
     scenario = {

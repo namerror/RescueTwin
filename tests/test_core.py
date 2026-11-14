@@ -1,4 +1,5 @@
 from copy import deepcopy
+import numpy as np
 import pytest
 from rescuetwin.core import Simulation,fixture,route,line_visible
 
@@ -27,7 +28,7 @@ def test_belief_has_no_hidden_survivors_or_remote_heat():
 def test_fire_deterministic_and_wall_impermeable():
     a,b=Simulation(),Simulation()
     for _ in range(10):a.hazards(.2);b.hazards(.2)
-    assert a.heat==b.heat
+    assert np.array_equal(a.heat,b.heat)
     assert all(a.heat[y][x]==0 for x,y in a.scene.walls)
 
 
@@ -67,7 +68,11 @@ def test_local_interlock_stops_before_hazardous_cell():
 
 def test_no_viable_escort_route_reports_unresolved():
     s=Simulation();s.status='running';p=s.survivors[0]
-    s.robot=tuple(p['position']);s.known.add(p['id']);s.escort=p['id'];p['status']='escorting'
-    s.observed=s.grid();s.tick()
+    s.robot=tuple(p['position']);d=s.add_evidence(s.scene.world(p['position']),1.,'test')
+    s.pair();assert s.escort==p['id'] and d['status']=='escorting'
+    s.observed=s.grid();s.sense=lambda:None;s.tick()
+    assert s.status=='running' and s.holding                 # waits: upstream fire can burn out
+    assert 'holding' in s.events[-1]['message']
+    s.time=s.scene.time_limit;s.tick()
     assert s.status=='unresolved' and s.metrics['evacuated']==0
     assert 'not confirmed absent' in s.events[-1]['message']
