@@ -117,25 +117,26 @@ def test_fire_is_deterministic_and_burns_out(mini):
     assert round(a.hazard_time, 6) == 600
 
 
-def test_upstream_fire_model_identical_on_half_metre_grid():
-    """The metric port equals upstream PR #1's per-cell model at its native 0.5 m resolution."""
-    sim = Simulation(scenario=dict(survivors=[[3, 6]], ignitions=[[25, 18]], seed=1))
-    heat = [row[:] for row in sim.heat.tolist()]; smoke = [row[:] for row in sim.smoke.tolist()]
-    fuel = [row[:] for row in sim.fuel.tolist()]; scene = sim.scene; T = 0.
-    for _ in range(200):                          # reference: upstream's loop, verbatim semantics
-        T += .2; h2 = [[0.] * scene.width for _ in range(scene.height)]; s2 = [[0.] * scene.width for _ in range(scene.height)]
-        for y in range(scene.height):
-            for x in range(scene.width):
-                if not scene.free((x, y)): continue
-                ns = scene.neighbors((x, y)); hv, sv = heat[y][x], smoke[y][x]
-                source = .9 if T <= 45 and (x, y) == (25, 18) else 0.
-                burn = max(0., hv - .14) * fuel[y][x] * .85
-                fuel[y][x] = max(0., fuel[y][x] - burn * .2 * .2)
-                h2[y][x] = max(source, min(1., hv + .2 * (.3 * sum(heat[b][a] - hv for a, b in ns) + burn - .025 * hv)))
-                s2[y][x] = max(0., min(1., sv + .2 * (.5 * sum(smoke[b][a] - sv for a, b in ns) + burn * .6 - .015 * sv)))
-        heat, smoke = h2, s2
-        sim.hazards(.2)
-    assert np.allclose(sim.heat, heat, atol=1e-12) and np.allclose(sim.smoke, smoke, atol=1e-12)
+def test_material_fuel_and_residual_smoke():
+    scenario = dict(survivors=[], ignitions=[[25, 18]], seed=1)
+    inert = Simulation(scenario=scenario)
+    inert.fuel.fill(0)
+    combustible = Simulation(scenario=scenario)
+    for _ in range(75):
+        inert.hazards(.2)
+        combustible.hazards(.2)
+    assert inert.smoke.max() == 0
+    assert combustible.smoke.max() > 0
+    for _ in range(200):
+        combustible.hazards(.2)
+        if combustible.fire.max() == 0:
+            break
+    assert combustible.fire.max() == 0
+    remaining = combustible.smoke.sum()
+    assert remaining > 0
+    for _ in range(150):
+        combustible.hazards(.2)
+    assert 0 < combustible.smoke.sum() < remaining
 
 
 def test_mission_on_bundle_evacuates_through_exit(mini):
