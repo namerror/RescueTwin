@@ -8,6 +8,7 @@ import json
 import math
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,18 +26,36 @@ QUERY = '''query($id: ID!) { model(id:$id) { id name
 } }'''
 
 
-def graph(model):
+REQUIRED = ('floors', 'rooms', 'panoLocations', 'bundle', 'assets')
+
+
+def graph(model, attempts=3):
+    """Query the model graph, retrying responses that omit fields the build depends on."""
     key, token = credentials()
-    result = subprocess.run(['curl', '-sS', '-K', '-', '-m', '90', '-H', 'Content-Type: application/json',
-                             '-d', json.dumps({'query': QUERY, 'variables': {'id': model}}), API],
-                            input=f'user = "{key}:{token}"\n', capture_output=True, text=True)
-    try:
-        body = json.loads(result.stdout)
-    except ValueError:
-        raise SystemExit('Matterport returned a non-JSON response; check network and credentials')
-    if body.get('errors') or not (body.get('data') or {}).get('model'):
-        raise SystemExit('Matterport rejected query; inspect schema/permissions without logging credentials')
-    return body['data']['model']
+    missing = ()
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(2 * attempt)
+        result = subprocess.run(['curl', '-sS', '-K', '-', '-m', '90', '-H', 'Content-Type: application/json',
+                                 '-d', json.dumps({'query': QUERY, 'variables': {'id': model}}), API],
+                                input=f'user = "{key}:{token}"\n', capture_output=True, text=True)
+        try:
+            body = json.loads(result.stdout)
+        except ValueError:
+            missing = ('valid JSON response',)
+            continue
+        if body.get('errors'):
+            raise SystemExit('Matterport rejected query; inspect schema/permissions without logging credentials')
+        data = (body.get('data') or {}).get('model')
+        if not data:
+            raise SystemExit(f'Matterport returned no model for {model}; check the ID and API permissions')
+        missing = tuple(k for k in REQUIRED if data.get(k) is None)
+        if not missing and (data['assets'].get('floorplans') is None):
+            missing = ('assets.floorplans',)
+        if not missing:
+            return data
+    raise SystemExit(f'Matterport response for {model} lacked {", ".join(missing)} after {attempts} attempts; '
+                     'retry shortly (possible throttling) or check API permissions for floor-plan assets')
 
 
 def download(url, target):
