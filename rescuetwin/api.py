@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from . import presets
+from .environment import parse_environment
 from .core import CAMERA_RANGE_M, HAZARD_PREVIEW_LIMIT_S, Simulation, compare
 from .scenes import BUNDLE_FILES, available, default_scene
 
@@ -24,7 +25,12 @@ def default_perception(scene):
     return 'image-yolo' if scene.source != 'synthetic' and VISION_AVAILABLE else 'analytic-development'
 
 
+uploaded_scenarios = {}
+
+
 def new_simulation(scene, scenario=None, mode='adaptive', perception=None):
+    if scenario is None:
+        scenario = uploaded_scenarios.get(scene.id)
     if scenario is None:
         scenario = presets.build(scene, 'standard')['scenario']
     return Simulation(scene, scenario, mode, perception or default_perception(scene))
@@ -186,6 +192,26 @@ def scene_list():return [s.summary() for s in scenes.values()]
 
 @app.get('/api/scene')
 def scene():return sim.scene.public()
+
+@app.post('/api/environment')
+def environment(body: dict):
+    global sim
+    if sim.status == 'running' or sim.hazards_running or busy():
+        raise HTTPException(409, 'Pause or reset before loading a floor plan')
+    try:
+        scene, scenario = parse_environment(body)
+        if scene.id in scenes:
+            from dataclasses import replace
+            from uuid import uuid4
+            scene = replace(scene, id=f'uploaded-{uuid4().hex}')
+        next_sim = new_simulation(scene, scenario, sim.mode, 'analytic-development')
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise HTTPException(422, f'Invalid floor plan: {error}') from error
+    scenes[scene.id] = scene
+    uploaded_scenarios[scene.id] = scenario
+    sim = next_sim
+    return sim.state()
+
 
 @app.post('/api/scene')
 def choose_scene(body:SceneChoice):

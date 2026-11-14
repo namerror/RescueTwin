@@ -24,17 +24,15 @@ PERCEPTION_PERIOD = 0.4      # s of simulated time between rendered frames (imag
 # Fire model from upstream PR #1 (floor2-hazard-preview), illustrative, not calibrated fire behaviour.
 # Upstream's coefficients are per 0.5 m cell; diffusion is rescaled by (0.5 / resolution)^2 so the model
 # behaves the same in metres on any grid (identical to upstream at 0.5 m).
-UPSTREAM_CELL_M = 0.5
-UPSTREAM_IGNITION_HOLD_S = 45.0    # ignition cells are held at heat >= 0.9 for this long
 UPSTREAM_IGNITION_HEAT = 0.9
-UPSTREAM_BURN_THRESHOLD = 0.14
-UPSTREAM_BURN_GAIN = 0.85
-UPSTREAM_FUEL_USE = 0.2
-UPSTREAM_HEAT_DIFFUSION = 0.3      # per neighbour difference per second, at 0.5 m cells
-UPSTREAM_SMOKE_DIFFUSION = 0.5
-UPSTREAM_HEAT_DECAY = 0.025
-UPSTREAM_SMOKE_YIELD = 0.6
-UPSTREAM_SMOKE_DECAY = 0.015
+HAZARD_SENSOR_RADIUS_M = 1.0
+# Ignition threshold, burn rate, fuel load, smoke yield.
+MATERIALS = {
+    'inert': (1., 0., 0., 0.),
+    'light': (.24, 1.05, .65, .48),
+    'wood': (.31, .85, 1., .40),
+    'upholstery': (.19, 1.25, 1.15, .72),
+}
 HAZARD_PREVIEW_LIMIT_S = 600.0
 FLAME_VISIBLE_HEAT = 0.3           # flames are drawn and visible to sensing at or above this heat
 IGNITION_RADIUS_M = 0.3
@@ -61,6 +59,9 @@ class Scene:
     time_limit: float = 240.
     meta: dict = field(default_factory=dict)
     bundle: Path | None = None
+    default_material: str = "wood"
+    materials: dict[Cell, str] = field(default_factory=dict)
+    vents: set[Cell] = field(default_factory=set)
 
     def free(self, p):
         return 0 <= p[0] < self.width and 0 <= p[1] < self.height and tuple(p) not in self.walls
@@ -186,7 +187,18 @@ class Simulation:
         self.scan_remaining=0.
         self.free=self.scene.free_mask()
         H,W=self.free.shape
-        self.heat=np.zeros((H,W));self.smoke=np.zeros((H,W));self.fuel=np.where(self.free,1.,0.)
+        self.heat=np.zeros((H,W));self.smoke=np.zeros((H,W));self.fire=self.grid()
+        profiles=np.empty((4,H,W))
+        profiles[:]=np.array(MATERIALS[self.scene.default_material])[:,None,None]
+        for (x,y),material in self.scene.materials.items():
+            profiles[:,y,x]=MATERIALS[material]
+        self.ignition_threshold,self.burn_rate,fuel,self.smoke_yield=profiles
+        self.fuel=np.where(self.free,fuel,0.)
+        exchange=self.grid()
+        for x,y in set(map(tuple,self.scene.exits)) | self.scene.vents:
+            exchange[y,x]=1.
+        self.heat_decay=.04+.16*exchange
+        self.smoke_decay=.015+.24*exchange
         self.ignition_cells=set();self.hazard_time=0.;self.hazards_running=False
         self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.)
         self.route=[];self.goal=None;self.visited=set();self.escort=None;self.escort_detection=None
@@ -205,6 +217,7 @@ class Simulation:
                         self.heat[yy,xx]=UPSTREAM_IGNITION_HEAT;self.ignition_cells.add((xx,yy))
         self.ignition_mask=np.zeros((H,W),bool)
         for xx,yy in self.ignition_cells:self.ignition_mask[yy,xx]=True
+        self.fire=np.where(self.ignition_mask,self.heat,0.)
 
     def grid(self,value=0.): return np.full((self.scene.height,self.scene.width),float(value))
 
@@ -229,20 +242,24 @@ class Simulation:
 
     # ---------------------------------------------------------------- hazards
     def hazards(self,dt):
-        """Upstream PR #1 fire model in NumPy: ignition cells are held hot for 45 s; cells above the burn
-        threshold consume fuel and produce heat and smoke; heat and smoke diffuse only between 4-connected
-        free cells (walls block, doorways connect); everything decays once fuel is spent."""
-        free=self.free;scale=(UPSTREAM_CELL_M/self.scene.resolution)**2
-        kh,ks=UPSTREAM_HEAT_DIFFUSION*scale,UPSTREAM_SMOKE_DIFFUSION*scale
-        n=max(1,math.ceil(dt*4*max(kh,ks)/.8));h=dt/n
-        for _ in range(n):
-            self.hazard_time+=h
-            heat,smoke=self.heat,self.smoke
-            source=np.where(self.ignition_mask,UPSTREAM_IGNITION_HEAT,0.) if self.hazard_time<=UPSTREAM_IGNITION_HOLD_S else 0.
-            burn=np.maximum(0.,heat-UPSTREAM_BURN_THRESHOLD)*self.fuel*UPSTREAM_BURN_GAIN
-            self.fuel=np.maximum(0.,self.fuel-burn*h*UPSTREAM_FUEL_USE)
-            self.heat=np.where(free,np.maximum(source,np.minimum(1.,heat+h*(kh*self._laplacian(heat)+burn-UPSTREAM_HEAT_DECAY*heat))),0.)
-            self.smoke=np.where(free,np.clip(smoke+h*(ks*self._laplacian(smoke)+burn*UPSTREAM_SMOKE_YIELD-UPSTREAM_SMOKE_DECAY*smoke),0,1),0.)
+        """Advance finite fuel, wall-confined diffusion and ambient exchange."""
+        scale = (.2 / self.scene.resolution) ** 2
+        kh, ks = .30 * scale, .50 * scale
+        steps = max(1, math.ceil(dt * (4 * max(kh, ks) + .255) / .8))
+        step = dt / steps
+        for _ in range(steps):
+            self.hazard_time += step
+            heat, smoke = self.heat, self.smoke
+            source = .9 * self.ignition_mask if self.hazard_time <= 12 + 1e-8 else 0.
+            burn = np.minimum(self.fuel / step,
+                              .2 * self.burn_rate * np.maximum(0., heat - self.ignition_threshold) * self.fuel)
+            self.fuel = np.maximum(0., self.fuel - burn * step)
+            release = 5 * burn
+            self.fire = np.maximum(source, np.clip(release, 0., 1.))
+            self.heat = np.maximum(source, np.clip(heat + step * (
+                kh * self._laplacian(heat) + release - self.heat_decay * heat), 0., 1.))
+            self.smoke = np.clip(smoke + step * (
+                ks * self._laplacian(smoke) + release * self.smoke_yield - self.smoke_decay * smoke), 0., 1.)
 
     def _laplacian(self,field):
         free=self.free;out=np.zeros_like(field)
@@ -320,9 +337,25 @@ class Simulation:
         d['status']='confirmed';self.metrics['detections']+=1;self.version+=1
         self.log(f"Potential survivor confirmed: {d['id']} ({d['source']}, {d['hits']} observation{'s' if d['hits']>1 else ''}).")
 
+    def hazard_sensor(self):
+        rx, ry = self.robot
+        readings = []
+        for x, y in self.ignition_cells:
+            distance = math.hypot(x - rx, y - ry) * self.scene.resolution
+            intensity = float(self.heat[y, x])
+            if distance <= HAZARD_SENSOR_RADIUS_M and intensity > 0 and line_visible(self.scene, self.robot, (x, y)):
+                readings.append((distance, -intensity))
+        nearest = min(readings, default=None)
+        return dict(position=self.robot, time_s=round(self.time, 2),
+                    radius_m=HAZARD_SENSOR_RADIUS_M,
+                    source_distance_m=nearest[0] if nearest else None,
+                    source_heat_intensity=-nearest[1] if nearest else None,
+                    smoke_intensity=float(self.smoke[ry, rx]))
+
     def observations(self):
         return dict(time=self.time,version=self.version,robot=self.robot,heading=self.heading,observed=self.observed.tolist(),
                     heat=self.belief_heat.round(3).tolist(),smoke=self.belief_smoke.round(3).tolist(),
+                    hazard_sensor=self.hazard_sensor(),
                     survivors=[deepcopy(d) for d in self.detections if d['status'] in ('confirmed','escorting')],
                     perception=self.perception_mode,events=self.events[-8:])
 
@@ -467,6 +500,7 @@ class Simulation:
             public.append(item)
         return dict(scene_id=self.scene.id,scenario=self.scenario,time=round(self.time,2),status=self.status,
                     hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,
+                    hazard_sensor=self.hazard_sensor(),fire=self.fire.round(3).tolist(),
                     robot=self.robot,heading=round(self.heading,4),pose=self.camera_pose(),survivors=public,
                     heat=self.heat.round(3).tolist(),smoke=self.smoke.round(3).tolist(),observed=self.observed.astype(int).tolist(),
                     route=self.route,events=self.events,metrics={k:(round(v,3) if isinstance(v,float) else v) for k,v in self.metrics.items()},

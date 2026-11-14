@@ -1,3 +1,4 @@
+import { hazardSprites } from './hazardSprites';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -26,6 +27,9 @@ interface DetectionEntry { id: string; position: [number, number]; cell: Cell; c
 interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
 interface Paired { status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
+  fire?: number[][];
+  hazard_sensor?: { radius_m: number; source_distance_m: number | null;
+    source_heat_intensity: number | null; smoke_intensity: number };
   scene_id: string; scenario: Scenario; time: number; status: string; robot: Cell; heading: number; pose: Pose;
   survivors: { id: string; position: Cell; status: string }[];
   heat: number[][]; smoke: number[][]; observed: number[][]; route: Cell[];
@@ -93,6 +97,9 @@ $('app').innerHTML = `
       <aside class="sidebar">
         <section class="panel" aria-labelledby="property-heading"><div class="panel-heading compact"><div><h2 id="property-heading">Property context</h2></div></div>
           <label class="seed-label" for="scene-select">Scene <select id="scene-select"></select></label>
+            <button id="load-map" class="button small">Open floor plan…</button>
+            <input id="map-file" type="file" accept=".json,application/json" hidden />
+            <p id="sensor-readings" class="field-hint">Waiting for robot hazard sensor</p>
           <div id="property-card" class="property-card"><p class="field-hint">No CoStar record for this scene.</p></div>
           <details class="details-block"><summary>Provenance & scene checks</summary><div id="provenance"></div></details>
         </section>
@@ -180,18 +187,15 @@ function createField(order: number) {
 }
 const heatField = createField(1);
 const smokeField = createField(2);
-const smokeLimit = 600;
-const smokeClouds = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 5), new THREE.MeshBasicMaterial({ color: '#c6d1dc', transparent: true, opacity: 0.24, depthWrite: false }), smokeLimit);
-smokeClouds.count = 0;
-smokeClouds.frustumCulled = false;
-smokeClouds.renderOrder = 3;
+const smokeLimit = 320;
+const flameLimit = 256;
+const smokeClouds = hazardSprites(smokeLimit, true);
 smokeClouds.layers.set(OPERATOR_LAYER);
+smokeClouds.renderOrder = 3;
 const smokeTransform = new THREE.Object3D();
 const heatColor = new THREE.Color();
-const flameLimit = 4096;
-const flames = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 6), new THREE.MeshStandardMaterial({ color: '#ff962e', emissive: '#ed4c0a', emissiveIntensity: 1.25 }), flameLimit);
-flames.count = 0;
-flames.frustumCulled = false;
+const flames = hazardSprites(flameLimit, false);
+flames.renderOrder = 4;
 const flameTransform = new THREE.Object3D();
 let focusCell: Cell | null = null;
 const hotColor = new THREE.Color('#e6451d');
@@ -310,6 +314,7 @@ function syncUI(): void {
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
   ($('mode-fieldset') as HTMLFieldSetElement).disabled = !editable;
   ($('perception-fieldset') as HTMLFieldSetElement).disabled = !editable;
+  $<HTMLButtonElement>('load-map').disabled = !connected || busy || dirty || status === 'running' || !!state?.hazards_running || pairedRunning();
   ($('scene-select') as HTMLSelectElement).disabled = !connected || busy || status === 'running' || pairedRunning();
   document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => { input.disabled = input.value !== 'inspect' && !editable; });
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => { b.disabled = !editable || b.dataset.unavailable === '1'; });
@@ -387,6 +392,11 @@ function renderSceneInfo(): void {
 
 function acceptState(next: SimState): void {
   const lostEdits = dirty && (next.status.toLowerCase() !== 'idle' || (draft?.scene_id && draft.scene_id !== next.scene_id));
+  const sensor = next.hazard_sensor;
+  const heat = sensor?.source_heat_intensity;
+  $('sensor-readings').textContent = sensor
+    ? `Robot sensor · Heat ${heat == null ? '—' : number(heat * 100) + '%'} · Distance ${sensor.source_distance_m == null ? '—' : number(sensor.source_distance_m, 3) + ' m'} · Smoke ${number(sensor.smoke_intensity * 100)}%`
+    : 'Sensor data unavailable';
   state = next;
   connected = true;
   if (!draft || !dirty || lostEdits) {
@@ -644,13 +654,14 @@ function drawHazardField(): void {
       const smoke = smokeBand(density);
       if (layers.smoke && density >= 0.06) denseSmoke.push({ cell: [col, row], density });
       if (smoke) smoky++;
-      if (heat >= FLAME_HEAT) {
+      const fire = useBelief ? heat : state.fire?.[row]?.[col] ?? heat;
+      if (fire >= (useBelief || !state.fire ? FLAME_HEAT : .15)) {
         burning++;
-        if (heat > hottest) { hottest = heat; focusCell = [col, row]; }
+        if (fire > hottest) { hottest = fire; focusCell = [col, row]; }
         if (layers.heat && flameCount < flameLimit) {
-          const flameHeight = (0.75 + Math.min(heat, 1) * 1.6) * 0.5;   // upstream proportions at 0.5 m cells
+          const flameHeight = (0.75 + Math.min(fire, 1) * 1.6) * 0.5;   // upstream proportions at 0.5 m cells
           flameTransform.position.copy(position([col, row], flameHeight / 2));
-          flameTransform.scale.set(0.34 * res, flameHeight, 0.34 * res);
+          flameTransform.scale.set(1.1 * res, flameHeight, 1);
           flameTransform.updateMatrix();
           flames.setMatrixAt(flameCount++, flameTransform.matrix);
         }
@@ -686,7 +697,7 @@ function drawHazardField(): void {
     const { cell, density } = denseSmoke[i];
     const spread = (0.48 + Math.min(1, density) * 0.42) * 0.5 * Math.sqrt(stride);
     smokeTransform.position.copy(position(cell, smokeField.mesh.position.y - 0.225));
-    smokeTransform.scale.set(spread, (0.4 + spread * 0.3) * 0.5, spread);
+    smokeTransform.scale.set(spread * 2.4, spread * 1.3, 1);
     smokeTransform.updateMatrix();
     smokeClouds.setMatrixAt(cloudCount++, smokeTransform.matrix);
   }
@@ -949,7 +960,11 @@ function setupRenderer(): void {
     resize();
     new ResizeObserver(resize).observe($('viewport'));
     setView(cameraView);
-    renderer.setAnimationLoop(() => {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    renderer.setAnimationLoop((now) => {
+      const clock = reducedMotion.matches ? 0 : now * .001;
+      flames.material.uniforms.clock.value = clock;
+      smokeClouds.material.uniforms.clock.value = clock;
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
       renderer.render(world, camera);
@@ -1032,6 +1047,19 @@ for (const action of ['start', 'pause', 'reset'] as const) {
   }));
 }
 
+$('load-map').addEventListener('click', () => $<HTMLInputElement>('map-file').click());
+$<HTMLInputElement>('map-file').addEventListener('change', event => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  void mutation(async () => {
+    if (file.size > 2_000_000) throw new Error('Floor plan JSON must be under 2 MB.');
+    await api('environment', JSON.parse(await file.text()));
+    scene = null; draft = null; dirty = false; lastFrameSeq = -1;
+    notify('Floor plan loaded.');
+  });
+});
 $('scene-select').addEventListener('change', () => void mutation(async () => {
   await api('scene', { id: ($('scene-select') as HTMLSelectElement).value });
   scene = null; draft = null; dirty = false; lastFrameSeq = -1;
