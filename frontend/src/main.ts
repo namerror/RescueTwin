@@ -31,6 +31,7 @@ interface FrameResult { seq: number; time: number; accepted: { box: number[]; co
 interface Paired { experiment?: Record<string, unknown>; status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
   vision_installed?: boolean;
+  sprinkler?: { radius_m: number; origin: Cell; cells: Cell[] } | null;
   fire?: number[][];
   searched_rooms?: string[];
   hazard_sensor?: { radius_m: number; source_distance_m: number | null;
@@ -102,7 +103,8 @@ $('app').innerHTML = `
             <label id="cutaway-control" hidden title="Operator view clips the scanned mesh above this height; robot camera always sees full geometry">Cutaway <select id="cutaway-height"><option value="1.0">1.0 m</option><option value="1.6" selected>1.6 m</option><option value="2.2">2.2 m</option><option value="off">Off</option></select></label>
             <label title="Room fire-risk map: gas heater (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
             <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
-            <label><input type="checkbox" id="heat-layer" checked /><span class="swatch heat"></span>Fire / heat</label>
+            <label><input type="checkbox" id="fire-layer" checked />Flames</label>
+            <label><input type="checkbox" id="heat-layer" /><span class="swatch heat"></span>Heat map</label>
             <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
             <label><input type="checkbox" id="observed-layer" />Unobserved</label>
             <label><input type="checkbox" id="route-layer" checked /><span class="swatch route"></span>Route</label>
@@ -197,7 +199,7 @@ const raycaster = new THREE.Raycaster();
 raycaster.layers.enableAll();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const pointer = new THREE.Vector2();
-const layers = { heat: true, smoke: true, observed: false, route: true };
+const layers = { fire: true, heat: false, smoke: true, observed: false, route: true };
 // Upstream PR #1 hazard rendering: textured heat (floor) and banded smoke (near ceiling) fields,
 // instanced smoke clouds and flame cones. Fields/clouds are operator-only; flames are physical (camera sees them).
 const wallLayer = new THREE.Group();
@@ -865,13 +867,13 @@ function drawHazardField(): void {
       if (layers.smoke && density >= 0.06) denseSmoke.push({ cell: [col, row], density });
       if (smoke) smoky++;
       const fire = useBelief ? heat : state.fire?.[row]?.[col] ?? heat;
-      if (fire >= (useBelief || !state.fire ? FLAME_HEAT : .15)) {
+      if (fire >= (useBelief || !state.fire ? FLAME_HEAT : .12)) {
         burning++;
         if (fire > hottest) { hottest = fire; focusCell = [col, row]; }
-        if (layers.heat && flameCount < flameLimit) {
+        if (flameCount < flameLimit) {
           const flameHeight = (0.75 + Math.min(fire, 1) * 1.6) * 0.5;   // upstream proportions at 0.5 m cells
           flameTransform.position.copy(position([col, row], flameHeight / 2));
-          flameTransform.scale.set(1.1 * res, flameHeight, 1);
+          flameTransform.scale.set(Math.max(0.26, 1.1 * res), flameHeight, 1);
           flameTransform.updateMatrix();
           flames.setMatrixAt(flameCount++, flameTransform.matrix);
         }
@@ -980,7 +982,7 @@ function drawDynamic(): void {
     material.dispose();
   }
   const editing = state.status.toLowerCase() === 'idle';
-  (editing && draft ? draft.ignitions : state.scenario.ignitions).forEach(cell => {
+  (editing ? draft?.ignitions ?? state.scenario.ignitions : []).forEach(cell => {
     const marker = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.5, 6), new THREE.MeshStandardMaterial({ color: '#ff9a46', emissive: '#da3d13', emissiveIntensity: 0.7 }));
     marker.position.copy(position(cell, 0.25));
     dynamicLayer.add(operatorOnly(marker));
@@ -1005,6 +1007,22 @@ function drawDynamic(): void {
   robot.position.copy(position(state.robot, 0));
   robot.rotation.y = state.heading;
   dynamicLayer.add(operatorOnly(robot));
+  if (state.sprinkler) {
+    const nozzle = position(state.sprinkler.origin, 0.65);
+    const vertices: number[] = [];
+    const stride = Math.max(1, Math.ceil(state.sprinkler.cells.length / 32));
+    for (const [index, cell] of state.sprinkler.cells.entries()) {
+      if (index % stride !== 0) continue;
+      const ground = position(cell, 0.06);
+      const arc = nozzle.clone().lerp(ground, 0.55);
+      arc.y += 0.25;
+      vertices.push(...nozzle.toArray(), ...arc.toArray(), ...arc.toArray(), ...ground.toArray());
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    const material = new THREE.LineBasicMaterial({ color: '#55ceff', transparent: true, opacity: 0.65 });
+    dynamicLayer.add(operatorOnly(new THREE.LineSegments(geometry, material)));
+  }
   if (selectedCell && inBounds(selectedCell)) {
     const outline = new THREE.Mesh(new THREE.RingGeometry(0.39 * scene.resolution * 2, 0.46 * scene.resolution * 2, 4), new THREE.MeshBasicMaterial({ color: '#ffffff', side: THREE.DoubleSide, depthTest: false }));
     outline.rotation.set(-Math.PI / 2, 0, Math.PI / 4);
@@ -1192,7 +1210,9 @@ function setupRenderer(): void {
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
       sourceCutaway.constant = cutawayOn ? cutawayHeight : NO_CUT;
-      renderer.render(world, camera);
+      flames.visible = layers.fire;
+      try { renderer.render(world, camera); }
+      finally { flames.visible = true; }  // The robot camera always renders physical flames.
     });
     $('scene-empty').hidden = true;
     let down: { x: number; y: number } | null = null;
@@ -1515,7 +1535,7 @@ document.addEventListener('fullscreenchange', () => {
   $('expand').textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen';
   requestAnimationFrame(recenter);
 });
-for (const name of ['heat', 'smoke', 'observed', 'route'] as const) {
+for (const name of ['fire', 'heat', 'smoke', 'observed', 'route'] as const) {
   $(`${name}-layer`).addEventListener('change', () => { layers[name] = ($(`${name}-layer`) as HTMLInputElement).checked; drawDynamic(); });
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });

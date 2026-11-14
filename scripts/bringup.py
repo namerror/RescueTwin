@@ -182,7 +182,7 @@ def available_port(number):
         except OSError: raise ValueError(f'Port {number} is occupied. Set RESCUETWIN_BACKEND_PORT / RESCUETWIN_FRONTEND_PORT.') from None
 
 
-def serve(python, env, sid, backend, frontend):
+def serve(python, env, sid, backend, frontend, environment_file=None):
     env = dict(env, RESCUETWIN_SCENE=sid, RESCUETWIN_DATA=str(ROOT/'data/prepared'), RESCUETWIN_API_URL=f'http://127.0.0.1:{backend}')
     children = []
     def stop(signum, frame): raise KeyboardInterrupt
@@ -195,15 +195,21 @@ def serve(python, env, sid, backend, frontend):
             try:
                 with urllib.request.urlopen(f'http://127.0.0.1:{backend}/api/scene', timeout=2) as response: scene = json.load(response)
                 with urllib.request.urlopen(f'http://127.0.0.1:{backend}/api/perception', timeout=2) as response: vision = json.load(response)
-                if scene['id'] != sid or not vision['vision_installed']: raise RuntimeError('Backend scene/vision readiness mismatch')
-                if vision.get('error'): raise RuntimeError('YOLO initialization failed; check weights and vision dependencies')
-                if env.get('RESCUETWIN_PRELOAD_DETECTOR', '1') != '0' and not vision.get('detector_loaded'):
+                if scene['id'] != sid or (environment_file is None and not vision['vision_installed']): raise RuntimeError('Backend scene/vision readiness mismatch')
+                if environment_file is None and vision.get('error'): raise RuntimeError('YOLO initialization failed; check weights and vision dependencies')
+                if environment_file is None and env.get('RESCUETWIN_PRELOAD_DETECTOR', '1') != '0' and not vision.get('detector_loaded'):
                     if time.monotonic() >= deadline: raise RuntimeError('YOLO initialization timed out')
                     time.sleep(.2); continue
                 break
             except (OSError, TimeoutError):
                 if time.monotonic() >= deadline: raise RuntimeError('Backend readiness timed out')
                 time.sleep(.2)
+        if environment_file is not None:
+            request = urllib.request.Request(f'http://127.0.0.1:{backend}/api/environment',
+                                             data=environment_file.read_bytes(),
+                                             headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                sid = json.load(response)['scene_id']
         children.append(subprocess.Popen(['npm', 'run', 'dev', '--', '--host', '127.0.0.1', '--port', str(frontend), '--strictPort'], cwd=ROOT/'frontend', env=env, start_new_session=True))
         print(f'\nRescueTwin: http://127.0.0.1:{frontend} | scene {sid} | Ctrl+C stops both services\n', flush=True)
         while True:
@@ -225,6 +231,7 @@ def serve(python, env, sid, backend, frontend):
 def main():
     parser = argparse.ArgumentParser(description='Install once, prepare missing textured scene data, then run backend + frontend. Root .env is supported; exported variables win.')
     parser.add_argument('--install', action='store_true', help='Resynchronize locked dependencies before starting')
+    parser.add_argument('--environment', type=Path, help='Start with a local annotated floor-plan JSON and analytic perception')
     parser.add_argument('--runtime', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     os.chdir(ROOT)
@@ -241,8 +248,15 @@ def main():
     env.setdefault('OMP_NUM_THREADS','1'); env.setdefault('MKL_NUM_THREADS','1')
     if not args.runtime:
         python = bootstrap(env, args.install)
-        os.execve(python, [str(python), str(Path(__file__).resolve()), '--runtime'], env)
+        runtime_args = ['--environment', str(args.environment.resolve())] if args.environment else []
+        os.execve(python, [str(python), str(Path(__file__).resolve()), '--runtime', *runtime_args], env)
     sys.path.insert(0, str(ROOT))
+    if args.environment:
+        from rescuetwin.environment import load_environment
+        load_environment(args.environment)
+        env['RESCUETWIN_PRELOAD_DETECTOR'] = '0'
+        serve(Path(sys.executable), env, 'development-apartment', backend, frontend, args.environment)
+        return
     sid = prepare(model, env)
     weights = Path(env.get('YOLO_WEIGHTS', ROOT/'data/weights/yolo26n.pt')).resolve()
     if not weights.exists():

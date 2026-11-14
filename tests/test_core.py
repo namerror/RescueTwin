@@ -2,7 +2,7 @@ import math
 from copy import deepcopy
 import numpy as np
 import pytest
-from rescuetwin.core import Simulation,fixture,route,line_visible
+from rescuetwin.core import Scene,Simulation,fixture,route,line_visible
 
 
 def test_invalid_placements():
@@ -33,6 +33,51 @@ def test_fire_deterministic_and_wall_impermeable():
     assert all(a.heat[y][x]==0 for x,y in a.scene.walls)
 
 
+def test_fire_spreads_through_opening_and_ignition_cannot_jump_wall():
+    scenario = dict(survivors=[], ignitions=[[2, 3]], seed=7)
+    wall = {(3, y) for y in range(7)}
+    settings = dict(width=8, height=7, resolution=.15, exits=[(0, 3)],
+                    default_material='upholstery')
+    closed = Simulation(Scene(walls=wall, **settings), scenario)
+    opened = Simulation(Scene(walls=wall - {(3, 3)}, **settings), scenario)
+    assert closed.fire[3, 4] == 0
+    peak = 0.
+    for _ in range(200):
+        closed.hazards(.2)
+        opened.hazards(.2)
+        peak = max(peak, opened.fire[3, 5])
+    assert peak >= .12  # Active flame beyond the initial ignition footprint.
+    assert not closed.heat[:, 4:].any()
+    assert not closed.smoke[:, 4:].any()
+    assert opened.smoke[:, 4:].max() > .015
+
+
+def test_automatic_sprinkler_extinguishes_nearby_fire_without_crossing_wall():
+    scene = fixture()
+    scene.default_material = 'inert'
+    sim = Simulation(scene, scenario=dict(survivors=[], ignitions=[[8, 10], [11, 10]], seed=7))
+    sim.robot = (9, 10)
+    sim.hazards(.2)
+    assert sim.state()['sprinkler'] is None
+
+    sim.status = 'running'
+    sim.hazards(.2)
+    spray = sim.state()['sprinkler']
+    assert spray['origin'] == (9, 10)
+    assert (8, 10) in spray['cells']
+    assert (11, 10) not in spray['cells']
+    assert (6, 8) not in spray['cells']
+    assert .12 <= sim.state()['fire'][10][8] < sim.state()['fire'][10][11]
+
+    for _ in range(30):
+        sim.hazards(.2)
+    assert sim.fire[10, 8] < .12
+    assert sim.state()['sprinkler'] is None
+    sim.robot = (6, 6)
+    sim.hazards(.2)
+    assert sim.fire[10, 8] < .12 <= sim.fire[10, 11]
+
+
 def test_risk_route_avoids_heat_and_escort_requires_observation():
     s=Simulation();s.observed=s.grid(1)
     for x in range(3,8):s.belief_heat[6][x]=.5
@@ -57,9 +102,10 @@ def test_agent_rejects_hidden_survivor_and_stale_decision():
     with pytest.raises(ValueError):apply_decision(s,dict(kind='room',id='room-0'),0)
 
 
-def test_fire_proof_robot_crosses_fire_at_dash_speed():
+def test_fire_proof_robot_crosses_fire_at_dash_speed(monkeypatch):
     from rescuetwin.core import ROBOT_DASH_SPEED, ROBOT_SPEED
     s=Simulation(scenario=dict(survivors=[[3,6]],ignitions=[[1,6]],seed=1))
+    monkeypatch.setattr(s, 'automatic_sprinkler', lambda: False)
     s.status='running'
     for _ in range(4):s.tick()
     q=s.route[0];s.heat[q[1]][q[0]]=1.;s.progress=0

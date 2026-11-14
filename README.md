@@ -73,6 +73,10 @@ Dependency maintainers: update `uv.lock` with uv 0.11.25 and commit changes to
 
 Open the Vite localhost URL. Place survivors and ignition points, run either policy, or compare both on identical starting conditions. Exposure is in illustrative units. Use reset before editing. The operator view contains ground truth; `/api/observations` contains robot knowledge only. Keep this development server on localhost; it has no authentication.
 
+For a faster demo, start the app with `RESCUETWIN_RUN_SPEED=2 ./setup.sh`. This targets twice the normal wall-clock pace with the same simulation timestep. Browser-rendered camera frames, inference, and simulation compute can limit the actual pace.
+
+To start directly on a local annotated floor plan, use `./setup.sh --environment /path/to/floor_plan.json`. This starts the same services with analytic development perception and skips fetching a Matterport scene or detector weights.
+
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python scripts/inspect_sponsor.py 9A46aT7FCPg --property 22572250 --plan 6106437

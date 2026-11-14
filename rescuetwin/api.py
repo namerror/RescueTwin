@@ -25,6 +25,9 @@ agent_status = dict(state='starting', enabled=os.environ.get('RESCUETWIN_AGENT',
 PAUSE_LABEL = 'Decision-quality mode: mission clock and fire paused during model inference; not real-time performance.'
 VISION_AVAILABLE = importlib.util.find_spec('ultralytics') is not None
 TICK = .2
+RUN_SPEED = float(os.environ.get('RESCUETWIN_RUN_SPEED', '1'))
+if not math.isfinite(RUN_SPEED) or RUN_SPEED <= 0:
+    raise ValueError('RESCUETWIN_RUN_SPEED must be a positive, finite number')
 
 scenes = available()
 
@@ -117,6 +120,7 @@ async def lifespan(app):
     async def clock():
         global sim
         while True:
+            tick_started = time.monotonic()
             fast = paired is not None and paired.status == 'running'
             current = sim
             if current.status == 'running' and inference_hold(current):
@@ -133,7 +137,12 @@ async def lifespan(app):
                 current.hazards_running = False
             if fast and current is sim and current.status not in ('running', 'paused'):
                 paired.record(current)
-            await asyncio.sleep(0 if fast and not current.needs_frame() else TICK / (8 if fast else 1))
+            if fast:
+                await asyncio.sleep(TICK / 8 if current.needs_frame() else 0)
+            else:
+                active = current.status == 'running' or current.hazards_running
+                interval = TICK / RUN_SPEED if active and not current.needs_frame() else TICK
+                await asyncio.sleep(max(0., interval - (time.monotonic() - tick_started)))
 
     async def reason():
         """Hosted supervisor: proposes goals; the controller validates and executes. Any failure or rejection falls

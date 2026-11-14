@@ -23,6 +23,9 @@ ROBOT_SPEED = 0.5            # m/s along the grid
 # moves at its top speed; risk-aware routing still prefers the path with the least observed fire.
 ROBOT_DASH_SPEED = 1.0       # m/s while the robot (or an escort) is in or entering a hazard cell
 HAZARD_HEAT, HAZARD_SMOKE = 0.3, 0.5   # a cell counts as "in fire/dense smoke" at or above these
+SPRAY_RADIUS_M = 1.5
+SPRAY_COOLING_RATE = 2.5  # per mission second at the nozzle
+SPRAY_FIRE_TRIGGER = .12
 ESCORT_HEAT_LIMIT, ESCORT_SMOKE_LIMIT = .6, .5   # people are not fire-proof
 # Robot decision constitution (docs/ROBOT_CONSTITUTION.md): human escort limits are never relaxed, by timeout
 # or otherwise. A cornered escort holds, reports the person's location and requests assistance.
@@ -212,6 +215,10 @@ class Simulation:
         self.robot=tuple(self.scene.robot_start or self.scene.exits[0]);self.heading=0.;self.progress=0.
         self.scan_remaining=0.
         self.free=self.scene.free_mask()
+        self.diffusion_edges = (
+            self.free[1:, :] & self.free[:-1, :],
+            self.free[:, 1:] & self.free[:, :-1],
+        )
         H,W=self.free.shape
         self.heat=np.zeros((H,W));self.smoke=np.zeros((H,W));self.fire=self.grid()
         profiles=np.empty((4,H,W))
@@ -252,15 +259,22 @@ class Simulation:
         self.rooms_state={r['id']:dict(id=r['id'],name=r['name'],label=r.get('label'),status='unvisited',observed_fraction=0.,
                                         viewpoints_tried=0,reason=None) for r in self.scene.rooms}
         self.room_of={tuple(c):r['id'] for r in self.scene.rooms for c in r['cells']}
-        for x,y in self.scenario['ignitions']:
-            cx,cy=self.scene.world((x,y))
-            for yy in range(H):
-                for xx in range(W):
-                    if self.free[yy,xx] and math.dist(self.scene.world((xx,yy)),(cx,cy))<=max(IGNITION_RADIUS_M,self.scene.resolution*.5):
-                        self.heat[yy,xx]=UPSTREAM_IGNITION_HEAT;self.ignition_cells.add((xx,yy))
+        radius = IGNITION_RADIUS_M / self.scene.resolution
+        reach = math.floor(radius + 1e-9)
+        for x, y in self.scenario['ignitions']:
+            for yy in range(max(0, y - reach), min(H, y + reach + 1)):
+                for xx in range(max(0, x - reach), min(W, x + reach + 1)):
+                    if math.hypot(xx - x, yy - y) <= radius + 1e-9 and line_visible(self.scene, (x, y), (xx, yy)):
+                        self.heat[yy, xx] = UPSTREAM_IGNITION_HEAT
+                        self.ignition_cells.add((xx, yy))
         self.ignition_mask=np.zeros((H,W),bool)
         for xx,yy in self.ignition_cells:self.ignition_mask[yy,xx]=True
         self.fire=np.where(self.ignition_mask,self.heat,0.)
+        self.ignition_strength = self.fire.copy()
+        self.spray_origin = None
+        self.spray_cells = ()
+        self.spray_strength = self.grid()
+        self.spraying = False
 
     def grid(self,value=0.): return np.full((self.scene.height,self.scene.width),float(value))
 
@@ -292,17 +306,45 @@ class Simulation:
         self.events.append(dict(time=round(self.time,2),message=message));self.events=self.events[-100:]
 
     # ---------------------------------------------------------------- hazards
+    def automatic_sprinkler(self):
+        """Use local heat and flame readings within the nozzle's unobstructed reach."""
+        if self.robot != self.spray_origin:
+            self.spray_origin = self.robot
+            self.spray_strength.fill(0.)
+            cx, cy = self.robot
+            reach = math.ceil(SPRAY_RADIUS_M / self.scene.resolution)
+            cells = []
+            for y in range(max(0, cy - reach), min(self.scene.height, cy + reach + 1)):
+                for x in range(max(0, cx - reach), min(self.scene.width, cx + reach + 1)):
+                    distance = math.hypot(x - cx, y - cy) * self.scene.resolution
+                    if distance <= SPRAY_RADIUS_M and self.scene.free((x, y)) and line_visible(self.scene, self.robot, (x, y)):
+                        self.spray_strength[y, x] = 1. - .5 * distance / SPRAY_RADIUS_M
+                        cells.append((x, y))
+            self.spray_cells = tuple(cells)
+        return any(self.heat[y, x] >= HAZARD_HEAT or self.fire[y, x] >= SPRAY_FIRE_TRIGGER
+                   for x, y in self.spray_cells)
+
     def hazards(self,dt):
         """Advance finite fuel, wall-confined diffusion and ambient exchange."""
+        spraying = self.status == 'running' and self.automatic_sprinkler()
+        if spraying and not self.spraying:
+            self.log('Automatic sprinkler activated.')
+        self.spraying = spraying
         dt = dt * HAZARD_TIME_SCALE   # demo pacing; see HAZARD_TIME_SCALE
         scale = (.2 / self.scene.resolution) ** 2
         kh, ks = .30 * scale, .50 * scale
         steps = max(1, math.ceil(dt * (4 * max(kh, ks) + .255) / .8))
         step = dt / steps
+        cooling = 1.
+        if spraying:
+            cooling = np.exp(-SPRAY_COOLING_RATE * self.spray_strength * step / HAZARD_TIME_SCALE)
         for _ in range(steps):
             self.hazard_time += step
-            heat, smoke = self.heat, self.smoke
-            source = .9 * self.ignition_mask if self.hazard_time <= 12 + 1e-8 else 0.
+            heat = self.heat * cooling if spraying else self.heat
+            smoke = self.smoke
+            if spraying:
+                self.ignition_strength *= cooling
+            source = self.ignition_strength if self.hazard_time <= 12 + 1e-8 else 0.
             burn = np.minimum(self.fuel / step,
                               .2 * self.burn_rate * np.maximum(0., heat - self.ignition_threshold) * self.fuel)
             self.fuel = np.maximum(0., self.fuel - burn * step)
@@ -314,12 +356,14 @@ class Simulation:
                 ks * self._laplacian(smoke) + release * self.smoke_yield - self.smoke_decay * smoke), 0., 1.)
 
     def _laplacian(self,field):
-        free=self.free;out=np.zeros_like(field)
-        for axis,shift in ((0,1),(0,-1),(1,1),(1,-1)):
-            neighbour=np.roll(field,shift,axis);ok=np.roll(free,shift,axis)
-            if axis==0: (ok[0,:] if shift==1 else ok[-1,:]).fill(False)
-            else: (ok[:,0] if shift==1 else ok[:,-1]).fill(False)
-            out+=np.where(ok&free,neighbour-field,0.)
+        vertical, horizontal = self.diffusion_edges
+        flux_y = (field[:-1, :] - field[1:, :]) * vertical
+        flux_x = (field[:, :-1] - field[:, 1:]) * horizontal
+        out = np.zeros_like(field)
+        out[1:, :] += flux_y
+        out[:-1, :] -= flux_y
+        out[:, 1:] += flux_x
+        out[:, :-1] -= flux_x
         return out
 
     # ---------------------------------------------------------------- sensing
@@ -864,6 +908,8 @@ class Simulation:
             public.append(item)
         return dict(scene_id=self.scene.id,scenario=self.scenario,time=round(self.time,2),status=self.status,
                     hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,
+                    sprinkler=dict(radius_m=SPRAY_RADIUS_M, origin=self.spray_origin, cells=self.spray_cells)
+                    if self.spraying and self.status == 'running' else None,
                     hazard_sensor=self.hazard_sensor(),fire=self.fire.round(3).tolist(),
                     robot=self.robot,heading=round(self.heading,4),pose=self.camera_pose(),survivors=public,
                     heat=self.heat.round(3).tolist(),smoke=self.smoke.round(3).tolist(),observed=self.observed.astype(int).tolist(),
