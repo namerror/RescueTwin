@@ -59,3 +59,65 @@ def test_building_use_presets_and_scenario_roundtrip():
     assert state['scenario']['building_use'] == 'assembly'
     assert client.get('/api/presets?building_use=casino').status_code == 422
     client.post('/api/scenario', json=plain)
+
+
+def test_reports_ack_withdraw_and_scenario_fields():
+    from fastapi.testclient import TestClient
+    from rescuetwin import api
+    client = TestClient(api.app)
+    client.post('/api/control', json={'action': 'reset'})
+    base = client.get('/api/presets').json()[0]['scenario']
+    extra = dict(base, immobile=[base['survivors'][0]], comms_outages=[[0, 2]])
+    state = client.post('/api/scenario', json=extra).json()
+    assert state['scenario']['immobile'] == [base['survivors'][0]] and state['scenario']['comms_outages'] == [[0, 2]]
+    api.sim.status = 'running'
+    r = api.sim.report('confirmed-person', tuple(base['survivors'][1]), action='test')
+    assert r['status'] == 'queued'                                              # comms outage at t=0
+    assert client.post(f"/api/reports/{r['id']}/ack").status_code == 409        # not delivered yet
+    api.sim.time = 3; api.sim.deliver_reports()
+    assert client.post(f"/api/reports/{r['id']}/ack").json()['reports'][-1]['status'] == 'acknowledged'
+    assert client.post('/api/control', json={'action': 'withdraw'}).json()['withdraw_reason'] == 'operator stop'
+    client.post('/api/control', json={'action': 'reset'}); client.post('/api/scenario', json=base)
+    assert 'immobile' not in client.get('/api/state').json()['scenario']
+
+
+def test_agent_env_loading_scrubbing_and_toggle(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from rescuetwin import api
+    from rescuetwin.agent import load_agent_env, scrub
+    env = tmp_path / '.env'
+    env.write_text('MP_API_TOKEN=not-for-agent\nGEMINI_API_KEY="abc123secret"\nexport GEMINI_MODEL=model-x\n')
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False); monkeypatch.setenv('GEMINI_MODEL', 'already-set')
+    load_agent_env(env)
+    import os
+    assert os.environ['GEMINI_API_KEY'] == 'abc123secret' and os.environ['GEMINI_MODEL'] == 'already-set'
+    assert 'MP_API_TOKEN' not in os.environ or os.environ['MP_API_TOKEN'] != 'not-for-agent'
+    assert 'abc123secret' not in scrub('request failed for key abc123secret')
+    client = TestClient(api.app)
+    info = client.get('/api/agent').json()
+    assert 'GEMINI_API_KEY' not in str(info) and 'abc123secret' not in str(info)
+    assert client.post('/api/agent', json={'enabled': False}).json()['enabled'] is False
+
+
+def test_decision_quality_mode_holds_clock_only_while_waiting_on_the_model(monkeypatch):
+    from fastapi.testclient import TestClient
+    from rescuetwin import api
+    client = TestClient(api.app)
+    client.post('/api/control', json={'action': 'reset'})
+    monkeypatch.setitem(api.agent_status, 'state', 'ready')
+    info = client.post('/api/agent', json={'enabled': True, 'pause_clock': True}).json()
+    assert info['pause_clock'] and 'not real-time' in api.sim.events[-1]['message']
+    api.sim.status = 'running'
+    assert api.inference_hold(api.sim)                    # no committed goal: wait for the model
+    api.sim.goal = (15, 6)
+    assert not api.inference_hold(api.sim)                # committed goal: clock runs
+    monkeypatch.setitem(api.agent_status, 'thinking', True)
+    assert api.inference_hold(api.sim)                    # model answering: clock frozen
+    monkeypatch.setitem(api.agent_status, 'thinking', False); api.sim.goal = None
+    api.sim.agent_backoff_until = api.sim.time + 5
+    assert not api.inference_hold(api.sim)                # after a failed call the built-in planner steers
+    api.sim.agent_backoff_until = 0
+    client.post('/api/agent', json={'pause_clock': False})
+    assert not api.inference_hold(api.sim)                # real-time mode never holds
+    monkeypatch.setitem(api.agent_status, 'enabled', False)
+    client.post('/api/control', json={'action': 'reset'})

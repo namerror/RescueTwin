@@ -40,4 +40,56 @@ Record each consequential decision with the observation that triggered it, route
 
 ## Runtime status
 
-The current build exposes robot observations and allows the hosted agent to select a room, a confirmed survivor, or an exit. The controller validates and executes navigation. Outside-team delivery, a mobility check, and enforcement of this constitution still need integration. The current last-resort escort may relax human route limits after a timeout. Disable that behavior before claiming runs follow this policy.
+Updated 2026-11-14 on branch `scan-mesh-fire-tuning`. The controller is `rescuetwin/core.py`.
+
+**Implemented in the controller**
+- **Escort limits:** human limits (heat 0.6, smoke 0.5, observed cells only) and the local interlock apply for
+  the whole escort and are never relaxed. The route to a verified exit is checked at contact, before an escort
+  begins.
+- **Cornered escort:** when no route satisfies the limits, the robot holds with the person, logs one assistance
+  request and keeps replanning. Movement clears the request, so a later block is a new request.
+- **Mobility:** it is unknown until contact. At contact, a simulated check (scenario field `immobile`) decides
+  whether the person can follow.
+- **Handoffs:** a person who cannot follow, or who has no human-safe route, is reported with location, mobility,
+  hazards, last usable approach and reason. The robot then continues its search. A person who can follow is
+  re-checked every 30 s once the search allows.
+- **Outside-team reports:** five kinds (confirmed person, possible detection, assistance request, escort
+  started, mission end). Each is queued, then delivered, then acknowledged by the operator for the outside team.
+  Scenario `comms_outages` intervals keep reports queued, with retries counted. Unacknowledged reports stay
+  visible.
+- **Room states:** each room is unvisited, inspected (≥80% of cells observed), partly observed or inaccessible,
+  with the observed fraction. A partly observed room gets up to 2 extra viewpoints before it is recorded with
+  its reason (smoke, or occlusion/obstructions). Rooms not inspected appear as outstanding in the mission-end
+  report.
+- **Uncertain detections:** a single-frame detection still unconfirmed after 3 s is checked from a second
+  reachable viewpoint 1–3 m away with line of sight. If that fails, or no viewpoint exists, it is reported as a
+  possible detection.
+- **Withdrawal:** the robot withdraws on an operator command (Withdraw button), when the remaining time is
+  below its return time plus 15 s, or (stopping) on loss of a return route. Every end state files a mission-end
+  report with unresolved detections, outstanding rooms and unsent reports. End states are `completed`,
+  `accounted`, `withdrawn`, `stopped` and `unresolved`.
+- **Decision record:** each change of target is logged with time, decision, trigger, the top three options with
+  costs, and the reason.
+- **Robot alone:** it is modelled as fire-proof. Risk-aware routing avoids active fire where a way around exists.
+
+**Implemented in the hosted agent (`rescuetwin/agent.py`, Gemini)**
+- **Instructions:** this document is the system instruction.
+- **What it sees:** robot-belief observations, plus a per-room table of state, observed fraction, remaining
+  observation points, risk-weighted travel distance and building-use likelihood. A test checks the table is
+  identical whatever the survivor placements are.
+- **What it does:** it selects only a room, a confirmed survivor or an exit. The controller validates and
+  executes every choice.
+- **When it is asked:** only when the robot has no committed goal. It is never asked during an escort, a
+  withdrawal or a paired comparison.
+- **Models:** the configured model first, then the fallbacks in `GEMINI_FALLBACK_MODELS`, each with a 3 s
+  budget. Any failure or rejection is logged and the deterministic planner continues; the mission never pauses.
+- **Operator view:** a "Gemini supervisor" switch and live status sit in the Run simulation panel.
+
+**Still simplified**
+- **Mobility check:** it is scripted from the scenario, not perceived.
+- **Following:** a person who starts following is assumed to keep following; there is no loss-of-contact model.
+- **Outside team:** delivery is simulated locally, with the operator acting as the outside team.
+- **Localization:** it is assumed perfect, so loss of localization never triggers.
+- **Return route:** the fire-proof robot can only lose it if the geometry changes.
+
+Synthetic people and hazards. Simulated thresholds do not authorize real building entry.

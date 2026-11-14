@@ -13,3 +13,6 @@ def teammate_hazard_pacing(monkeypatch, request):
     if 'demo_pacing' not in request.keywords:
         import rescuetwin.core as core
         monkeypatch.setattr(core, 'HAZARD_TIME_SCALE', 1.0)
+
+# Tests never call the hosted model, even when a developer's .env holds a Gemini key.
+os.environ['RESCUETWIN_AGENT'] = '0'
