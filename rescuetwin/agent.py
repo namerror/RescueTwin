@@ -42,8 +42,9 @@ def apply_decision(sim,decision,observation_time):
     if kind=='room':
         room=next((r for r in sim.scene.rooms if r['id']==identity),None)
         if room is None:raise ValueError('Unknown room')
-        goal=tuple(sim.observe_points(room)[0])
-        if goal in sim.visited:raise ValueError('Room observation point already visited')
+        points = [point for point in sim.observe_points(room) if point not in sim.searched_points]
+        goal = next((point for point in points if sim.path(point)), None)
+        if goal is None:raise ValueError('Room has no reachable unsearched observation point')
     elif kind=='survivor':
         # Only perception-assigned detection IDs are valid; simulator person IDs never are.
         d=next((d for d in sim.detections if d['id']==identity and d['status']=='confirmed'),None)

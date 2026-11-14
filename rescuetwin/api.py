@@ -184,7 +184,9 @@ def busy():
 
 @app.get('/api/state')
 def state():
-    s=sim.state();s['paired']=paired.public() if paired else None;return s
+    s=sim.state();s['paired']=paired.public() if paired else None
+    s['vision_installed'] = VISION_AVAILABLE
+    return s
 
 @app.get('/api/observations')
 def observations():return sim.observations()
@@ -328,9 +330,12 @@ async def frame(body:Frame):
     accepted,rejected=await asyncio.to_thread(process_frame,model,image,depth,body.intrinsics,expected,CAMERA_RANGE_M)
     if current is not sim or current.frame_request is not request:
         raise HTTPException(409,'Simulation moved on while the frame was processed')
+    matched = set()
     for item in accepted:
-        d=current.add_evidence(item['world'][:2],item['confidence'],'yolo')
+        d=current.add_evidence(item['world'][:2],item['confidence'],'yolo',matched=matched)
         item['detection']=d['id'] if d else None
+        if d:
+            matched.add(d['id'])
     current.last_frame=dict(seq=body.seq,time=request['time'],accepted=accepted,rejected=rejected)
     current.frame_request=None
     return current.last_frame

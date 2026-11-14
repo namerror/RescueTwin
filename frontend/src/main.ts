@@ -30,7 +30,9 @@ interface DetectionEntry { id: string; position: [number, number]; cell: Cell; c
 interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
 interface Paired { experiment?: Record<string, unknown>; status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
+  vision_installed?: boolean;
   fire?: number[][];
+  searched_rooms?: string[];
   hazard_sensor?: { radius_m: number; source_distance_m: number | null;
     source_heat_intensity: number | null; smoke_intensity: number };
   scene_id: string; scenario: Scenario; time: number; status: string; robot: Cell; heading: number; pose: Pose;
@@ -114,7 +116,7 @@ $('app').innerHTML = `
         </section>
         <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Run simulation</h2></div></div>
           <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Risk-aware</span></label><label><input type="radio" name="mode" value="baseline" /><span>Distance-only</span></label></div></fieldset>
-          <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" checked /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" /><span>Analytic fixture</span></label></div></fieldset>
+          <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" checked /><span>Analytic fixture</span></label></div></fieldset>
           <p id="mode-description" class="field-hint">Analytic fixture uses simulator truth and is not image perception.</p>
           <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
         </section>
@@ -427,7 +429,11 @@ function renderSceneInfo(): void {
     ${scene.assumptions ? `<h3>Assumptions</h3><ul class="provenance-list">${scene.assumptions.map(a => `<li>${escape(a)}</li>`).join('')}</ul>` : ''}`;
 }
 
-function acceptState(next: SimState): void {
+function acceptState(next: SimState, newSceneSelection = false): void {
+  const firstState = !connected;
+  const yolo = document.querySelector<HTMLInputElement>('input[name="perception"][value="image-yolo"]')!;
+  yolo.disabled = next.vision_installed === false;
+  yolo.title = yolo.disabled ? 'YOLO requires the backend vision extra.' : '';
   const lostEdits = dirty && (next.status.toLowerCase() !== 'idle' || (draft?.scene_id && draft.scene_id !== next.scene_id));
   const sensor = next.hazard_sensor;
   const heat = sensor?.source_heat_intensity;
@@ -446,14 +452,18 @@ function acceptState(next: SimState): void {
     selectedTool = 'inspect';
     document.querySelector<HTMLInputElement>('input[name="tool"][value="inspect"]')!.checked = true;
   }
-  if (!dirty && next.status.toLowerCase() !== 'idle') {
+  if ((firstState || newSceneSelection || (yolo.disabled && yolo.checked)) || (!dirty && next.status.toLowerCase() !== 'idle')) {
     document.querySelector<HTMLInputElement>(`input[name="mode"][value="${next.mode}"]`)!.checked = true;
-    document.querySelector<HTMLInputElement>(`input[name="perception"][value="${next.perception_mode}"]`)!.checked = true;
+    document.querySelector<HTMLInputElement>(`input[name="perception"][value="${yolo.disabled ? 'analytic-development' : next.perception_mode}"]`)!.checked = true;
   }
   $('clock').textContent = `${number(next.time)} s`;
   $('evacuated').textContent = number(next.metrics.evacuated, 0);
   $('population').textContent = `/ ${next.scenario.survivors.length} people`;
-  $('unresolved-note').textContent = next.status === 'unresolved' ? 'unresolved: remaining people not confirmed absent' : next.holding ? 'holding: no viable route yet' : '';
+  const casualties = next.survivors.filter(person => person.status === 'casualty').length;
+  const searched = next.searched_rooms?.length ?? next.metrics.rooms_inspected ?? 0;
+  const missionNote = next.status === 'unresolved' ? ' · Unresolved' : next.holding ? ' · Holding' : '';
+  $('unresolved-note').textContent = `· ${searched} rooms searched${casualties ? ` · ${casualties} casualties` : ''}${missionNote}`;
+
   $('exposure').textContent = number(next.metrics.exposure, 2);
   $('distance').textContent = number(next.metrics.distance, 2);
   $('route-note').textContent = `${next.metrics.route_changes ?? 0} changes · ${next.metrics.rooms_inspected ?? 0} rooms inspected` +
@@ -484,9 +494,10 @@ async function poll(): Promise<void> {
   try {
     const next = await api<unknown>('state', undefined, AbortSignal.timeout(4000));
     validateState(next);
-    if (!scene || scene.id !== next.scene_id) { state = next; await loadScene(); }
+    const newSceneSelection = !scene || scene.id !== next.scene_id;
+    if (newSceneSelection) { state = next; await loadScene(); }
     if (view === 'belief') belief = await api<Observation>('observations', undefined, AbortSignal.timeout(4000));
-    acceptState(next);
+    acceptState(next, newSceneSelection);
     if (next.frame_request && next.frame_request.seq !== lastFrameSeq && !frameInFlight) void sendFrame(next);
   } catch (error) {
     if (connected || !state) {
@@ -842,6 +853,8 @@ function drawHazardField(): void {
   smokeField.texture.needsUpdate = true;
 }
 
+const casualtyMaterial = new THREE.MeshBasicMaterial({ color: '#ed3445', side: THREE.DoubleSide });
+
 function placeAvatars(): void {
   if (!scene || !state) return;
   const editing = state.status.toLowerCase() === 'idle';
@@ -862,6 +875,12 @@ function placeAvatars(): void {
     } else {
       avatar.position.copy(toThree(x, y, 0));
       avatar.rotation.y = hashAngle(person.id);
+    }
+    if (person.status === 'casualty' && view !== 'belief') {
+      const marker = new THREE.Mesh(new THREE.RingGeometry(.18, .25, 24), casualtyMaterial.clone());
+      marker.rotation.x = -Math.PI / 2;
+      marker.position.copy(toThree(x, y, .035));
+      dynamicLayer.add(operatorOnly(marker));
     }
     // Operator view hides people in robot-belief mode; the rendered camera always sees them.
     avatar.traverse(o => { o.layers.set(0); if (view === 'belief') o.layers.disable(0), o.layers.enable(CAMERA_ONLY_LAYER); });

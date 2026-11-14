@@ -94,7 +94,7 @@ def test_cornered_escort_takes_least_fire_route_after_timeout():
 def test_no_viable_escort_route_reports_unresolved():
     s=Simulation();s.status='running';p=s.survivors[0]
     s.robot=tuple(p['position']);d=s.add_evidence(s.scene.world(p['position']),1.,'test')
-    s.pair();assert s.escort==p['id'] and d['status']=='escorting'
+    s.pair();assert s.escort=={p['id']:d['id']} and d['status']=='escorting'
     s.observed=s.grid();s.sense=lambda:None;s.tick()
     assert s.status=='running' and s.holding                 # waits: upstream fire can burn out
     assert 'holding' in s.events[-1]['message']
@@ -146,3 +146,23 @@ def test_prior_ignores_survivor_placements_and_validates_use():
     assert a.prior==b.prior
     with pytest.raises(ValueError,match='building use'):
         Simulation(s,dict(scene_id='prior-test',survivors=[],ignitions=[],seed=1,building_use='casino'))
+
+def test_two_nearby_confirmed_survivors_escort_together():
+    sim = Simulation(scenario=dict(survivors=[[3,6],[3,7],[4,6]], ignitions=[], seed=1))
+    sim.robot = (3,6)
+    first = sim.add_evidence(sim.scene.world((3,6)), 1., 'analytic-fixture')
+    second = sim.add_evidence(sim.scene.world((3,7)), 1., 'analytic-fixture')
+    sim.pair()
+    assert set(sim.escort.values()) == {first['id'], second['id']}
+    assert sim.survivors[2]['status'] == 'unobserved'
+
+    sim.status = 'running'
+    sim.observed[:] = 1
+    sim.sense = lambda: None
+    for _ in range(50):
+        sim.tick()
+        if sim.metrics['evacuated']:
+            break
+    assert sim.metrics['evacuated'] == 2
+    assert not sim.escort
+    assert sim.survivors[2]['status'] == 'unobserved'
