@@ -11,7 +11,7 @@ type Cell = [number, number];
 type Mode = 'adaptive' | 'baseline';
 type Perception = 'image-yolo' | 'analytic-development';
 type Tool = 'inspect' | 'survivor' | 'immobile' | 'fire' | 'remove';
-interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string; immobile?: Cell[]; comms_outages?: [number, number][]; room_risk?: Record<string, string> }
+interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string; immobile?: Cell[]; comms_outages?: [number, number][]; room_risk?: Record<string, string>; incident_room?: string }
 interface CostarField { key: string; label: string; value: unknown; units: string | null; field_path: string; source_id: number; dataset: string; derivation: string; note?: string }
 interface SceneData {
   id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
@@ -30,6 +30,7 @@ interface DetectionEntry { id: string; position: [number, number]; cell: Cell; c
 interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
 interface Paired { experiment?: Record<string, unknown>; status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
+  incident?: { origin: Cell; debris: Cell | null; breached?: Cell[]; time: number } | null;
   vision_installed?: boolean;
   sprinkler?: { radius_m: number; origin: Cell; cells: Cell[] } | null;
   fire?: number[][];
@@ -37,7 +38,7 @@ interface SimState {
   hazard_sensor?: { radius_m: number; source_distance_m: number | null;
     source_heat_intensity: number | null; smoke_intensity: number };
   scene_id: string; scenario: Scenario; time: number; status: string; robot: Cell; heading: number; pose: Pose;
-  survivors: { id: string; position: Cell; status: string }[];
+  survivors: { id: string; position: Cell; status: string; injured?: boolean }[];
   heat: number[][]; smoke: number[][]; observed: number[][]; route: Cell[];
   events: { time: number; message: string }[]; metrics: Record<string, number>; mode: Mode; perception_mode: Perception;
   detections: DetectionEntry[]; frame_request: { seq: number; time: number; pose: Pose } | null; degraded: boolean; scanning: boolean;
@@ -70,7 +71,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const number = (value: number, digits = 1): string => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 const same = (a: Cell, b: Cell): boolean => a[0] === b[0] && a[1] === b[1];
-const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}), ...(value.immobile?.length ? { immobile: value.immobile.map(p => [...p] as Cell) } : {}), ...(value.comms_outages?.length ? { comms_outages: value.comms_outages.map(o => [...o] as [number, number]) } : {}), ...(value.room_risk && Object.keys(value.room_risk).length ? { room_risk: { ...value.room_risk } } : {}) });
+const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}), ...(value.immobile?.length ? { immobile: value.immobile.map(p => [...p] as Cell) } : {}), ...(value.comms_outages?.length ? { comms_outages: value.comms_outages.map(o => [...o] as [number, number]) } : {}), ...(value.room_risk && Object.keys(value.room_risk).length ? { room_risk: { ...value.room_risk } } : {}), ...(value.incident_room ? { incident_room: value.incident_room } : {}) });
 const key = (p: Cell): string => `${p[0]},${p[1]}`;
 
 $('app').innerHTML = `
@@ -141,6 +142,7 @@ $('app').innerHTML = `
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label title="Mark or unmark a placed survivor as unable to follow the robot (checked on contact)"><input name="tool" type="radio" value="immobile" /><span><b aria-hidden="true">♿</b>Can't walk</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
           <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
+          <label class="seed-label" for="incident-room">Kitchen incident location <select id="incident-room"><option value="">Off</option></select></label>
           <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
         </section>
         <section class="panel compare-callout"><h2>Compare runs</h2><p id="compare-text" class="field-hint">Distance-only vs risk-aware from the same frozen scenario, sensors, hazard model and safety rules.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">For a CoStar workload, select a capacity preset, Apply it, then compare. The report includes its source field and scenario hash.</p></section>
@@ -188,8 +190,37 @@ const background = new THREE.Color('#0d151f');
 world.background = background;
 const staticLayer = new THREE.Group();
 const dynamicLayer = new THREE.Group();
+const incidentEffect = operatorOnly(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { age: { value: 0 } },
+  vertexShader: `
+    varying vec2 p;
+    void main() {
+      p = uv * 2.0 - 1.0;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: `
+    varying vec2 p;
+    uniform float age;
+    void main() {
+      float r = length(p);
+      float flash = exp(-14.0 * r * r - 5.0 * age);
+      float shell = (r - 0.62) * (r - 0.62);
+      float wave = exp(-105.0 * shell - 2.5 * age);
+      vec2 cloud = p + 0.12 * vec2(sin(p.y * 19.0), cos(p.x * 15.0));
+      float smoke = exp(-5.0 * dot(cloud, cloud)) * smoothstep(0.0, 0.5, age);
+      float edge = 1.0 - smoothstep(0.75, 1.0, r);
+      vec3 color = mix(vec3(0.40, 0.42, 0.44), vec3(1.0, 0.55, 0.12), clamp(wave + flash, 0.0, 1.0));
+      gl_FragColor = vec4(mix(color, vec3(1.0, 0.96, 0.8), flash),
+        edge * max(max(flash, wave), smoke * 0.55) * (1.0 - smoothstep(0.65, 1.0, age)));
+    }`,
+})));
+incidentEffect.visible = false;
+incidentEffect.renderOrder = 6;
+let incidentStarted = 0;
+let shownIncident = '';
 const avatarLayer = new THREE.Group();
-world.add(staticLayer, dynamicLayer, avatarLayer);
+world.add(staticLayer, dynamicLayer, avatarLayer, incidentEffect);
 const hemi = new THREE.HemisphereLight(0xf2f6ff, 0x5b5248, 2.2);
 const sunlight = new THREE.DirectionalLight(0xffffff, 1.6);
 sunlight.position.set(-10, 30, 15);
@@ -203,6 +234,9 @@ const layers = { fire: true, heat: false, smoke: true, observed: false, route: t
 // Upstream PR #1 hazard rendering: textured heat (floor) and banded smoke (near ceiling) fields,
 // instanced smoke clouds and flame cones. Fields/clouds are operator-only; flames are physical (camera sees them).
 const wallLayer = new THREE.Group();
+let gridWallMesh: THREE.InstancedMesh | undefined;
+let gridWallIndices = new Map<string, number>();
+let shownBreach = '';
 const obstacleLayer = new THREE.Group();  // operator-only furniture/source-wall cells
 world.add(obstacleLayer);
 const riskLayer = new THREE.Group();  // operator-only room fire-risk tint
@@ -322,6 +356,7 @@ function validateScenario(value: unknown): Scenario {
       seen.add(key(cell));
     }
   }
+  if (candidate.incident_room !== undefined && !scene.rooms.some(room => room.id === candidate.incident_room)) throw new Error('Select a room in the current floor plan.');
   return { ...copyScenario(candidate), scene_id: scene.id };
 }
 
@@ -355,6 +390,9 @@ function syncUI(): void {
   document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => { input.disabled = input.value !== 'inspect' && !editable; });
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => { b.disabled = !editable || b.dataset.unavailable === '1'; });
   ($('seed') as HTMLInputElement).disabled = !editable;
+  const incidentRoom = $<HTMLSelectElement>('incident-room');
+  incidentRoom.disabled = !editable || !scene?.rooms.length;
+  incidentRoom.value = draft?.incident_room ?? '';
   ($('apply') as HTMLButtonElement).disabled = !editable || !dirty;
   ($('discard') as HTMLButtonElement).disabled = busy || !dirty;
   ($('import') as HTMLButtonElement).disabled = !editable;
@@ -381,6 +419,8 @@ async function loadScene(): Promise<void> {
   await loadPresets();
   const list = await api<{ id: string; name: string; source: string; checks_passed: boolean | null }[]>('scenes');
   ($('scene-select') as HTMLSelectElement).innerHTML = list.map(s => `<option value="${escape(s.id)}"${s.id === scene!.id ? ' selected' : ''}>${escape(s.name)}${s.source === 'synthetic' ? ' (synthetic)' : ''}</option>`).join('');
+  $<HTMLSelectElement>('incident-room').replaceChildren(new Option('Off', ''),
+    ...scene.rooms.filter(room => room.cells.length).map(room => new Option(room.label ?? room.name, room.id)));
 }
 
 interface BuildingUses { inferred: string; source: string; profiles: { id: string; label: string; rationale: string }[] }
@@ -695,6 +735,9 @@ function buildStaticScene(): void {
   $('camera-status').textContent = 'Waiting for this scene’s camera frame';
   clearGroup(staticLayer);
   clearGroup(wallLayer);
+  gridWallMesh = undefined;
+  gridWallIndices = new Map();
+  shownBreach = '';
   avatars.forEach(a => avatarLayer.remove(a));
   avatars.clear();
   if (!scene) return;
@@ -747,7 +790,11 @@ function buildStaticScene(): void {
     if (exposed.length) {
       const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(res, wallHeight, res), new THREE.MeshStandardMaterial({ color: '#acb4b8', roughness: 0.85 }), exposed.length);
       const matrix = new THREE.Matrix4();
-      exposed.forEach((cell, i) => mesh.setMatrixAt(i, matrix.makeTranslation(position(cell, wallHeight / 2))));
+      exposed.forEach((cell, i) => {
+        gridWallIndices.set(key(cell), i);
+        mesh.setMatrixAt(i, matrix.makeTranslation(position(cell, wallHeight / 2)));
+      });
+      gridWallMesh = mesh;
       wallLayer.add(mesh);
     }
     applyWallLayer();
@@ -858,9 +905,11 @@ function drawHazardField(): void {
   focusCell = null;
   const smokeBand = (value: number) => value >= 0.5 ? 3 : value >= 0.2 ? 2 : value >= 0.015 ? 1 : 0;
   const smokeColors = [[0, 0, 0, 0], [212, 221, 229, 130], [173, 186, 201, 180], [129, 144, 161, 225]];
+  const breached = new Set(state.incident?.breached?.map(key));
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
-      if (blockedCells.has(key([col, row]))) continue;
+      const cellKey = key([col, row]);
+      if (blockedCells.has(cellKey) && !breached.has(cellKey)) continue;
       const heat = heatGrid[row]?.[col] ?? 0;
       const density = smokeGrid[row]?.[col] ?? 0;
       const smoke = smokeBand(density);
@@ -931,7 +980,7 @@ const casualtyMaterial = new THREE.MeshBasicMaterial({ color: '#ed3445', side: T
 function placeAvatars(): void {
   if (!scene || !state) return;
   const editing = state.status.toLowerCase() === 'idle';
-  const people: { id: string; position: Cell; status: string }[] = editing && draft
+  const people: SimState['survivors'] = editing && draft
     ? draft.survivors.map((p, i) => ({ id: `person-${i}`, position: p, status: 'unobserved' }))
     : state.survivors;
   const keep = new Set<string>();
@@ -949,8 +998,10 @@ function placeAvatars(): void {
       avatar.position.copy(toThree(x, y, 0));
       avatar.rotation.y = hashAngle(person.id);
     }
-    if (person.status === 'casualty' && view !== 'belief') {
-      const marker = new THREE.Mesh(new THREE.RingGeometry(.18, .25, 24), casualtyMaterial.clone());
+    if ((person.status === 'casualty' || person.injured) && view !== 'belief') {
+      const material = casualtyMaterial.clone();
+      if (person.status !== 'casualty') material.color.set('#fbb946');
+      const marker = new THREE.Mesh(new THREE.RingGeometry(.18, .25, 24), material);
       marker.rotation.x = -Math.PI / 2;
       marker.position.copy(toThree(x, y, .035));
       dynamicLayer.add(operatorOnly(marker));
@@ -964,8 +1015,43 @@ function placeAvatars(): void {
 function drawDynamic(): void {
   clearGroup(dynamicLayer);
   if (!state || !scene) return;
+  const breach = state.incident?.breached ?? [];
+  const signature = breach.map(key).join('|');
+  if (gridWallMesh && signature !== shownBreach) {
+    const removed = new Set(breach.map(key));
+    const matrix = new THREE.Matrix4();
+    for (const cell of scene.walls) {
+      const index = gridWallIndices.get(key(cell));
+      if (index === undefined) continue;
+      if (removed.has(key(cell))) matrix.makeScale(0, 0, 0);
+      else matrix.makeTranslation(position(cell, wallHeightOf() / 2));
+      gridWallMesh.setMatrixAt(index, matrix);
+    }
+    gridWallMesh.instanceMatrix.needsUpdate = true;
+    shownBreach = signature;
+  }
   drawHazardField();
   placeAvatars();
+  for (const cell of breach) operatorOnly(cellBox(dynamicLayer, cell, .9, .025, '#c68948', .04));
+  if (state.incident?.debris) {
+    const debris = new THREE.Mesh(new THREE.BoxGeometry(scene.resolution * .85, .38, scene.resolution * .85),
+      new THREE.MeshStandardMaterial({ color: '#78594a', roughness: .95 }));
+    debris.position.copy(position(state.incident.debris, .19));
+    debris.rotation.y = .35;
+    dynamicLayer.add(debris);
+  }
+  if (!state.incident) {
+    shownIncident = '';
+    incidentEffect.visible = false;
+  } else {
+    const incidentKey = `${state.scene_id}:${state.incident.time}:${key(state.incident.origin)}`;
+    if (shownIncident !== incidentKey) {
+      shownIncident = incidentKey;
+      incidentStarted = performance.now();
+      incidentEffect.position.copy(position(state.incident.origin, 1));
+      incidentEffect.visible = state.time - state.incident.time <= 1.5;
+    }
+  }
   if (layers.route && state.route.length > 0) {
     const material = new THREE.MeshBasicMaterial({ color: '#55e3c2' });
     const points = [state.robot, ...state.route];
@@ -1209,6 +1295,13 @@ function setupRenderer(): void {
       smokeClouds.material.uniforms.clock.value = clock;
       if (document.hidden || !renderer || !camera) return;
       controls?.update();
+      if (incidentEffect.visible) {
+        const age = Math.max(0, (now - incidentStarted) / 1900);
+        incidentEffect.visible = age < 1;
+        incidentEffect.quaternion.copy(camera.quaternion);
+        incidentEffect.scale.setScalar(reducedMotion.matches ? 2 : .8 + 3.5 * age);
+        incidentEffect.material.uniforms.age.value = age;
+      }
       sourceCutaway.constant = cutawayOn ? cutawayHeight : NO_CUT;
       flames.visible = layers.fire;
       try { renderer.render(world, camera); }
@@ -1402,6 +1495,14 @@ $('apply-cell').addEventListener('click', () => {
 $('seed').addEventListener('input', () => {
   if (!draft || !idle() || busy) return;
   draft.seed = ($('seed') as HTMLInputElement).valueAsNumber;
+  dirty = true;
+  syncUI();
+});
+$('incident-room').addEventListener('change', () => {
+  if (!draft || !idle() || busy) return;
+  const room = $<HTMLSelectElement>('incident-room').value;
+  if (room) draft.incident_room = room;
+  else delete draft.incident_room;
   dirty = true;
   syncUI();
 });

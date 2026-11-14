@@ -75,7 +75,7 @@ Open the Vite localhost URL. Place survivors and ignition points, run either pol
 
 For a faster demo, start the app with `RESCUETWIN_RUN_SPEED=2 ./setup.sh`. This targets twice the normal wall-clock pace with the same simulation timestep. Browser-rendered camera frames, inference, and simulation compute can limit the actual pace.
 
-To start directly on a local annotated floor plan, use `./setup.sh --environment /path/to/floor_plan.json`. This starts the same services with analytic development perception and skips fetching a Matterport scene or detector weights.
+To start directly on a local annotated floor plan, use `./setup.sh --environment /path/to/floor_plan.json`. The run starts with analytic development perception selected. If a local YOLO model exists at `data/weights/yolo26n.pt` or `yolo26n.pt`, setup warms it before opening the viewer. You can also set `YOLO_WEIGHTS` to another local model and select **YOLO · RGB-D** in the viewer before starting a run.
 
 ```bash
 .venv/bin/python -m pytest -q

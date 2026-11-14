@@ -94,6 +94,7 @@ def load_detector():
         model = PersonDetector()
         model.detect(Image.new('RGB', (512, 384), 'gray'))   # warm-up: first GPU inference is slow
         detector = model
+        detector_error = None
     except Exception as error:   # weights unavailable, etc.
         detector_error = f'{type(error).__name__}: {error}'[:300]
     return detector
@@ -201,6 +202,7 @@ class Scenario(BaseModel):
     immobile:list[list[int]]=Field(default_factory=list,max_length=20)
     comms_outages:list[list[float]]=Field(default_factory=list,max_length=10)
     room_risk:dict[str,str]=Field(default_factory=dict,max_length=200)
+    incident_room:str|None=None
 
 class Control(BaseModel):
     action:str
@@ -238,7 +240,7 @@ def observations():return sim.observations()
 def scene_list():return [s.summary() for s in scenes.values()]
 
 @app.get('/api/scene')
-def scene():return sim.scene.public()
+def scene():return sim.base_scene.public()
 
 @app.post('/api/environment')
 def environment(body: dict):
@@ -328,7 +330,7 @@ def scenario(body:Scenario):
     global sim
     if sim.status!='idle' or sim.hazards_running or busy():raise HTTPException(409,'Reset before editing a scenario')
     data=body.model_dump();data['scene_id']=data['scene_id'] or sim.scene.id
-    for key in ('building_use','immobile','comms_outages','room_risk'):
+    for key in ('building_use','immobile','comms_outages','room_risk','incident_room'):
         if not data.get(key):data.pop(key,None)   # unset fields stay out, so existing scenario hashes are unchanged
     try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
     except ValueError as e:raise HTTPException(422,str(e)) from e
@@ -343,7 +345,7 @@ def control(body:Control):
     if body.perception=='image-yolo' and not VISION_AVAILABLE:raise HTTPException(422,'Vision extra not installed')
     if body.action=='reset':
         cancel_paired()
-        sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode)
+        sim=Simulation(sim.base_scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode)
     elif body.action=='start':
         if sim.status not in ('idle','paused'):raise HTTPException(409,'Reset a finished run first')
         if sim.status!='idle' and ((body.mode and body.mode!=sim.mode) or (body.perception and body.perception!=sim.perception_mode)):
@@ -380,7 +382,7 @@ def acknowledge_report(report_id:str):
 async def comparison(body:CompareRequest|None=None):
     global paired,sim
     perception=(body.perception if body else None) or sim.perception_mode
-    scene,scenario=sim.scene,deepcopy(sim.scenario)
+    scene,scenario=sim.base_scene,deepcopy(sim.scenario)
     if perception=='analytic-development':
         report=await asyncio.to_thread(compare,scene,scenario,perception)
         report['experiment']=presets.experiment_context(scene,scenario)

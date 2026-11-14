@@ -52,6 +52,52 @@ def test_fire_spreads_through_opening_and_ignition_cannot_jump_wall():
     assert opened.smoke[:, 4:].max() > .015
 
 
+def test_seeded_room_incident_ignites_cells_and_reset_clears_debris():
+    scene = fixture()
+    scenario = dict(survivors=[], ignitions=[], seed=7, incident_room='room-0')
+    results = []
+    for _ in range(2):
+        sim = Simulation(scene, scenario)
+        sim.status = 'running'
+        while sim.incident is None and sim.time < 6:
+            sim.tick()
+        assert sim.incident is not None
+        x, y = sim.incident['origin']
+        assert sim.fire[y, x] > 0 and sim.smoke[y, x] > 0
+        debris = sim.incident['debris']
+        assert debris and not sim.scene.free(debris)
+        assert debris not in sim.route
+        assert Simulation(sim.base_scene, scenario).scene.free(debris)
+        results.append(sim.incident)
+    assert results[0] == results[1]
+
+
+def test_incident_opens_partition_and_affects_people():
+    scene = Scene(width=9, height=7, walls={(4, y) for y in range(7)},
+                  exits=[(0, 3)], rooms=[dict(id='kitchen', name='Kitchen', cells=[(3, 3)])])
+    scenario = dict(survivors=[[3, 3], [5, 3]], ignitions=[], seed=7, incident_room='kitchen')
+    sim = Simulation(scene, scenario)
+    sim.time = 6
+    sim.advance_incident()
+    assert (4, 3) in sim.incident['breached']
+    assert sim.scene.free((4, 3)) and not scene.free((4, 3))
+    assert sim.survivors[0]['status'] == 'casualty'
+    assert sim.survivors[1]['injured'] and (5, 3) not in sim.immobile
+    sim.robot = (5, 3)
+    sim.observed[:] = 1
+    sim.detections = [dict(id='d1', cell=(5, 3), position=scene.world((5, 3)), status='confirmed')]
+    sim.pair()
+    assert sim.survivors[1]['status'] == 'escorting'
+    sim.heat.fill(0)
+    sim.smoke.fill(0)
+    sim.status = 'running'
+    for _ in range(100):
+        sim.tick()
+        if sim.status != 'running':
+            break
+    assert sim.survivors[1]['status'] == 'evacuated'
+
+
 def test_automatic_sprinkler_extinguishes_nearby_fire_without_crossing_wall():
     scene = fixture()
     scene.default_material = 'inert'

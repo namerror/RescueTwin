@@ -3,7 +3,7 @@
 All tunables are metric so a 0.5 m synthetic grid and a 0.25 m scanned grid behave alike.
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import heapq
 import math
@@ -205,11 +205,19 @@ def angle_diff(a, b):
 class Simulation:
     def __init__(self,scene=None,scenario=None,mode='adaptive',perception='analytic-development'):
         self.scene=scene or fixture()
+        self.base_scene = self.scene
         default=dict(survivors=[[26,6],[15,18]],ignitions=[[25,18]],seed=7) if self.scene.id=='development-apartment' else dict(survivors=[],ignitions=[],seed=7)
         self.scenario=deepcopy(scenario or default)
         self.scenario.setdefault('scene_id',self.scene.id)
         if self.scenario['scene_id']!=self.scene.id: raise ValueError('Scenario belongs to a different scene')
         self.validate(self.scenario)
+        self.incident = None
+        self.incident_plan = None
+        if room_id := self.scenario.get('incident_room'):
+            room = next(room for room in self.scene.rooms if room['id'] == room_id)
+            cells = sorted({tuple(cell) for cell in room['cells'] if self.scene.free(cell)})
+            incident_rng = random.Random(self.scenario['seed'])
+            self.incident_plan = (incident_rng.uniform(2., 6.), incident_rng.choice(cells), incident_rng)
         if perception not in CONFIRM_HITS: raise ValueError('Unknown perception mode')
         self.mode=mode;self.perception_mode=perception;self.time=0.;self.status='idle'
         self.robot=tuple(self.scene.robot_start or self.scene.exits[0]);self.heading=0.;self.progress=0.
@@ -279,6 +287,12 @@ class Simulation:
     def grid(self,value=0.): return np.full((self.scene.height,self.scene.width),float(value))
 
     def validate(self,scenario):
+        room_id = scenario.get('incident_room')
+        if room_id is not None and not any(
+            room['id'] == room_id and any(self.scene.free(cell) for cell in room['cells'])
+            for room in self.scene.rooms
+        ):
+            raise ValueError('Incident room must contain a walkable cell in this scene')
         if not isinstance(scenario.get('seed'),int): raise ValueError('seed must be an integer')
         for key in ('survivors','ignitions'):
             points=scenario.get(key)
@@ -306,6 +320,81 @@ class Simulation:
         self.events.append(dict(time=round(self.time,2),message=message));self.events=self.events[-100:]
 
     # ---------------------------------------------------------------- hazards
+    def advance_incident(self):
+        if self.incident_plan is None or self.incident is not None:
+            return
+        scheduled, origin, rng = self.incident_plan
+        if self.time < scheduled:
+            return
+        neighbours = sorted(self.scene.neighbors(origin))
+        rng.shuffle(neighbours)
+        exterior = set(map(tuple, self.scene.meta.get('exterior', ())))
+        # Open a grid passage where a short run of wall cells separates indoor floor.
+        candidates = []
+        for x, y in sorted(self.scene.walls - exterior):
+            distance = abs(x - origin[0]) + abs(y - origin[1])
+            if distance > 9:
+                continue
+            for dx, dy in ((1, 0), (0, 1)):
+                if not self.scene.free((x - dx, y - dy)):
+                    continue
+                strip = []
+                for offset in range(4):
+                    cell = (x + dx * offset, y + dy * offset)
+                    if cell in exterior:
+                        break
+                    if self.scene.free(cell):
+                        candidates.append((distance, (x, y), (dy, dx), strip))
+                        break
+                    if cell not in self.scene.walls:
+                        break
+                    strip.append(cell)
+        breached = set()
+        if candidates:
+            _, (x, y), tangent, strip = min(candidates)
+            tx, ty = tangent
+            breached.update(strip)
+            for _, cell, direction, adjacent in candidates:
+                if direction == tangent and cell in {(x - tx, y - ty), (x + tx, y + ty)}:
+                    breached.update(adjacent)
+        occupied = {self.robot, *map(tuple, self.scene.exits),
+                    *(person['position'] for person in self.survivors)}
+        debris = next((cell for cell in neighbours if cell not in occupied), None)
+        self.scene = replace(self.scene, walls=(self.scene.walls - breached) | ({debris} if debris else set()))
+        for x, y in breached:
+            self.free[y, x] = True
+        if debris is not None:
+            x, y = debris
+            self.free[y, x] = False
+            self.heat[y, x] = self.smoke[y, x] = self.fuel[y, x] = 0.
+            self.fire[y, x] = 0.
+            self.ignition_strength[y, x] = 0.
+        self.diffusion_edges = (
+            self.free[1:, :] & self.free[:-1, :],
+            self.free[:, 1:] & self.free[:, :-1],
+        )
+        self.spray_origin = None
+        affected = {origin, *neighbours}
+        for wall_cell in breached:
+            affected.update(self.scene.neighbors(wall_cell))
+        if debris:
+            affected.discard(debris)
+        for x, y in affected:
+            self.ignition_cells.add((x, y))
+            self.heat[y, x] = max(self.heat[y, x], UPSTREAM_IGNITION_HEAT)
+            self.fire[y, x] = max(self.fire[y, x], UPSTREAM_IGNITION_HEAT)
+            self.smoke[y, x] = max(self.smoke[y, x], .35)
+        injured = 0
+        for person in self.survivors:
+            if person['status'] in ('evacuated', 'casualty') or person['position'] not in affected:
+                continue
+            person['injured'] = True
+            injured += 1
+            if person['position'] == origin:
+                self.mark_casualty(person)
+        self.incident = dict(origin=origin, debris=debris, breached=sorted(breached), time=round(self.time, 2))
+        self.log(f'Kitchen incident: {len(breached)} wall cells opened, {injured} people affected.')
+
     def automatic_sprinkler(self):
         """Use local heat and flame readings within the nozzle's unobstructed reach."""
         if self.robot != self.spray_origin:
@@ -718,6 +807,7 @@ class Simulation:
     def tick(self,dt=.2):
         if self.status!='running' or self.needs_frame():return
         self.time+=dt;self.steps+=1;self.hazards(dt)
+        self.advance_incident()
         if self.scan_remaining>0:
             turn=min(self.scan_remaining,SCAN_RATE*dt);self.heading=(self.heading+turn)%(2*math.pi);self.scan_remaining-=turn
             if self.scan_remaining<=1e-9:self.scan_done()
@@ -817,14 +907,17 @@ class Simulation:
             self.heat_dose[person_id] += float(dt * max(0., heat - ESCORT_HEAT_LIMIT))
             if self.heat_dose[person_id] < FATAL_HEAT_DOSE:
                 continue
-            person['status'] = 'casualty'
-            detection_id = self.escort.pop(person_id, None)
-            if detection_id is not None:
-                next(d for d in self.detections if d['id'] == detection_id)['status'] = 'casualty'
-                self.version += 1
-                if not self.escort:
-                    self.escort_blocked_since = None
-                    self.assistance_requested = False
+            self.mark_casualty(person)
+
+    def mark_casualty(self, person):
+        person['status'] = 'casualty'
+        detection_id = self.escort.pop(person['id'], None)
+        if detection_id is not None:
+            next(d for d in self.detections if d['id'] == detection_id)['status'] = 'casualty'
+            self.version += 1
+            if not self.escort:
+                self.escort_blocked_since = None
+                self.assistance_requested = False
 
     def scan_done(self):
         self.scan_remaining = 0.
@@ -908,6 +1001,7 @@ class Simulation:
             public.append(item)
         return dict(scene_id=self.scene.id,scenario=self.scenario,time=round(self.time,2),status=self.status,
                     hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,
+                    incident=self.incident,
                     sprinkler=dict(radius_m=SPRAY_RADIUS_M, origin=self.spray_origin, cells=self.spray_cells)
                     if self.spraying and self.status == 'running' else None,
                     hazard_sensor=self.hazard_sensor(),fire=self.fire.round(3).tolist(),

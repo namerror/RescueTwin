@@ -184,6 +184,7 @@ def available_port(number):
 
 def serve(python, env, sid, backend, frontend, environment_file=None):
     env = dict(env, RESCUETWIN_SCENE=sid, RESCUETWIN_DATA=str(ROOT/'data/prepared'), RESCUETWIN_API_URL=f'http://127.0.0.1:{backend}')
+    preload_vision = env.get('RESCUETWIN_PRELOAD_DETECTOR', '1') == '1'
     children = []
     def stop(signum, frame): raise KeyboardInterrupt
     old = {s: signal.signal(s, stop) for s in (signal.SIGINT, signal.SIGTERM)}
@@ -195,9 +196,9 @@ def serve(python, env, sid, backend, frontend, environment_file=None):
             try:
                 with urllib.request.urlopen(f'http://127.0.0.1:{backend}/api/scene', timeout=2) as response: scene = json.load(response)
                 with urllib.request.urlopen(f'http://127.0.0.1:{backend}/api/perception', timeout=2) as response: vision = json.load(response)
-                if scene['id'] != sid or (environment_file is None and not vision['vision_installed']): raise RuntimeError('Backend scene/vision readiness mismatch')
-                if environment_file is None and vision.get('error'): raise RuntimeError('YOLO initialization failed; check weights and vision dependencies')
-                if environment_file is None and env.get('RESCUETWIN_PRELOAD_DETECTOR', '1') != '0' and not vision.get('detector_loaded'):
+                if scene['id'] != sid or (preload_vision and not vision['vision_installed']): raise RuntimeError('Backend scene/vision readiness mismatch')
+                if preload_vision and vision.get('error'): raise RuntimeError(f"YOLO initialization failed: {vision['error']}")
+                if preload_vision and not vision.get('detector_loaded'):
                     if time.monotonic() >= deadline: raise RuntimeError('YOLO initialization timed out')
                     time.sleep(.2); continue
                 break
@@ -254,7 +255,16 @@ def main():
     if args.environment:
         from rescuetwin.environment import load_environment
         load_environment(args.environment)
-        env['RESCUETWIN_PRELOAD_DETECTOR'] = '0'
+        local_weights = [ROOT/'data/weights/yolo26n.pt', ROOT/'yolo26n.pt']
+        if env.get('YOLO_WEIGHTS'):
+            local_weights = [Path(env['YOLO_WEIGHTS']).resolve()]
+            if not local_weights[0].is_file():
+                raise ValueError('YOLO_WEIGHTS must point to an existing local model')
+        weights = next((path for path in local_weights if path.is_file()), None)
+        if weights is None:
+            env['RESCUETWIN_PRELOAD_DETECTOR'] = '0'
+        else:
+            env['YOLO_WEIGHTS'] = str(weights)
         serve(Path(sys.executable), env, 'development-apartment', backend, frontend, args.environment)
         return
     sid = prepare(model, env)
