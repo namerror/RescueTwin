@@ -21,3 +21,37 @@ Instead of relying on predefined evacuation routes, RescueTwin enables autonomou
 **Turn existing building digital twins into intelligent testing grounds for autonomous robots, allowing emergency-response strategies to be explored and evaluated before real-world deployment.**
 
 Beyond emergency response, the underlying platform could support robotic facility inspection, autonomous navigation benchmarking, and pre-deployment planning for commercial buildings.
+## Development baseline
+
+This repository now includes a **synthetic, illustrative development simulator** and a local scenario editor. It is not yet a validated real-property rehearsal. The runtime uses analytic development sensing; the optional YOLO adapter is not connected to a robot-camera pipeline yet. Hosted Gemini decisions are optional; without credentials the mission uses a deterministic policy.
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[test]'
+uvicorn rescuetwin.api:app --host 127.0.0.1 --port 8000
+```
+
+In another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the Vite localhost URL. Place survivors and ignition points, run either policy, or compare both on identical starting conditions. Exposure is in illustrative units. Use reset before editing. The operator view contains ground truth; `/api/observations` contains robot knowledge only. Keep this development server on localhost; it has no authentication.
+
+```bash
+python3 -m pytest -q
+python3 scripts/inspect_sponsor.py 5p6KKvHqh3W
+python3 scripts/fetch_matterport.py 5p6KKvHqh3W
+```
+
+The sponsor kit is ignored by Git at `data/costar-hackathon-kit`. Fetching source metadata requires the existing Matterport credentials; it does not prepare collision meshes or validate exits.
+
+Optional hosted reasoning: install `pip install -e '.[agent]'`, export `GEMINI_API_KEY` and optionally `GEMINI_MODEL`, then restart the backend. API access/model availability must be verified against your account. Failed or rejected decisions pause the run. For the independent image detector, install `pip install -e '.[vision]'`; weights download on first use.
+
+See [agent setup](AGENTS.md), [architecture](docs/ARCHITECTURE.md), [MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md).
+
+Implemented payloads and current fidelity limits are documented in [runtime contracts](docs/CONTRACTS.md).

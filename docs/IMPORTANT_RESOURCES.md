@@ -12,3 +12,13 @@ The Vexcel API Keys can be used to access and visualize aerial capture data over
   
 ## Vexcel
 - check [downloaded resources](/vexcel_resources/)
+
+## Local resources (ignored by Git)
+
+The downloaded CoStar kit is at `data/costar-hackathon-kit/`. Ordinary `rg --files`
+will omit it; use `rg --files --hidden --no-ignore data/costar-hackathon-kit`.
+Start with its `index.md`, then dataset model docs, schemas, and enum mappings.
+See [AGENTS.md](../AGENTS.md) for joins and credential-name aliases. Never dump `.env`.
+
+Offline inspection: `python3 scripts/inspect_sponsor.py MODEL_ID`.
+Matterport metadata preparation: `python3 scripts/fetch_matterport.py MODEL_ID`.
