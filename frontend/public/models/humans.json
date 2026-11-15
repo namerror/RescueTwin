@@ -1,0 +1,69 @@
+{
+  "schema": "rescuetwin.humans/1",
+  "default": "adult-male",
+  "source": "Microsoft Rocketbox; MIT",
+  "revision": "0943055db6ec570bcef9f2c8b41c9e5467c808f9",
+  "conversion_blender": "5.2.2 LTS",
+  "variants": [
+    {
+      "id": "adult-male",
+      "label": "Adult man",
+      "age_group": "adult",
+      "presentation": "male",
+      "height_m": 1.72,
+      "file": "Survivor.glb",
+      "sha256": "ebe6b1596256f314d1356cfc2f42d28203b5bf1864d0bf139845cb9d13ee6500",
+      "source_asset": "Male_Adult_04"
+    },
+    {
+      "id": "adult-female",
+      "label": "Adult woman",
+      "age_group": "adult",
+      "presentation": "female",
+      "height_m": 1.65,
+      "file": "FemaleAdult.glb",
+      "sha256": "690c67485a1f708035ca692e4ce4f2ae3d3823d32338a20d7b83f80f5c83597d",
+      "source_asset": "Female_Adult_01"
+    },
+    {
+      "id": "child-male",
+      "label": "Boy",
+      "age_group": "child",
+      "presentation": "male",
+      "height_m": 1.3,
+      "file": "MaleChild.glb",
+      "sha256": "2effbb0f02591759eb254ba8ff4dae0eac0bbb89421baa8378378a311daf4b09",
+      "source_asset": "Male_Child_01"
+    },
+    {
+      "id": "child-female",
+      "label": "Girl",
+      "age_group": "child",
+      "presentation": "female",
+      "height_m": 1.25,
+      "file": "FemaleChild.glb",
+      "sha256": "a01ba6daf0560f39d3611311d97846013c46fe923abbdf4157b39d7d5264591f",
+      "source_asset": "Female_Child_01"
+    },
+    {
+      "id": "older-male",
+      "label": "Older man",
+      "age_group": "older-adult appearance",
+      "presentation": "male",
+      "height_m": 1.68,
+      "file": "MaleOlder.glb",
+      "sha256": "f5eb3da7698e6608d6c5fce6cfc92ff90f49b7dde10508bdf53eb9997a1d3b91",
+      "source_asset": "Male_Adult_03"
+    },
+    {
+      "id": "older-female",
+      "label": "Older woman",
+      "age_group": "older-adult appearance",
+      "presentation": "female",
+      "height_m": 1.6,
+      "file": "FemaleOlder.glb",
+      "sha256": "83b1325e333b5e78d4215acda92c697f2566ff61e22cd9b7ab76265d3ef91e99",
+      "source_asset": "Female_Adult_14"
+    }
+  ]
+}

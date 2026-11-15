@@ -2,6 +2,11 @@
 
 ## Current status and first gate
 
+The [textured simulation catalog](PREPARED_MODELS.md) now contains 14 validated
+single-floor scene bundles selectable from the app. The default below is retained;
+the other scenes use their own source geometry, materials, entry annotations and
+CoStar joins. See that page for current catalog verification and scoped corrections.
+
 The default scene is a scanned sponsor property: `9A46aT7FCPg` (1276 W 38th St, unit 2, Floor 1),
 joined to CoStar PropertyId 22572250 and floor plan 6106437. Its collision grid, rooms, single
 verified exit, textured MatterPak mesh and source floor share the Matterport model frame (see

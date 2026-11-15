@@ -99,6 +99,14 @@ main { padding-top: 20px; }
 .page-intro h1 { letter-spacing: -.04em; }
 .panel { border-radius: 5px; }
 #load-map { margin-top: 8px; }
+#prepared-models { margin-top: 8px; }
+#model-library { width: min(1100px, 94vw); max-height: 94dvh; overflow: auto; padding: 20px; color: #dce5f0; background: #111923; border: 1px solid #344455; border-radius: 10px; }
+#model-library::backdrop { background: #03080dcc; }
+.model-library-header, .model-library-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.model-library-header h2 { font-size: 20px; margin: 0 0 12px; }
+#model-library-view { height: clamp(260px, 58dvh, 650px); margin: 12px 0; background: #0d151f; }
+#model-library-view canvas { display: block; width: 100%; touch-action: none; }
+.model-library-actions label { font-size: 12px; }
 @media (min-width: 851px) {
   .viewport { height: clamp(490px, calc(100dvh - 210px), 880px); }
 }

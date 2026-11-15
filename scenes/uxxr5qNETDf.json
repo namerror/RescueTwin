@@ -1,0 +1,35 @@
+{
+  "model": "uxxr5qNETDf",
+  "floor_label": "Floor 1",
+  "property_id": 4025799,
+  "floor_plan_id": null,
+  "resolution": 0.25,
+  "exits": [
+    {
+      "id": "exit-entry",
+      "label": "Unit entry door",
+      "segment": [
+        [
+          -0.5094962925021943,
+          -1.5971797224282207
+        ],
+        [
+          -0.5108579080031381,
+          0.5190876536188489
+        ]
+      ],
+      "evidence": [
+        "pano 0 face 1: Brown unit entry door with peephole, deadbolt and knob",
+        "Source schematic DXF/PNG: matching wall opening; source photo floor plan inspected for SCkUhAc2SSU and uUWZHYgM2yL"
+      ],
+      "verified": "manual source plan/panorama inspection 2026-11-14",
+      "beyond": "assumed available beyond the unit/suite entry; not inspected"
+    }
+  ],
+  "not_exits": [
+    {
+      "label": "Other windows, sliders or unreviewed openings",
+      "reason": "Not accepted as egress endpoints in this rehearsal"
+    }
+  ]
+}

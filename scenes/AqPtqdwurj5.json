@@ -1,0 +1,36 @@
+{
+  "model": "AqPtqdwurj5",
+  "floor_label": "Floor 1",
+  "property_id": null,
+  "residential_listing_id": 236478974,
+  "resolution": 0.25,
+  "exits": [
+    {
+      "id": "exit-front",
+      "label": "Front entry double door",
+      "segment": [
+        [
+          2.901772930901254,
+          2.223359431770115
+        ],
+        [
+          2.9035870864570437,
+          -0.6163997865976284
+        ]
+      ],
+      "evidence": [
+        "pano 1 faces 2\u20133 and pano 3 faces 2\u20133: wooden exterior double door with smart lock; foyer entrance",
+        "Source schematic DXF/PNG: matching double-door opening near pano 1 (3.18, 1.15 m)"
+      ],
+      "verified": "manual source plan and panorama inspection 2026-11-14",
+      "beyond": "outside approach assumed available; not inspected"
+    }
+  ],
+  "not_exits": [
+    {
+      "label": "Other glazing and yard openings",
+      "reason": "Not accepted as egress without separate inspection"
+    }
+  ],
+  "scope_note": "Navigation is limited to seven connected indoor rooms. One bedroom, one bathroom, one closet and one hallway were unreachable on the source-derived floor map and remain blocked; this is not a complete-house rehearsal."
+}

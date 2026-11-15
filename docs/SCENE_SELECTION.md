@@ -1,5 +1,12 @@
 # Scene selection: shortlisted scans (inspected 2026-11-14)
 
+Catalog expansion: all 14 original prepared models now have reviewed entry-door
+annotations and validated textured simulation bundles. See
+[prepared models](PREPARED_MODELS.md) for the full list, source corrections and
+verification. The default remains `9A46aT7FCPg`. The one-verified-entry rehearsal
+assumption applies to each catalog scene; additional unreviewed openings are not
+counted as exits.
+
 Gate from [MVP](MVP.md): two defensible floor-level egress endpoints, connected walkable
 topology. A balcony or window is not an exit. Reject rather than invent geometry.
 

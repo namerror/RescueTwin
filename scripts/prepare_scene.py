@@ -29,7 +29,7 @@ QUERY = '''query($id: ID!) { model(id:$id) { id name
 REQUIRED = ('floors', 'rooms', 'panoLocations', 'bundle', 'assets')
 
 
-def graph(model, attempts=3):
+def graph(model, attempts=3, required=REQUIRED):
     """Query the model graph, retrying responses that omit fields the build depends on."""
     key, token = credentials()
     missing = ()
@@ -49,8 +49,8 @@ def graph(model, attempts=3):
         data = (body.get('data') or {}).get('model')
         if not data:
             raise SystemExit(f'Matterport returned no model for {model}; check the ID and API permissions')
-        missing = tuple(k for k in REQUIRED if data.get(k) is None)
-        if not missing and (data['assets'].get('floorplans') is None):
+        missing = tuple(k for k in required if data.get(k) is None)
+        if not missing and 'floors' in required and (data.get('assets', {}).get('floorplans') is None):
             missing = ('assets.floorplans',)
         if not missing:
             return data
@@ -119,6 +119,25 @@ def room_polygons(data, floor):
         dims = r.get('dimensions') or {}
         rooms.append(dict(id=r['id'], label=label, polygon=max(polys, key=lambda p: p.area) if polys else None,
                           area=dims.get('areaFloor'), height=dims.get('height')))
+    return rooms
+
+
+def apply_room_clips(rooms, clips, panos):
+    """Only remove reviewed unscanned area, retaining every room capture position."""
+    from shapely.geometry import Point, Polygon
+    rooms = [dict(room) for room in rooms]
+    for clip in clips:
+        room = next((r for r in rooms if r['id'] == clip['room_id']), None)
+        polygon = Polygon(clip['polygon'])
+        if room is None or room['polygon'] is None or not polygon.is_valid or not clip.get('evidence'):
+            raise ValueError('Room clip needs an existing polygon, valid bounds and source evidence')
+        clipped = room['polygon'].intersection(polygon)
+        if clipped.is_empty or clipped.geom_type != 'Polygon':
+            raise ValueError('Room clip must retain a connected polygon')
+        points = [Point(p['position']['x'], p['position']['y']) for p in panos]
+        if any(room['polygon'].contains(p) and not clipped.covers(p) for p in points):
+            raise ValueError('Room clip removes a scanned capture position')
+        room['polygon'] = clipped
     return rooms
 
 
@@ -299,7 +318,9 @@ def _build(model, root, annotation_path, kit):
     plans = {p.get('file', ''): p for p in data['assets']['floorplans']}
     schematic = Schematic(src / next(f for f in plans if f.endswith('_schematic.dxf')), src / next(f for f in plans if f.endswith('_schematic.png')))
 
-    rooms = room_polygons(data, floor)
+    rooms = apply_room_clips(room_polygons(data, floor), ann.get('room_clips', []), data['panoLocations'])
+    # Source room graphs can enclose unscanned space behind an entry wall.
+    # Reviewed clips only remove area; they cannot manufacture new floor geometry.
     inside_rooms = [r for r in rooms if r['polygon'] is not None and r['label'] not in (None, 'Void')]
     voids = [r for r in rooms if r['polygon'] is not None and r['label'] == 'Void']
     skipped = [dict(id=r['id'], label=r['label'], reason='no boundary polygon') for r in rooms if r['polygon'] is None]
@@ -333,12 +354,17 @@ def _build(model, root, annotation_path, kit):
         if width < DOOR_MIN_WIDTH:
             raise SystemExit(f"Exit {spec['id']}: schematic opening {width:.2f} m < {DOOR_MIN_WIDTH} m; refusing to invent an exit")
         free = [p for p, k in kind.items() if k == 'free']
-        cell = min(free, key=lambda p: math.dist(center(*p), mid))
+        endpoint = spec.get('endpoint_position', mid)
+        if math.dist(endpoint, mid) > 2 * res:
+            raise ValueError('Exit approach point must stay within two cells of the evidenced opening')
+        cell = min(free, key=lambda p: math.dist(center(*p), endpoint))
         boundary_distance = interior.exterior.distance(Point(*center(*cell)))
         exits.append(dict(id=spec['id'], label=spec['label'], cell=list(cell), position=[round(v, 3) for v in center(*cell)],
                           opening_width_m=round(width, 2), opening_center=[round(v, 3) for v in mid],
                           boundary_distance_m=round(boundary_distance, 3), evidence=spec['evidence'],
                           verified=spec['verified'], beyond=spec['beyond']))
+        if 'endpoint_position' in spec:
+            exits[-1]['approach_offset_m'] = round(math.dist(center(*cell), mid), 3)
 
     if ann.get('robot_start') and kind.get(tuple(ann['robot_start'])) != 'free':
         raise ValueError('Configured robot_start is blocked or outside the scanned floor')
@@ -436,7 +462,11 @@ def _build(model, root, annotation_path, kit):
     checks['passed'] = not failures
     checks['failed'] = failures
 
-    costar = costar_context(kit, model, ann['property_id'], ann['floor_plan_id']) if kit else None
+    if kit and ann.get('residential_listing_id'):
+        from residential_context import context as residential_context
+        costar = residential_context(kit, model, ann['residential_listing_id'])
+    else:
+        costar = costar_context(kit, model, ann['property_id'], ann.get('floor_plan_id')) if kit and ann.get('property_id') else None
     blocked_cells = {k: sorted([list(p) for p, v in kind.items() if v == k]) for k in ('wall', 'exterior', 'void', 'unreachable')}
     if failures:
         raise SystemExit(f'Alignment checks failed: {failures}; scene manifest not replaced')
@@ -471,6 +501,11 @@ def _build(model, root, annotation_path, kit):
         'assumptions': ['Static scanned geometry and perfect localization.', 'Single verified egress endpoint; corridor beyond it assumed available.',
                         'Matterport Void areas treated as blocked (not scanned).', 'Doors are open; door leaves are not modelled.'],
     }
+    if ann.get('room_clips'):
+        scene['provenance'].append(dict(item='navigation floor scope', source=str(annotation_path),
+            derivation='Reviewed source-room polygon clips exclude unscanned space: '+ '; '.join(c['evidence'] for c in ann['room_clips'])))
+    if ann.get('scope_note'):
+        scene['assumptions'].append(ann['scope_note'])
     (out / 'scene.json').write_text(json.dumps(scene))
 
     preview = Image.open(src / photo_name).convert('RGB') if photo_name else Image.new('RGB', (W * 20, H * 20), 'white')

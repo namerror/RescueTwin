@@ -58,7 +58,7 @@ def enum_name(enums,enum,value):
     return enums.get(enum,{}).get(str(value),f'Unmapped ({value})')
 
 
-def context(kit,model,property_id,plan_id):
+def context(kit,model,property_id,plan_id=None):
     """CoStar context with field-level provenance for one verified property/model/floor-plan join."""
     if property_id not in property_ids(kit,model):
         raise ValueError(f'PropertyId {property_id} is not joined to model {model} in commercial-properties.csv')
@@ -66,9 +66,11 @@ def context(kit,model,property_id,plan_id):
     if record is None:raise ValueError(f'PropertyId {property_id} missing from commercial-property.jsonl')
     enums=json.loads((kit/'schemas/enums.json').read_text())
     plans=(record.get('propertyApartment') or {}).get('models',[])
-    index,plan=next(((i,p) for i,p in enumerate(plans) if p.get('id')==plan_id),(None,None))
-    if plan is None or not contains_model(plan,model):
+    index,plan=next(((i,p) for i,p in enumerate(plans) if p.get('id')==plan_id),(None,None)) if plan_id is not None else (None,{})
+    if plan_id is not None and (plan is None or not contains_model(plan,model)):
         raise ValueError(f'Floor plan {plan_id} does not carry a videoKey attachment for {model}')
+    if not contains_model(record,model):
+        raise ValueError(f'PropertyId {property_id} does not carry a videoKey attachment for {model}')
     source=dict(dataset='commercial-property',source_id=property_id,record_type='CommercialProperty')
 
     def field(key,label,path,value,units=None,derivation='copied',note=None):
@@ -103,10 +105,13 @@ def context(kit,model,property_id,plan_id):
         field('max_occupants','Marketed max occupants',f'{plan_path}.maxOccupants',plan.get('maxOccupants'),'people',note=CAPACITY_NOTE),
     ]
     raw_fields={'property_type':record.get('propertyType'),'apartment_style':(record.get('propertyApartment') or {}).get('apartmentStyleType'),'construction_material':record.get('buildingConstructionMaterial'),'sprinkler_type':record.get('sprinklerType')}
+    if plan_id is None:
+        fields=[entry for entry in fields if entry['key'] not in ('floor_plan','beds','baths','area','max_occupants')]
     for entry in fields:entry['raw_value']=raw_fields.get(entry['key'],entry['value'])
     corroboration=[]
     with (kit/'data/apartment-listing.jsonl').open() as stream:
         for line in stream:
+            if plan_id is None: break
             listing=json.loads(line)
             if listing.get('propertyId') != property_id: continue
             for i, candidate in enumerate(listing.get('apartmentModels') or []):
@@ -118,7 +123,7 @@ def context(kit,model,property_id,plan_id):
     return dict(join_evidence=[dict(dataset='commercial-property',source_id=property_id,field_path=p,value=model) for p in model_references(record,model)],capacity_corroboration=corroboration,capacity_conflicts=conflicts,
                 property_id=property_id,model_id=model,floor_plan_id=plan_id,
                 max_occupants=plan.get('maxOccupants'),fields=fields,
-                join='commercial-properties.csv PropertyId -> commercial-property.id; floor plan videoKey == Matterport model id',
+                join='commercial-properties.csv PropertyId -> commercial-property.id; '+('floor plan videoKey == Matterport model id' if plan_id is not None else 'property attachment videoKey == Matterport model id; no floor-plan capacity inferred'),
                 disclaimer='Real CoStar property record. Capacity is marketed, not actual occupancy. Contacts are excluded.')
 
 

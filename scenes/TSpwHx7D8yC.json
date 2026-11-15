@@ -3,7 +3,7 @@
   "floor_label": "Floor 1",
   "property_id": null,
   "residential_listing_id": 229913690,
-  "costar_note": "Residential listing (residential-listings.csv ListingId 229913690); the commercial CoStar context join does not apply, so the bundle is built without a CoStar property card.",
+  "costar_note": "Exact residential ListingId 229913690 and Matterport media.videoKey join; recorded MLS gas heating, fire sprinkler system and fire/smoke detector attributes. Home-level only; no fixture localization.",
   "floor_plan_id": null,
   "resolution": 0.25,
   "exits": [
@@ -11,8 +11,14 @@
       "id": "exit-entry",
       "label": "Unit entry door",
       "segment": [
-        [5.197039951426432, 3.4492829038332395],
-        [6.844468400396285, 3.450035679791442]
+        [
+          5.197039951426432,
+          3.4492829038332395
+        ],
+        [
+          6.844468400396285,
+          3.450035679791442
+        ]
       ],
       "evidence": [
         "pano 13 face 4: solid unit entry door with deadbolt, door viewer hardware and wall intercom panel",

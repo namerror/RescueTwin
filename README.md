@@ -23,8 +23,9 @@ Instead of relying on predefined evacuation routes, RescueTwin enables autonomou
 Beyond emergency response, the underlying platform could support robotic facility inspection, autonomous navigation benchmarking, and pre-deployment planning for commercial buildings.
 ## Development baseline
 
-This repository runs a search-and-evacuation rehearsal on one scanned sponsor property: Floor 1 of
+This repository defaults to a search-and-evacuation rehearsal on Floor 1 of
 Matterport model `9A46aT7FCPg` (1276 W 38th St, unit 2), joined to its CoStar record and floor plan.
+All 14 prepared catalog models are selectable as textured simulation scenes.
 Real: the property record and scan-derived floor geometry. Synthetic: fire, smoke, people, robot. The unit
 has one verified exit (see `docs/SCENE_SELECTION.md`). Survivors are found by YOLO on robot-camera frames
 rendered in the browser; an analytic fixture detector remains for CI and the synthetic development scene.
@@ -61,7 +62,10 @@ The launcher checks asset hashes and rebuilds incomplete bundles in staging;
 failed preparation leaves the previous bundle intact and stops startup. New model
 IDs require reviewed `scenes/MODEL.json` annotations with verified exits.
 YOLO weights are downloaded only when absent under `data/weights`; `YOLO_WEIGHTS`
-can point to an existing local model. Warm launches use cached assets and perform
+can point to an existing local model. Setup also downloads the pinned survivor GLB into
+`frontend/public/models/Survivor.glb`, verifies its SHA-256, and repairs a missing or
+corrupt cache before starting services. Direct frontend launches require running
+setup first for this asset. Warm launches use cached assets and perform
 no dependency synchronization or asset downloads. Gemini is used when configured;
 otherwise the existing deterministic mission policy runs. A mission starts only
 when the operator requests it in the browser.
@@ -77,6 +81,13 @@ For a faster demo, start the app with `RESCUETWIN_RUN_SPEED=2 ./setup.sh`. This 
 
 To start directly on a local annotated floor plan, use `./setup.sh --environment /path/to/floor_plan.json`. The run starts with analytic development perception selected. If a local YOLO model exists at `data/weights/yolo26n.pt` or `yolo26n.pt`, setup warms it before opening the viewer. You can also set `YOLO_WEIGHTS` to another local model and select **YOLO · RGB-D** in the viewer before starting a run.
 
+**Browse prepared models** opens all locally downloaded scans in a separate 3D
+viewer. All 14 catalog models now have their own textured MatterPak assets and
+validated simulation bundles, selectable directly from **Scene**. **Plan** shows the active scene
+from above. **Import custom floor plan JSON…** loads an annotated custom map;
+it does not open a scan or accept ordinary images/PDFs. See
+[prepared models](docs/PREPARED_MODELS.md).
+
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python scripts/inspect_sponsor.py 9A46aT7FCPg --property 22572250 --plan 6106437
@@ -84,9 +95,9 @@ To start directly on a local annotated floor plan, use `./setup.sh --environment
 .venv/bin/python scripts/prepare_scene.py build 9A46aT7FCPg
 ```
 
-The sponsor kit is ignored by Git at `data/costar-hackathon-kit`. Prepared bundles stay in ignored `data/prepared/`. Exits come only from manual annotations in `scenes/`. Keep the browser tab open during image-mode runs, because it renders the robot camera.
+The sponsor kit is ignored by Git at `data/costar-hackathon-kit`. Prepared bundles stay in ignored `data/prepared/`. Exits come only from manual annotations in `scenes/`. Keep the browser tab open during image-mode runs, because it renders the robot camera. In Operator truth, survivor labels and blue occlusion silhouettes keep simulated people visible through scan walls; **Find survivor** cycles through close-up views. These aids are hidden from Robot belief and excluded from robot RGB-D.
 
-Optional hosted reasoning (dependencies included by setup): export `GEMINI_API_KEY` and optionally `GEMINI_MODEL`, then restart the backend. API access/model availability must be verified against your account. Failed or rejected decisions pause the run. Image perception dependencies and weights are prepared by setup. The survivor model is CesiumMan (CC BY 4.0, Cesium).
+Optional hosted reasoning (dependencies included by setup): export `GEMINI_API_KEY` and optionally `GEMINI_MODEL`, then restart the backend. API access/model availability must be verified against your account. Failed or rejected decisions pause the run. Image perception dependencies and weights are prepared by setup. The survivor model is a textured Microsoft Rocketbox civilian (MIT), fetched automatically by `./setup.sh`; see `frontend/public/models/ATTRIBUTION.md`.
 
 See [agent setup](AGENTS.md), [architecture](docs/ARCHITECTURE.md), [MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md).
 

@@ -1,4 +1,6 @@
 import { hazardSprites } from './hazardSprites';
+import { setupModelLibrary } from './modelLibrary';
+import { loadHumans, humanReady, validHumanVariant, makeHuman as createHuman, type HumanVariant } from './humans';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
@@ -11,7 +13,7 @@ type Cell = [number, number];
 type Mode = 'adaptive' | 'baseline';
 type Perception = 'image-yolo' | 'analytic-development';
 type Tool = 'inspect' | 'survivor' | 'immobile' | 'fire' | 'remove';
-interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string; immobile?: Cell[]; comms_outages?: [number, number][]; room_risk?: Record<string, string>; incident_room?: string }
+interface Scenario { survivors: Cell[]; ignitions: Cell[]; seed: number; scene_id?: string; building_use?: string; immobile?: Cell[]; comms_outages?: [number, number][]; room_risk?: Record<string, string>; incident_room?: string; human_variant?: HumanVariant }
 interface CostarField { key: string; label: string; value: unknown; units: string | null; field_path: string; source_id: number; dataset: string; derivation: string; note?: string }
 interface SceneData {
   id: string; name: string; width: number; height: number; resolution: number; origin: [number, number];
@@ -71,7 +73,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const escape = (value: unknown): string => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const number = (value: number, digits = 1): string => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 const same = (a: Cell, b: Cell): boolean => a[0] === b[0] && a[1] === b[1];
-const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}), ...(value.immobile?.length ? { immobile: value.immobile.map(p => [...p] as Cell) } : {}), ...(value.comms_outages?.length ? { comms_outages: value.comms_outages.map(o => [...o] as [number, number]) } : {}), ...(value.room_risk && Object.keys(value.room_risk).length ? { room_risk: { ...value.room_risk } } : {}), ...(value.incident_room ? { incident_room: value.incident_room } : {}) });
+const copyScenario = (value: Scenario): Scenario => ({ survivors: value.survivors.map(p => [...p] as Cell), ignitions: value.ignitions.map(p => [...p] as Cell), seed: value.seed, scene_id: value.scene_id, ...(value.building_use ? { building_use: value.building_use } : {}), ...(value.immobile?.length ? { immobile: value.immobile.map(p => [...p] as Cell) } : {}), ...(value.comms_outages?.length ? { comms_outages: value.comms_outages.map(o => [...o] as [number, number]) } : {}), ...(value.room_risk && Object.keys(value.room_risk).length ? { room_risk: { ...value.room_risk } } : {}), ...(value.incident_room ? { incident_room: value.incident_room } : {}), ...(value.human_variant ? { human_variant: value.human_variant } : {}) });
 const key = (p: Cell): string => `${p[0]},${p[1]}`;
 
 $('app').innerHTML = `
@@ -95,6 +97,7 @@ $('app').innerHTML = `
             <button id="plan" class="button small" aria-pressed="false">Plan</button>
             <button id="recenter" class="button subtle small">Fit</button>
             <button id="preview-hazards" class="button small" disabled>Preview hazards</button>
+            <button id="focus-survivor" class="button subtle small" disabled title="Zoom to each simulated survivor in Operator truth">Find survivor</button>
             <button id="focus-fire" class="button subtle small" disabled>Find fire</button>
             <button id="expand" class="button subtle small">Fullscreen</button>
           </div>
@@ -112,13 +115,15 @@ $('app').innerHTML = `
           </div>
         </div>
         <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
-        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas heater</span><span><i class="legend-risk sprinkler"></i>Sprinkler</span><span><i class="legend-risk both"></i>Both</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated; blue through walls)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas heater</span><span><i class="legend-risk sprinkler"></i>Sprinkler</span><span><i class="legend-risk both"></i>Both</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates are grid cells; the scene's origin and resolution convert them to metres in the scan frame. Choose an editing tool in Scenario setup, then apply it here or click the map.</p></details>
       </section>
       <aside class="sidebar">
         <section class="panel" aria-labelledby="property-heading"><div class="panel-heading compact"><div><h2 id="property-heading">Property context</h2></div></div>
           <label class="seed-label" for="scene-select">Scene <select id="scene-select"></select></label>
-            <button id="load-map" class="button small">Open floor plan…</button>
+            <button id="prepared-models" class="button small">Browse prepared models</button>
+            <button id="load-map" class="button small">Import custom floor plan JSON…</button>
+            <p class="field-hint">Choose a validated scene above, or browse every downloaded model. Plan shows the active scene from above. Import accepts annotated metric JSON, not images or PDFs.</p>
             <input id="map-file" type="file" accept=".json,application/json" hidden />
             <p id="sensor-readings" class="field-hint">Waiting for robot hazard sensor</p>
           <div id="property-card" class="property-card"><p class="field-hint">No CoStar record for this scene.</p></div>
@@ -137,6 +142,8 @@ $('app').innerHTML = `
         <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Place the conditions</h2></div></div>
           <label class="seed-label" for="building-use" title="Static building information only; it changes where the robot searches first, never what it knows about people">Building use <select id="building-use"><option value="">Auto</option></select></label>
           <p id="building-use-hint" class="field-hint"></p>
+          <label class="seed-label" for="human-variant">Survivor appearance <select id="human-variant"><option value="adult-male">Adult man</option><option value="adult-female">Adult woman</option><option value="child-male">Boy</option><option value="child-female">Girl</option><option value="older-male">Older man</option><option value="older-female">Older woman</option><option value="mixed">Mixed: one of each, repeated</option></select></label>
+          <p class="field-hint">Synthetic character appearances. Apply to update the people in the scene; the selection stays fixed during runs and comparisons.</p>
           <div class="room-risk"><span class="seed-label" title="Pre-incident fixture tags per room. Gas heater 1.5x search priority, sprinkler 0.8x, neither/unknown 1x">Room fire risk</span><div id="room-risk-list"></div><p id="room-risk-hint" class="field-hint"></p></div>
           <div id="presets" class="preset-list"></div>
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label title="Mark or unmark a placed survivor as unable to follow the robot (checked on contact)"><input name="tool" type="radio" value="immobile" /><span><b aria-hidden="true">♿</b>Can't walk</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
@@ -344,6 +351,7 @@ function validateScenario(value: unknown): Scenario {
   if (!value || typeof value !== 'object') throw new Error('Expected a scenario JSON object.');
   const candidate = value as Scenario;
   if (!Number.isSafeInteger(candidate.seed)) throw new Error('Seed must be a safe integer.');
+  if (candidate.human_variant !== undefined && !validHumanVariant(candidate.human_variant)) throw new Error('Unknown survivor appearance.');
   if (candidate.scene_id !== undefined && candidate.scene_id !== scene.id) throw new Error(`This scenario belongs to scene ${candidate.scene_id}; select that scene first.`);
   const walls = new Set([...scene.walls, ...scene.exterior].map(key));
   for (const field of ['survivors', 'ignitions'] as const) {
@@ -379,7 +387,10 @@ function syncUI(): void {
   preview.disabled = !connected || busy || dirty || status === 'running' || pairedRunning() || !state || state.hazard_time >= 600;
   preview.textContent = state?.hazards_running && status !== 'running' ? 'Pause hazards' : 'Preview hazards';
   $('start').textContent = status === 'paused' ? '▶ Resume run' : '▶ Start run';
-  ($('start') as HTMLButtonElement).disabled = !sceneReady || !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
+  $('mode-description').textContent = chosen<Perception>('perception') === 'image-yolo'
+    ? 'YOLO detects people in browser-rendered RGB-D frames. Appearance labels are scenario inputs, not detector predictions.'
+    : 'Analytic fixture uses simulator truth and is not image perception.';
+  ($('start') as HTMLButtonElement).disabled = !sceneReady || !humanReady(state?.scenario.human_variant) || !connected || busy || dirty || pairedRunning() || !['idle', 'paused'].includes(status ?? '');
   ($('pause') as HTMLButtonElement).disabled = !connected || busy || status !== 'running' || pairedRunning();
   ($('withdraw') as HTMLButtonElement).disabled = !connected || busy || !['running', 'paused'].includes(status ?? '') || pairedRunning() || !!state?.withdraw_reason;
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
@@ -390,6 +401,8 @@ function syncUI(): void {
   document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => { input.disabled = input.value !== 'inspect' && !editable; });
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => { b.disabled = !editable || b.dataset.unavailable === '1'; });
   ($('seed') as HTMLInputElement).disabled = !editable;
+  $<HTMLSelectElement>('human-variant').disabled = !editable;
+  $<HTMLSelectElement>('human-variant').value = draft?.human_variant ?? 'adult-male';
   const incidentRoom = $<HTMLSelectElement>('incident-room');
   incidentRoom.disabled = !editable || !scene?.rooms.length;
   incidentRoom.value = draft?.incident_room ?? '';
@@ -397,7 +410,7 @@ function syncUI(): void {
   ($('discard') as HTMLButtonElement).disabled = busy || !dirty;
   ($('import') as HTMLButtonElement).disabled = !editable;
   ($('export') as HTMLButtonElement).disabled = !draft;
-  ($('compare') as HTMLButtonElement).disabled = !sceneReady || !connected || busy || dirty || pairedRunning() || status === 'running';
+  ($('compare') as HTMLButtonElement).disabled = !sceneReady || !humanReady(state?.scenario.human_variant) || !connected || busy || dirty || pairedRunning() || status === 'running';
   $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
   $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Pick a preset or a tool, then click a floor cell. Changes stay local until applied.';
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
@@ -499,7 +512,7 @@ async function loadPresets(): Promise<void> {
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => b.addEventListener('click', () => {
     const preset = presets[Number(b.dataset.index)];
     if (!preset.scenario || !idle()) return;
-    draft = validateScenario({ ...preset.scenario, ...(draft?.room_risk ? { room_risk: draft.room_risk } : {}) });
+    draft = validateScenario({ ...preset.scenario, ...(draft?.room_risk ? { room_risk: draft.room_risk } : {}), ...(draft?.human_variant ? { human_variant: draft.human_variant } : {}) });
     ($('seed') as HTMLInputElement).value = String(draft.seed);
     dirty = JSON.stringify(draft) !== JSON.stringify({ ...state!.scenario, scene_id: scene!.id });
     drawDynamic();
@@ -526,7 +539,7 @@ function renderSceneInfo(): void {
     return `<div class="property-row"><dt>${escape(f.label)}</dt><dd>${escape(value)}${f.note ? `<small>${escape(f.note)}</small>` : ''}</dd></div>`;
   };
   $('property-card').innerHTML = c
-    ? `<dl class="property-list">${['address', 'property_type', 'stories', 'total_units', 'year_built', 'floor_plan', 'beds', 'baths', 'area', 'max_occupants', 'sprinkler_type', 'construction_material'].map(k => show(pick(k))).join('')}</dl><p class="field-hint">${escape(c.disclaimer)}</p>`
+    ? `<dl class="property-list">${['address', 'property_type', 'stories', 'total_units', 'year_built', 'floor_plan', 'beds', 'baths', 'area', 'max_occupants', 'sprinkler_type', 'has_sprinklers', 'smoke_detector', 'gas_heating', 'gas_water_heater', 'gas_range', 'gas_oven', 'construction_material'].map(k => show(pick(k))).join('')}</dl><p class="field-hint">${escape(c.disclaimer)}</p>`
     : '<p class="field-hint">No CoStar record for this scene; capacity presets are unavailable.</p>';
   const checks = scene.checks ? Object.entries(scene.checks).filter(([k]) => !['failed'].includes(k)) : [];
   $('provenance').innerHTML = `
@@ -829,36 +842,17 @@ function buildStaticScene(): void {
   $('cutaway-control').hidden = !sourceMesh;
 }
 
-/** CesiumMan (CC BY 4.0, © Cesium; see public/models/ATTRIBUTION.md): a textured human figure that a
- *  COCO-trained detector can recognise, unlike primitive mannequins (which failed the detection gate). */
-let humanTemplate: { scene: THREE.Group; clip: THREE.AnimationClip | null; scale: number; lift: number } | null = null;
-new GLTFLoader().load('/models/CesiumMan.glb', gltf => {
-  const box = new THREE.Box3().setFromObject(gltf.scene);
-  const height = box.max.y - box.min.y;
-  humanTemplate = { scene: gltf.scene, clip: gltf.animations[0] ?? null, scale: 1.72 / Math.max(height, 1e-3), lift: -box.min.y };
-  avatars.forEach(a => avatarLayer.remove(a));
-  avatars.clear();
+/** Authored appearance stays in operator scenario state, outside agent observations. */
+void loadHumans(() => {
+  avatars.forEach(a => avatarLayer.remove(a)); avatars.clear();
   if (state) drawDynamic();
-}, undefined, () => notify('Human model unavailable; using primitive mannequins, which the detector does not recognise.', true));
+  syncUI();
+}, message => notify(message, true));
 
 function makeHuman(id: string): THREE.Group | null {
-  if (!humanTemplate) return null;
-  const body = SkeletonUtils.clone(humanTemplate.scene) as THREE.Group;
-  if (humanTemplate.clip) {
-    // Freeze the walk cycle mid-stride for a natural standing posture.
-    const mixer = new THREE.AnimationMixer(body);
-    const action = mixer.clipAction(humanTemplate.clip);
-    action.play();
-    mixer.setTime((Number(id.replace(/\D/g, '')) % 4) * 0.13 + 0.1);
-  }
-  body.scale.setScalar(humanTemplate.scale);
-  body.position.y = humanTemplate.lift * humanTemplate.scale;
-  body.traverse(o => { if (o instanceof THREE.Mesh) o.frustumCulled = false; });
-  const group = new THREE.Group();
-  group.add(body);
-  group.userData.id = id;
-  return group;
+  return createHuman(id, state?.scenario.human_variant);
 }
+let renderedAppearance: HumanVariant | undefined;
 
 function hashAngle(text: string): number { let h = 0; for (const c of text) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 360) * Math.PI / 180; }
 
@@ -975,9 +969,41 @@ function drawHazardField(): void {
   smokeField.texture.needsUpdate = true;
 }
 
+/** Truth-only aids: occluded body silhouette and a readable location label.
+ * Never rendered into RGB-D or exposed in the belief view. */
+function survivorOverlay(avatar: THREE.Group, id: string): THREE.Group {
+  const overlay = new THREE.Group();
+  overlay.name = 'survivor-operator-overlay';
+  const silhouette = SkeletonUtils.clone(avatar);
+  silhouette.traverse(o => {
+    if (!(o instanceof THREE.Mesh)) return;
+    o.material = new THREE.MeshBasicMaterial({ color: '#58c4ff', transparent: true, opacity: 0.65,
+      depthFunc: THREE.GreaterDepth, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    o.renderOrder = 20;
+  });
+  overlay.add(silhouette);
+  const canvas = document.createElement('canvas');
+  canvas.width = 320; canvas.height = 64;
+  const context = canvas.getContext('2d')!;
+  context.fillStyle = '#102938'; context.fillRect(0, 0, 320, 64);
+  context.strokeStyle = '#58c4ff'; context.lineWidth = 4; context.strokeRect(2, 2, 316, 60);
+  context.fillStyle = '#e9f7ff'; context.font = 'bold 26px sans-serif'; context.textAlign = 'center';
+  context.fillText(`Survivor ${(Number(id.replace(/\D/g, '')) || 0) + 1} · simulated`, 160, 42);
+  const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, depthWrite: false, sizeAttenuation: false }));
+  label.position.y = 2.05; label.scale.set(0.12, 0.024, 1); label.renderOrder = 21;
+  overlay.add(label);
+  return operatorOnly(overlay);
+}
+
+let focusedSurvivor = 0;
 const casualtyMaterial = new THREE.MeshBasicMaterial({ color: '#ed3445', side: THREE.DoubleSide });
 
 function placeAvatars(): void {
+  const appearance = state?.scenario.human_variant ?? 'adult-male';
+  if (appearance !== renderedAppearance) {
+    avatars.forEach(a => avatarLayer.remove(a)); avatars.clear(); renderedAppearance = appearance;
+  }
   if (!scene || !state) return;
   const editing = state.status.toLowerCase() === 'idle';
   const people: SimState['survivors'] = editing && draft
@@ -988,7 +1014,11 @@ function placeAvatars(): void {
     if (person.status === 'evacuated') continue;
     keep.add(person.id);
     let avatar = avatars.get(person.id);
-    if (!avatar) { avatar = makeHuman(person.id) ?? makeAvatar(person.id); avatars.set(person.id, avatar); avatarLayer.add(avatar); }
+    if (!avatar) {
+      avatar = makeHuman(person.id) ?? makeAvatar(person.id);
+      avatar.add(survivorOverlay(avatar, person.id));
+      avatars.set(person.id, avatar); avatarLayer.add(avatar);
+    }
     const [x, y] = cellWorld(person.position);
     if (person.status === 'escorting') {
       // Follower stands behind the robot along its heading.
@@ -1008,8 +1038,12 @@ function placeAvatars(): void {
     }
     // Operator view hides people in robot-belief mode; the rendered camera always sees them.
     avatar.traverse(o => { o.layers.set(0); if (view === 'belief') o.layers.disable(0), o.layers.enable(CAMERA_ONLY_LAYER); });
+    const overlay = avatar.getObjectByName('survivor-operator-overlay')!;
+    overlay.visible = view === 'truth';
+    operatorOnly(overlay);
   }
   for (const [id, avatar] of avatars) if (!keep.has(id)) { avatarLayer.remove(avatar); avatars.delete(id); }
+  ($('focus-survivor') as HTMLButtonElement).disabled = view !== 'truth' || avatars.size === 0;
 }
 
 function drawDynamic(): void {
@@ -1459,6 +1493,12 @@ for (const action of ['start', 'pause', 'reset'] as const) {
 }
 
 $('load-map').addEventListener('click', () => $<HTMLInputElement>('map-file').click());
+setupModelLibrary(async id => {
+  if (busy || dirty || pairedRunning() || state?.status === 'running' || state?.hazards_running) throw new Error('Apply or discard edits and pause the run and hazards before switching scenes.');
+  await api('scene', { id });
+  scene = null; draft = null; dirty = false; lastFrameSeq = -1;
+  await poll();
+});
 $<HTMLInputElement>('map-file').addEventListener('change', event => {
   const input = event.currentTarget as HTMLInputElement;
   const file = input.files?.[0];
@@ -1587,6 +1627,15 @@ $('preview-hazards').addEventListener('click', () => void mutation(async () => {
   validateState(next);
   acceptState(next);
 }));
+$('focus-survivor').addEventListener('click', () => {
+  if (view !== 'truth' || !camera || !controls || !avatars.size) return;
+  const avatar = [...avatars.values()][focusedSurvivor++ % avatars.size];
+  const target = avatar.position.clone().add(new THREE.Vector3(0, 0.85, 0));
+  const offset = camera.position.clone().sub(controls.target).setLength(4.5);
+  controls.target.copy(target);
+  camera.position.copy(target).add(offset);
+  controls.update();
+});
 $('focus-fire').addEventListener('click', () => {
   if (!focusCell || !camera || !controls) return;
   const target = position(focusCell);
@@ -1598,6 +1647,15 @@ $('focus-fire').addEventListener('click', () => {
 $('orbit').addEventListener('click', () => setView('orbit'));
 $('plan').addEventListener('click', () => setView('plan'));
 $('walls-layer').addEventListener('change', applyWallLayer);
+$('human-variant').addEventListener('change', () => {
+  if (!draft || !idle() || busy) return;
+  const value = $<HTMLSelectElement>('human-variant').value;
+  if (!validHumanVariant(value)) return;
+  if (value === 'adult-male') delete draft.human_variant; else draft.human_variant = value;
+  dirty = JSON.stringify(draft) !== JSON.stringify({ ...state!.scenario, scene_id: scene!.id });
+  syncUI();
+});
+
 $('building-use').addEventListener('change', async () => {
   if (!draft || !idle() || busy || !state || !scene) return;
   const value = ($('building-use') as HTMLSelectElement).value;

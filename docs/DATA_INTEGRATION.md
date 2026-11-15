@@ -3,6 +3,19 @@
 Updated 2026-11-14. Sponsor downloads, prepared bundles, model weights and captures
 remain ignored under `data/` (weights may also reside at the ignored repo root).
 
+The [mesh/dataset handoff](MESH_DATASET_HANDOFF.md) records six human mesh variants,
+actual YOLO checks, exact residential fixture joins, the complete Sage Road condo
+and the newly prepared connected indoor scope at 8142 Amor Rd.
+
+All 14 models from the [prepared model catalog](PREPARED_MODELS.md) now have their
+own full textured MatterPak mesh, reviewed entry-door annotation and validated
+navigation bundle. All are selectable from **Scene** for simulation. New scene
+evidence, preparation commands and image-mission results are recorded there.
+The current acceptance run passed 14/14 no-fire, single-survivor YOLO missions,
+28/28 analytic navigation runs and 95 backend tests (one optional skip). Historical
+two-scene results and the original second-scene placement failure below are retained
+as history; the catalog acceptance supersedes that placement limitation.
+
 ## Source correction and implementation
 
 The supported download query is:

@@ -261,7 +261,7 @@ def import_package(model, path, root, allow_untextured=False):
 def inspect(model, root, fetch=False):
     import prepare_scene as prep
     prep.QUERY='''query($id: ID!){model(id:$id){id bundle(id:"mp:matterpak"){assets{url}} assets{ meshes{id filename format resolution status url} textures{id format resolution quality status textures urlTemplate} resources(format:"matterpak"){status filename url}}}}'''
-    response=prep.graph(model);data=response['assets'];out=root/model/'source-assets';out.mkdir(parents=True,exist_ok=True)
+    response=prep.graph(model, required=('assets',));data=response['assets'];out=root/model/'source-assets';out.mkdir(parents=True,exist_ok=True)
     report={'model':model,'checked_at':datetime.now(timezone.utc).isoformat(),'meshes':[],'textures':[],'resources':[]}
     for group in report.keys() & data.keys():
         for index,a in enumerate(data[group]):
@@ -334,7 +334,7 @@ def fetch_matterpak(model, root):
     """Download only the textured OBJ package from a MatterPak, if the API offers one. Never logs URLs."""
     import prepare_scene as prep
     prep.QUERY = 'query($id: ID!){model(id:$id){bundle(id:"mp:matterpak"){assets{url}}}}'
-    data = prep.graph(model)
+    data = prep.graph(model, required=('bundle',))
     links = [a['url'] for a in (data.get('bundle') or {}).get('assets', []) if a.get('url')]
     if len(links) != 1:
         raise ValueError(f'MatterPak for {model}: expected one bundle ZIP link, found {len(links)}')

@@ -215,7 +215,7 @@ def test_bundle_assets_download_and_redacted_status(tmp_path, monkeypatch):
     from scripts import prepare_scene, scene_assets
     monkeypatch.setitem(sys.modules, 'prepare_scene', prepare_scene)
     secret = 'https://example.invalid/pak.zip?secret=DO_NOT_SAVE'
-    def graph(model):
+    def graph(model, **kwargs):
         assert 'assets{url}' in prepare_scene.QUERY and 'resources' not in prepare_scene.QUERY
         return {'bundle': {'assets': [{'url': secret}]}}
     monkeypatch.setattr(prepare_scene, 'graph', graph)

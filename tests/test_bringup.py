@@ -148,3 +148,78 @@ def test_missing_matterpak_attempts_fetch_and_preserves_bundle(tmp_path,monkeypa
     monkeypatch.setattr(scene_assets,'fetch_matterpak',fetch)
     with pytest.raises(ValueError,match='credentials/access'):b.prepare('m',{})
     assert calls==['m'] and (bundle/'scene.json').read_text()=='previous'
+
+
+def human_fixture(tmp_path, monkeypatch):
+    import io
+    payload = b'glTF-pinned-test-payload'
+    monkeypatch.setattr(b, 'ROOT', tmp_path)
+    monkeypatch.setattr(b, 'HUMAN_SHA256', hashlib.sha256(payload).hexdigest())
+    calls = []
+    def fetch(url, **kwargs):
+        calls.append(url)
+        return io.BytesIO(payload)
+    monkeypatch.setattr(b.urllib.request, 'urlopen', fetch)
+    return payload, calls
+
+
+def test_human_download_and_offline_cache(tmp_path, monkeypatch):
+    payload, calls = human_fixture(tmp_path, monkeypatch)
+    target = b.prepare_human()
+    assert target.read_bytes() == payload and calls == [b.HUMAN_URL]
+    monkeypatch.setattr(b.urllib.request, 'urlopen', lambda *a, **k: pytest.fail('Cache used network'))
+    assert b.prepare_human() == target
+
+
+def test_human_repairs_corrupt_cache(tmp_path, monkeypatch):
+    payload, calls = human_fixture(tmp_path, monkeypatch)
+    target = tmp_path/'frontend/public/models/Survivor.glb'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'corrupt')
+    assert b.prepare_human().read_bytes() == payload
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('failure', ['checksum', 'interrupted', 'oversize'])
+def test_human_failed_download_is_atomic(tmp_path, monkeypatch, failure):
+    import io
+    payload, _ = human_fixture(tmp_path, monkeypatch)
+    target = tmp_path/'frontend/public/models/Survivor.glb'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'previous')
+    class Interrupted(io.BytesIO):
+        def read(self, *args):
+            raise OSError('interrupted')
+    if failure == 'checksum':
+        monkeypatch.setattr(b, 'HUMAN_SHA256', '0'*64)
+    elif failure == 'oversize':
+        monkeypatch.setattr(b, 'HUMAN_MAX_BYTES', 1)
+    else:
+        monkeypatch.setattr(b.urllib.request, 'urlopen', lambda *a, **k: Interrupted(payload))
+    with pytest.raises(RuntimeError, match='rerun ./setup.sh'):
+        b.prepare_human()
+    assert target.read_bytes() == b'previous'
+    assert not list(target.parent.glob('.survivor-*'))
+
+
+def test_environment_state_skips_unnamed_distributions(monkeypatch):
+    import contextlib
+    import importlib.metadata as metadata
+    import io
+    from types import SimpleNamespace
+    distributions = [
+        SimpleNamespace(metadata={'Name': 'FastAPI'}, version='1.0'),
+        SimpleNamespace(metadata={}, version='0.0'),
+        SimpleNamespace(metadata={'Name': None}, version='0.0'),
+        SimpleNamespace(metadata={'Name': ''}, version='0.0'),
+    ]
+    monkeypatch.setattr(metadata, 'distributions', lambda: distributions)
+    def probe(args, **kwargs):
+        # Execute the actual child-process probe, including its metadata access.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exec(args[2], {})
+        return output.getvalue()
+    monkeypatch.setattr(b.subprocess, 'check_output', probe)
+    state = b.environment_state(sys.executable, {})
+    assert state == {'python': sys.version.split()[0], 'packages': {'fastapi': '1.0'}}

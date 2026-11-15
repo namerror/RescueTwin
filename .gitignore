@@ -11,3 +11,12 @@ frontend/dist/
 *.pt
 
 .bootstrap-venv/
+
+# Pinned survivor mesh fetched by setup.sh
+frontend/public/models/Survivor.glb
+frontend/public/models/FemaleAdult.glb
+frontend/public/models/MaleChild.glb
+frontend/public/models/FemaleChild.glb
+frontend/public/models/MaleOlder.glb
+frontend/public/models/FemaleOlder.glb
+frontend/public/models/.survivor-*.tmp

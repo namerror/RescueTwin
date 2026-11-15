@@ -9,7 +9,7 @@ from copy import deepcopy
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from . import presets
+from . import models, presets
 from .environment import parse_environment
 from .core import CAMERA_RANGE_M, HAZARD_PREVIEW_LIMIT_S, Simulation, compare
 from .scenes import asset_file, available, default_scene
@@ -203,6 +203,7 @@ class Scenario(BaseModel):
     comms_outages:list[list[float]]=Field(default_factory=list,max_length=10)
     room_risk:dict[str,str]=Field(default_factory=dict,max_length=200)
     incident_room:str|None=None
+    human_variant:str|None=None
 
 class Control(BaseModel):
     action:str
@@ -238,6 +239,21 @@ def observations():return sim.observations()
 
 @app.get('/api/scenes')
 def scene_list():return [s.summary() for s in scenes.values()]
+
+@app.get('/api/models')
+def model_list():
+    return [models.public(entry) for entry in models.catalog(scenes).values()]
+
+@app.get('/api/models/{model_id}/files/{name}')
+def model_file(model_id: str, name: str):
+    entry = models.catalog(scenes).get(model_id)
+    if entry is None:
+        raise HTTPException(404, 'No such prepared model')
+    try:
+        path = models.asset(entry, name)
+    except ValueError:
+        raise HTTPException(404, 'No such model file')
+    return FileResponse(path)
 
 @app.get('/api/scene')
 def scene():return sim.base_scene.public()
@@ -330,6 +346,7 @@ def scenario(body:Scenario):
     global sim
     if sim.status!='idle' or sim.hazards_running or busy():raise HTTPException(409,'Reset before editing a scenario')
     data=body.model_dump();data['scene_id']=data['scene_id'] or sim.scene.id
+    if data['human_variant'] is None:data.pop('human_variant')
     for key in ('building_use','immobile','comms_outages','room_risk','incident_room'):
         if not data.get(key):data.pop(key,None)   # unset fields stay out, so existing scenario hashes are unchanged
     try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)

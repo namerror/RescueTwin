@@ -20,6 +20,46 @@ UV_VERSION = '0.11.25'
 EXTRAS = ['scene', 'vision', 'agent', 'test']
 
 
+# Microsoft Rocketbox Male_Adult_04, web conversion; see public/models/ATTRIBUTION.md.
+HUMAN_REVISION = 'fc1398c2f8ba600c3676a5277684ed4f3e2731d7'
+HUMAN_URL = f'https://raw.githubusercontent.com/927tanmay/react-ai-voice-avatar/{HUMAN_REVISION}/assets/avatars/aarav.glb'
+HUMAN_SHA256 = 'ebe6b1596256f314d1356cfc2f42d28203b5bf1864d0bf139845cb9d13ee6500'
+HUMAN_MAX_BYTES = 16 * 1024 * 1024
+
+
+def prepare_human():
+    """Fetch the pinned, self-contained GLB atomically; warm starts work offline."""
+    target = ROOT/'frontend/public/models/Survivor.glb'
+    if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == HUMAN_SHA256:
+        print('Using verified cached survivor mesh.', flush=True)
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pending = None
+    print('Fetching realistic survivor mesh from GitHub.', flush=True)
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.survivor-', suffix='.tmp', delete=False) as output:
+            pending = Path(output.name)
+            digest = hashlib.sha256()
+            size = 0
+            with urllib.request.urlopen(HUMAN_URL, timeout=60) as response:
+                while chunk := response.read(65536):
+                    size += len(chunk)
+                    if size > HUMAN_MAX_BYTES:
+                        raise ValueError('Survivor mesh exceeds download size limit')
+                    digest.update(chunk)
+                    output.write(chunk)
+        if digest.hexdigest() != HUMAN_SHA256:
+            raise ValueError('Survivor mesh checksum mismatch')
+        pending.replace(target)
+        return target
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Survivor mesh preparation failed. Check GitHub access and rerun ./setup.sh; '
+                           'an offline machine needs the pinned Survivor.glb described in frontend/public/models/ATTRIBUTION.md.') from exc
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
 def dotenv(path, inherited):
     env = {}
     if path.exists():
@@ -55,7 +95,7 @@ def fingerprint():
 
 
 def environment_state(python, env):
-    code = "import sys,json,importlib.metadata as m; print(json.dumps({'python':sys.version.split()[0], 'packages':{d.metadata['Name'].lower():d.version for d in m.distributions()}}))"
+    code = "import sys,json,importlib.metadata as m; print(json.dumps({'python':sys.version.split()[0], 'packages':{name.lower():d.version for d in m.distributions() if (name := d.metadata.get('Name'))}}))"
     return json.loads(subprocess.check_output([str(python), '-c', code], env=env, text=True))
 
 
@@ -252,6 +292,9 @@ def main():
         runtime_args = ['--environment', str(args.environment.resolve())] if args.environment else []
         os.execve(python, [str(python), str(Path(__file__).resolve()), '--runtime', *runtime_args], env)
     sys.path.insert(0, str(ROOT))
+    prepare_human()
+    from prepare_humans import ensure_variants
+    ensure_variants()
     if args.environment:
         from rescuetwin.environment import load_environment
         load_environment(args.environment)

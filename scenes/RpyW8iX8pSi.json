@@ -1,0 +1,35 @@
+{
+  "model": "RpyW8iX8pSi",
+  "floor_label": "Floor 1",
+  "property_id": 4497305,
+  "floor_plan_id": 3484752,
+  "resolution": 0.25,
+  "exits": [
+    {
+      "id": "exit-entry",
+      "label": "Unit entry door",
+      "segment": [
+        [
+          -0.962726376487305,
+          -0.8263071500445335
+        ],
+        [
+          -0.9660385402740717,
+          1.2607420571953727
+        ]
+      ],
+      "evidence": [
+        "pano 0 face 1: White hinged unit entry door with peephole and two locks",
+        "Source schematic DXF/PNG: matching wall opening; source photo floor plan inspected for SCkUhAc2SSU and uUWZHYgM2yL"
+      ],
+      "verified": "manual source plan/panorama inspection 2026-11-14",
+      "beyond": "assumed available beyond the unit/suite entry; not inspected"
+    }
+  ],
+  "not_exits": [
+    {
+      "label": "Other windows, sliders or unreviewed openings",
+      "reason": "Not accepted as egress endpoints in this rehearsal"
+    }
+  ]
+}

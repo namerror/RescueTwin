@@ -309,6 +309,8 @@ class Simulation:
         if set(map(tuple,scenario['survivors'])) & set(map(tuple,scenario['ignitions'])): raise ValueError('Survivor and ignition overlap')
         if scenario.get('building_use') is not None and scenario['building_use'] not in occupancy.PROFILES: raise ValueError('Unknown building use')
         risk.validate(self.scene,scenario.get('room_risk'))
+        from .humans import validate as validate_human_variant
+        validate_human_variant(scenario.get('human_variant'))
         immobile=scenario.get('immobile',[])
         if not isinstance(immobile,list) or not {tuple(p) for p in immobile if isinstance(p,(list,tuple))}<=set(map(tuple,scenario['survivors'])) or len(immobile)!=len({tuple(p) for p in immobile}):
             raise ValueError('immobile: list distinct cells that are also survivor placements')
