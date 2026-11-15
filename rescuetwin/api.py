@@ -547,7 +547,7 @@ def experiment_run(body:ExperimentRun):
     sim.recorder=Recorder(sim,dict(policy=body.policy,latency_excluded=True))
     if provider:
         from .reasoning import Supervisor
-        sim.supervisor=Supervisor(sim,provider,architecture)
+        sim.supervisor=Supervisor(sim,provider,architecture,request_limit=provider.config.get('requests_per_mission',24))
     return dict(run_id=sim.recorder.id)
 
 @app.get('/api/runs/{identity}/snapshot')

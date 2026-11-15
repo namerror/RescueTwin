@@ -124,6 +124,9 @@ class Tools:
             s.holding=True;return []
         target=tuple(a['target'])
         if s.robot==target:
+            # Native room scanning runs before choose(); do not scan a completed viewpoint twice.
+            if a['type']=='inspect_room' and target in s.searched_points:
+                self.finish('success','Room viewpoint already scanned by controller');return None
             if a['type']=='approach_person':
                 track=next((d for d in s.detections if d['id']==a['track_id']),{})
                 self.finish('success' if track.get('status') in ('escorting','handoff','evacuated') else 'failed','Contact outcome: '+track.get('status','missing'))
@@ -133,8 +136,8 @@ class Tools:
                 a['scan_started']=True
                 if s.perception_mode=='image-yolo':s.scan_remaining=2*math.pi;return [s.robot]
             self.finish('success');return None
-        if a['type']=='approach_person' and s.escort:
-            self.finish('success','Contact established');return None
+        if a['type']=='approach_person' and a.get('track_id') in s.escort.values():
+            self.finish('success','Requested person joined escort');return None
         r=self.routes(target)
         if not r['eligible']:self.finish('failed',r['reason']);return None
         return [tuple(p) for p in r['path']]
