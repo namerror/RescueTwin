@@ -1,10 +1,18 @@
 # RescueTwin
 
+<table>
+  <tr>
+    <td width="25%"><img src="docs/assets/banner-extraction.gif" alt="Simulated survivor extraction replay" width="300"></td>
+    <td width="25%"><img src="docs/assets/banner-floor-plan.png" alt="Scanned floor plan with anonymized scene labels" width="300"></td>
+    <td width="25%"><img src="docs/assets/banner-floor-plan-search.gif" alt="Top-down search with simulated hazards" width="300"></td>
+    <td width="25%"><img src="docs/assets/banner-search.gif" alt="Recorded search through simulated hazards" width="300"></td>
+  </tr>
+</table>
+
 ### Rehearse the rescue before the emergency.
 
 RescueTwin turns building digital twins into interactive search-and-rescue rehearsals. Place simulated survivors and hazards inside a scan, then watch a robot search, adapt, and guide people toward verified exits.
 
-**Built for the CoStar Group “Inside and Out: AI for the Built World” track and Amazon’s “Best Practical AI Innovation” track.**
 
 ![RescueTwin workbench: a scanned interior, simulated emergency, and rendered robot camera](docs/assets/workbench.png)
 

@@ -1,9 +1,13 @@
 # Publication media
 
-These six assets are screenshots and recorded replay excerpts from RescueTwin. Scanned geometry and CoStar context come from the authorized local sponsor data; people, robot, fire, smoke, and sensor imagery are simulated.
+These assets are screenshots and recorded replay excerpts from RescueTwin. Scanned geometry and CoStar context come from the authorized local sponsor data; people, robot, fire, smoke, and sensor imagery are simulated.
 
 | Asset | Source and treatment |
 | --- | --- |
+| `banner-extraction.gif` | Original survivor-extraction GIF, preserving animation. |
+| `banner-floor-plan.png` | Original scanned-floor-plan still; identifying title/selector replaced with anonymous labels. |
+| `banner-floor-plan-search.gif` | Original top-down floor-plan search GIF, preserving animation. |
+| `banner-search.gif` | Original baseline-search GIF, preserving animation; an illustrative demo rather than a controlled comparison. |
 | `workbench.png` | Existing workbench screenshot, cropped to the stage; identifying scene title/selector replaced with a demo label. |
 | `property-context.png` | Existing CoStar context screenshot; cropped to property attributes and address replaced with an anonymous label. Unknown source values remain visible. |
 | `fire-and-smoke.gif` | Existing cropped hazard demonstration, preserved as an illustrative clip. |
