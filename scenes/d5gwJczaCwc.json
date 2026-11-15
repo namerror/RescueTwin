@@ -1,0 +1,30 @@
+{
+  "model": "d5gwJczaCwc",
+  "floor_label": "Floor 1",
+  "property_id": null,
+  "residential_listing_id": 206425800,
+  "floor_plan_id": null,
+  "resolution": 0.25,
+  "exits": [
+    {
+      "id": "exit-entry",
+      "label": "Unit entry door",
+      "segment": [
+        [
+          -1.037,
+          0.51
+        ],
+        [
+          0.294,
+          -0.801
+        ]
+      ],
+      "evidence": [
+        "Pano 0 face 3: solid wooden door with lock hardware at end of entrance hall; pano 1 face 3 shows the same door from the hall",
+        "Schematic DXF/PNG: diagonal opening on the exterior wall beside pano 0"
+      ],
+      "verified": "Manual source plan and panorama inspection",
+      "beyond": "Building corridor beyond the unit door assumed available; outside the scan"
+    }
+  ]
+}

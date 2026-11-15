@@ -260,9 +260,6 @@ class Simulation:
         # Search prior from static building information only (never from survivor placements).
         self.prior=occupancy.weights(self.scene,self.scenario.get('building_use'))
         self.log(occupancy.describe(self.scene,self.prior))
-        # Room fire-risk map (gas heater / sprinkler fixture tags): static building information, multiplies the prior.
-        self.risk=risk.room_map(self.scene,self.scenario.get('room_risk'))
-        self.log(risk.describe(self.scene,self.risk))
         if HAZARD_TIME_SCALE!=1:self.log(f'Demo pacing: fire and smoke advance at {HAZARD_TIME_SCALE:g}x mission time.')
         self.rooms_state={r['id']:dict(id=r['id'],name=r['name'],label=r.get('label'),status='unvisited',observed_fraction=0.,
                                         viewpoints_tried=0,reason=None) for r in self.scene.rooms}
@@ -279,10 +276,18 @@ class Simulation:
         for xx,yy in self.ignition_cells:self.ignition_mask[yy,xx]=True
         self.fire=np.where(self.ignition_mask,self.heat,0.)
         self.ignition_strength = self.fire.copy()
-        self.spray_origin = None
-        self.spray_cells = ()
+        self.sprinkler_heads = []
+        self.sprinkler_coverage = []
+        self.active_sprinklers = set()
         self.spray_strength = self.grid()
-        self.spraying = False
+        if (self.scene.bundle is not None and self.scene.source != 'synthetic'
+                and risk.recorded_sprinklers(self.scene) is True):
+            self.sprinkler_heads = self.place_sprinklers()
+            self.sprinkler_coverage = [self.sprinkler_reach(head) for head in self.sprinkler_heads]
+
+        sprinkler_rooms = {self.room_of[head] for head in self.sprinkler_heads}
+        self.risk = risk.room_map(self.scene, self.scenario.get('room_risk'), sprinkler_rooms)
+        self.log(risk.describe(self.scene, self.risk))
 
     def grid(self,value=0.): return np.full((self.scene.height,self.scene.width),float(value))
 
@@ -375,7 +380,7 @@ class Simulation:
             self.free[1:, :] & self.free[:-1, :],
             self.free[:, 1:] & self.free[:, :-1],
         )
-        self.spray_origin = None
+        self.sprinkler_coverage = [self.sprinkler_reach(origin) for origin in self.sprinkler_heads]
         affected = {origin, *neighbours}
         for wall_cell in breached:
             affected.update(self.scene.neighbors(wall_cell))
@@ -397,30 +402,57 @@ class Simulation:
         self.incident = dict(origin=origin, debris=debris, breached=sorted(breached), time=round(self.time, 2))
         self.log(f'Kitchen incident: {len(breached)} wall cells opened, {injured} people affected.')
 
-    def automatic_sprinkler(self):
-        """Use local heat and flame readings within the nozzle's unobstructed reach."""
-        if self.robot != self.spray_origin:
-            self.spray_origin = self.robot
-            self.spray_strength.fill(0.)
-            cx, cy = self.robot
-            reach = math.ceil(SPRAY_RADIUS_M / self.scene.resolution)
-            cells = []
-            for y in range(max(0, cy - reach), min(self.scene.height, cy + reach + 1)):
-                for x in range(max(0, cx - reach), min(self.scene.width, cx + reach + 1)):
-                    distance = math.hypot(x - cx, y - cy) * self.scene.resolution
-                    if distance <= SPRAY_RADIUS_M and self.scene.free((x, y)) and line_visible(self.scene, self.robot, (x, y)):
-                        self.spray_strength[y, x] = 1. - .5 * distance / SPRAY_RADIUS_M
-                        cells.append((x, y))
-            self.spray_cells = tuple(cells)
-        return any(self.heat[y, x] >= HAZARD_HEAT or self.fire[y, x] >= SPRAY_FIRE_TRIGGER
-                   for x, y in self.spray_cells)
+    def place_sprinklers(self):
+        """Choose a single interior mounting point for each suitable scanned room."""
+        clearance = .5 / self.scene.resolution
+        reach = math.floor(clearance)
+        offsets = [(dx, dy) for dx in range(-reach, reach + 1)
+                   for dy in range(-reach, reach + 1)
+                   if math.hypot(dx, dy) <= clearance]
+        heads = []
+        for room in self.scene.rooms:
+            if room.get('label') in {'outdoor_other', 'balcony', 'patio', 'garage'}:
+                continue
+            cells = {tuple(cell) for cell in room['cells'] if self.scene.free(cell)}
+            interior = [(x, y) for x, y in cells
+                        if all((x + dx, y + dy) in cells for dx, dy in offsets)]
+            if interior:
+                center = tuple(sum(cell[axis] for cell in cells) / len(cells) for axis in (0, 1))
+                head = min(interior, key=lambda cell: (math.dist(cell, center), cell))
+                if head not in heads:
+                    heads.append(head)
+        return heads
+
+    def sprinkler_reach(self, origin):
+        cx, cy = origin
+        reach = math.ceil(SPRAY_RADIUS_M / self.scene.resolution)
+        rows, cols, weights = [], [], []
+        for y in range(max(0, cy - reach), min(self.scene.height, cy + reach + 1)):
+            for x in range(max(0, cx - reach), min(self.scene.width, cx + reach + 1)):
+                distance = math.hypot(x - cx, y - cy) * self.scene.resolution
+                if distance <= SPRAY_RADIUS_M and line_visible(self.scene, origin, (x, y)):
+                    rows.append(y)
+                    cols.append(x)
+                    weights.append(1. - .5 * distance / SPRAY_RADIUS_M)
+        return rows, cols, weights
+
+    def update_sprinklers(self):
+        self.spray_strength.fill(0.)
+        active = set()
+        if self.sprinkler_heads and (self.status == 'running' or self.hazards_running):
+            hot = (self.heat >= HAZARD_HEAT) | (self.fire >= SPRAY_FIRE_TRIGGER)
+            for i, (rows, cols, weights) in enumerate(self.sprinkler_coverage):
+                if hot[rows, cols].any():
+                    active.add(i)
+                    self.spray_strength[rows, cols] = np.maximum(self.spray_strength[rows, cols], weights)
+        if active - self.active_sprinklers:
+            self.log('Automatic scene sprinkler activated.')
+        self.active_sprinklers = active
+        return bool(active)
 
     def hazards(self,dt):
         """Advance finite fuel, wall-confined diffusion and ambient exchange."""
-        spraying = self.status == 'running' and self.automatic_sprinkler()
-        if spraying and not self.spraying:
-            self.log('Automatic sprinkler activated.')
-        self.spraying = spraying
+        spraying = self.update_sprinklers()
         dt = dt * HAZARD_TIME_SCALE   # demo pacing; see HAZARD_TIME_SCALE
         scale = (.2 / self.scene.resolution) ** 2
         kh, ks = .30 * scale, .50 * scale
@@ -1004,8 +1036,11 @@ class Simulation:
         return dict(scene_id=self.scene.id,scenario=self.scenario,time=round(self.time,2),status=self.status,
                     hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,
                     incident=self.incident,
-                    sprinkler=dict(radius_m=SPRAY_RADIUS_M, origin=self.spray_origin, cells=self.spray_cells)
-                    if self.spraying and self.status == 'running' else None,
+                    sprinklers=[
+                        dict(origin=origin, cells=list(zip(self.sprinkler_coverage[i][1], self.sprinkler_coverage[i][0]))
+                             if i in self.active_sprinklers and (self.status == 'running' or self.hazards_running) else [])
+                        for i, origin in enumerate(self.sprinkler_heads)
+                    ],
                     hazard_sensor=self.hazard_sensor(),fire=self.fire.round(3).tolist(),
                     robot=self.robot,heading=round(self.heading,4),pose=self.camera_pose(),survivors=public,
                     heat=self.heat.round(3).tolist(),smoke=self.smoke.round(3).tolist(),observed=self.observed.astype(int).tolist(),

@@ -1,28 +1,39 @@
 """Room fire-risk map: pre-incident fixture information that changes the order rooms are searched.
 
-Rooms with a gas heater are searched first (an ignition source near occupants), rooms with fire sprinklers
+Rooms with a gas source are searched first (an ignition source near occupants), rooms with fire sprinklers
 slightly later (suppression buys time), and rooms with neither sit in the middle. The map multiplies the
 building-use search prior; it never reads simulator survivor or ignition truth, and it is not sensor data.
 
 Sources, in order of precedence:
 - operator tags per room (``scenario['room_risk']``), entered in the scenario editor;
-- the CoStar building default, applied to every room. The kit records sprinklers and gas heating per building
+- the CoStar building default, applied to every room. The kit records sprinklers and gas appliances per building
   or home, never per room: commercial-property ``hasSprinklers`` (null = unknown, not no) and, for
-  residential-listing-features joins, a ``gas_heating`` field ("Heating System Uses Gas"). Lawn "Sprinkler
+  residential-listing-features joins, gas heating and appliance fields. Lawn "Sprinkler
   System" lines under Lot Details are irrigation and must never be mapped to fire sprinklers.
 """
 from __future__ import annotations
 
 FACTORS = {'gas_heater': 1.5, 'both': 1.2, 'neither': 1.0, 'unknown': 1.0, 'sprinkler': 0.8}
-LABELS = {'gas_heater': 'Gas heater', 'sprinkler': 'Fire sprinkler', 'both': 'Gas heater + sprinkler',
+LABELS = {'gas_heater': 'Gas source', 'sprinkler': 'Fire sprinkler', 'both': 'Gas source + sprinkler',
           'neither': 'Neither', 'unknown': 'Unknown'}
 OPERATOR_TAGS = ('gas_heater', 'sprinkler', 'both', 'neither')   # 'unknown' is the absence of a tag
-NOTE = 'Pre-incident fixture tags (operator-entered or CoStar building default); search order only, not sensor data.'
+NOTE = 'Room search priority uses simulated sprinklers, operator tags, and CoStar building defaults.'
 
 
 def _field(scene, key):
     costar = (scene.meta or {}).get('costar') or {}
     return next((f for f in costar.get('fields', []) if f.get('key') == key), None)
+
+
+def recorded_sprinklers(scene):
+    """Return CoStar's explicit fire-sprinkler status, or None if unknown."""
+    present = (_field(scene, 'has_sprinklers') or {}).get('value')
+    if type(present) is bool:
+        return present
+    system = (_field(scene, 'sprinkler_type') or {}).get('value')
+    if system in ('Wet', 'Dry', 'Esfr'):
+        return True
+    return None
 
 
 def _combine(gas, sprinkler):
@@ -36,14 +47,18 @@ def _combine(gas, sprinkler):
 
 def building_default(scene):
     """(tag, provenance) for the whole building from the scene's CoStar join."""
-    provenance = []
-    values = {}
-    for name, key in (('sprinkler', 'has_sprinklers'), ('gas', 'gas_heating')):
-        entry = _field(scene, key)
-        values[name] = None if entry is None else entry.get('value')
-        if entry is not None:
-            provenance.append({k: entry.get(k) for k in ('key', 'dataset', 'source_id', 'record_type', 'field_path', 'value')})
-    tag = _combine(values['gas'], values['sprinkler'])
+    fields = ((scene.meta or {}).get('costar') or {}).get('fields', [])
+    gas_keys = {'gas_heating', 'gas_water_heater', 'gas_range', 'gas_mixed_range',
+                'gas_oven', 'gas_cooktop', 'gas_fireplace', 'gas_cooling'}
+    gas_values = [field.get('value') for field in fields if field.get('key') in gas_keys]
+    gas = True if any(value is True for value in gas_values) else None
+    if gas_values and all(value is False for value in gas_values):
+        gas = False
+    provenance = [
+        {key: field.get(key) for key in ('key', 'dataset', 'source_id', 'record_type', 'field_path', 'value')}
+        for field in fields if field.get('key') in gas_keys | {'has_sprinklers', 'sprinkler_type'}
+    ]
+    tag = _combine(gas, recorded_sprinklers(scene))
     if not provenance:
         source = 'no CoStar join'
     else:
@@ -51,16 +66,23 @@ def building_default(scene):
     return tag, dict(source=source, fields=provenance)
 
 
-def room_map(scene, overrides=None):
+def room_map(scene, overrides=None, sprinkler_rooms=()):
     """Room id -> {tag, factor, source, ...}. Overrides must already be validated."""
     overrides = overrides or {}
     default, provenance = building_default(scene)
     out = {}
     for room in scene.rooms:
         operator = overrides.get(room['id'])
-        tag = operator or default
+        installed = room['id'] in sprinkler_rooms
+        fallback = _combine(default in ('gas_heater', 'both'), True) if installed else default
+        tag = operator or fallback
+        if installed and operator:
+            tag = _combine(operator in ('gas_heater', 'both'), True)
+        source = 'operator' if operator else 'costar building default'
+        if installed:
+            source = 'simulated sprinkler + ' + source
         out[room['id']] = dict(id=room['id'], name=room['name'], label=room.get('label'), tag=tag, tag_label=LABELS[tag],
-                               factor=FACTORS[tag], source='operator' if operator else 'costar building default',
+                               factor=FACTORS[tag], source=source, default_tag=fallback, simulated_sprinkler=installed,
                                provenance=None if operator else provenance['source'])
     return out
 
@@ -80,7 +102,7 @@ def describe(scene, risk):
     _, provenance = building_default(scene)
     parts = ', '.join(f"{n} {LABELS[t].lower()}" for t, n in sorted(counts.items(), key=lambda kv: -FACTORS[kv[0]]))
     return (f"Room risk map: {parts} (default from {provenance['source']}). "
-            'Gas heater 1.5x, sprinkler 0.8x search priority; fixture tags, not sensor data.')
+            'Gas source 1.5x, sprinkler 0.8x search priority; fixture tags, not sensor data.')
 
 
 def public(scene, risk):

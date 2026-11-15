@@ -178,7 +178,8 @@ def test_real_bundle_alignment_and_mission():
     checks = scene.meta['checks']
     assert checks['passed'] and checks['mesh_walls_on_blocked_cells'] >= .95 and checks['rooms_reachable_from_exit']
     assert len(scene.exits) == 1 and scene.meta['exit_info'][0]['opening_width_m'] >= .6
-    assert (REAL / 'mesh.gltf').exists() and (REAL / 'floor.png').exists()
+    assert all((REAL / name).is_file() for name in scene.meta['assets'])
+    assert (REAL / scene.meta['mesh']['file']).is_file()
     preset = presets.build(scene, 'standard')
     report = compare(scene, preset['scenario'])['reports']
     assert all(r['status'] in ('completed', 'accounted', 'withdrawn', 'unresolved') for r in report.values())

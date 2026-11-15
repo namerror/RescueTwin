@@ -34,7 +34,7 @@ interface Paired { experiment?: Record<string, unknown>; status: string; reports
 interface SimState {
   incident?: { origin: Cell; debris: Cell | null; breached?: Cell[]; time: number } | null;
   vision_installed?: boolean;
-  sprinkler?: { radius_m: number; origin: Cell; cells: Cell[] } | null;
+  sprinklers?: { origin: Cell; cells: Cell[] }[];
   fire?: number[][];
   searched_rooms?: string[];
   hazard_sensor?: { radius_m: number; source_distance_m: number | null;
@@ -105,7 +105,7 @@ $('app').innerHTML = `
           <div class="layer-controls" aria-label="Scene layers">
             <label><input type="checkbox" id="walls-layer" checked />Walls</label>
             <label id="cutaway-control" hidden title="Operator view clips the scanned mesh above this height; robot camera always sees full geometry">Cutaway <select id="cutaway-height"><option value="1.0">1.0 m</option><option value="1.6" selected>1.6 m</option><option value="2.2">2.2 m</option><option value="off">Off</option></select></label>
-            <label title="Room fire-risk map: gas heater (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
+            <label title="Room fire-risk map: gas source (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
             <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
             <label><input type="checkbox" id="fire-layer" checked />Flames</label>
             <label><input type="checkbox" id="heat-layer" /><span class="swatch heat"></span>Heat map</label>
@@ -115,7 +115,7 @@ $('app').innerHTML = `
           </div>
         </div>
         <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
-        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated; blue through walls)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas heater</span><span><i class="legend-risk sprinkler"></i>Sprinkler</span><span><i class="legend-risk both"></i>Both</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
+        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated; blue through walls)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas source</span><span><i class="legend-risk sprinkler"></i>Sprinkler risk tag</span><span><i class="legend-risk both"></i>Both</span><span><i class="legend-risk sprinkler"></i>Simulated ceiling sprinkler</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
         <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates are grid cells; the scene's origin and resolution convert them to metres in the scan frame. Choose an editing tool in Scenario setup, then apply it here or click the map.</p></details>
       </section>
       <aside class="sidebar">
@@ -144,7 +144,7 @@ $('app').innerHTML = `
           <p id="building-use-hint" class="field-hint"></p>
           <label class="seed-label" for="human-variant">Survivor appearance <select id="human-variant"><option value="adult-male">Adult man</option><option value="adult-female">Adult woman</option><option value="child-male">Boy</option><option value="child-female">Girl</option><option value="older-male">Older man</option><option value="older-female">Older woman</option><option value="mixed">Mixed: one of each, repeated</option></select></label>
           <p class="field-hint">Synthetic character appearances. Apply to update the people in the scene; the selection stays fixed during runs and comparisons.</p>
-          <div class="room-risk"><span class="seed-label" title="Pre-incident fixture tags per room. Gas heater 1.5x search priority, sprinkler 0.8x, neither/unknown 1x">Room fire risk</span><div id="room-risk-list"></div><p id="room-risk-hint" class="field-hint"></p></div>
+          <div class="room-risk"><span class="seed-label" title="Pre-incident fixture tags per room. Gas source 1.5x search priority, sprinkler 0.8x, neither/unknown 1x">Room fire risk</span><div id="room-risk-list"></div><p id="room-risk-hint" class="field-hint"></p></div>
           <div id="presets" class="preset-list"></div>
           <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label title="Mark or unmark a placed survivor as unable to follow the robot (checked on contact)"><input name="tool" type="radio" value="immobile" /><span><b aria-hidden="true">♿</b>Can't walk</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
           <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
@@ -458,23 +458,25 @@ function syncBuildingUse(): void {
     : '';
 }
 
-interface RiskRoom { id: string; name: string; tag: string; tag_label: string; factor: number; source: string; provenance: string | null }
+interface RiskRoom { default_tag: string; simulated_sprinkler: boolean; id: string; name: string; tag: string; tag_label: string; factor: number; source: string; provenance: string | null }
 interface RiskMap { rooms: RiskRoom[]; building_default: string; building_source: string; tags: { id: string; label: string; factor: number }[]; note: string }
 let riskMap: RiskMap | null = null;
 const RISK_COLORS: Record<string, string> = { gas_heater: '#ff8a3d', sprinkler: '#4aa8ff', both: '#b07cff' };
-const RISK_LABELS: Record<string, string> = { gas_heater: 'Gas heater', sprinkler: 'Fire sprinkler', both: 'Gas heater + sprinkler', neither: 'Neither', unknown: 'Unknown' };
+const RISK_LABELS: Record<string, string> = { gas_heater: 'Gas source', sprinkler: 'Fire sprinkler', both: 'Gas source + sprinkler', neither: 'Neither', unknown: 'Unknown' };
 
 async function loadRiskMap(): Promise<void> {
   riskMap = await api<RiskMap>('risk-map');
-  const fallback = RISK_LABELS[riskMap.building_default] ?? riskMap.building_default;
-  $('room-risk-list').innerHTML = riskMap.rooms.map(r => `<label class="room-risk-row"><span>${escape(r.name)}</span><select data-room="${escape(r.id)}"><option value="">Default (kit: ${escape(fallback)})</option>` +
+  $('room-risk-list').innerHTML = riskMap.rooms.map(r => `<label class="room-risk-row"><span>${escape(r.name)}</span><select data-room="${escape(r.id)}"><option value="">Default (${escape(RISK_LABELS[r.default_tag] ?? r.default_tag)})</option>` +
     riskMap!.tags.map(t => `<option value="${escape(t.id)}">${escape(t.label)} · ${t.factor}×</option>`).join('') + '</select></label>').join('');
   syncRoomRisk();
 }
 
-/** Effective tag per room: the draft's operator override, else the CoStar building default. */
 function roomRiskTag(roomId: string): string {
-  return draft?.room_risk?.[roomId] ?? riskMap?.building_default ?? 'unknown';
+  const room = riskMap?.rooms.find(room => room.id === roomId);
+  const override = draft?.room_risk?.[roomId];
+  if (!override) return room?.default_tag ?? 'unknown';
+  if (!room?.simulated_sprinkler) return override;
+  return override === 'gas_heater' || override === 'both' ? 'both' : 'sprinkler';
 }
 
 function syncRoomRisk(): void {
@@ -484,8 +486,8 @@ function syncRoomRisk(): void {
     select.disabled = !idle() || busy;
   });
   const tagged = Object.keys(draft?.room_risk ?? {}).length;
-  $('room-risk-hint').textContent = `Default for untagged rooms: ${RISK_LABELS[riskMap.building_default] ?? riskMap.building_default} (${riskMap.building_source}). ` +
-    `${tagged ? `${tagged} operator tag${tagged > 1 ? 's' : ''}. ` : ''}Gas heater rooms are searched first, sprinklered rooms slightly later. Fixture tags, not sensor data.`;
+  $('room-risk-hint').textContent = `Simulated sprinkler heads count toward room risk. Building default: ${RISK_LABELS[riskMap.building_default] ?? riskMap.building_default} (${riskMap.building_source}). ` +
+    `${tagged ? `${tagged} operator tag${tagged > 1 ? 's' : ''}. ` : ''}Gas source rooms are searched first, sprinklered rooms slightly later. Fixture tags, not sensor data.`;
   drawRiskLayer();
 }
 
@@ -539,7 +541,7 @@ function renderSceneInfo(): void {
     return `<div class="property-row"><dt>${escape(f.label)}</dt><dd>${escape(value)}${f.note ? `<small>${escape(f.note)}</small>` : ''}</dd></div>`;
   };
   $('property-card').innerHTML = c
-    ? `<dl class="property-list">${['address', 'property_type', 'stories', 'total_units', 'year_built', 'floor_plan', 'beds', 'baths', 'area', 'max_occupants', 'sprinkler_type', 'has_sprinklers', 'smoke_detector', 'gas_heating', 'gas_water_heater', 'gas_range', 'gas_oven', 'construction_material'].map(k => show(pick(k))).join('')}</dl><p class="field-hint">${escape(c.disclaimer)}</p>`
+    ? `<dl class="property-list">${['address', 'property_type', 'stories', 'total_units', 'year_built', 'floor_plan', 'beds', 'baths', 'area', 'max_occupants', 'sprinkler_type', 'has_sprinklers', 'smoke_detector', 'gas_heating', 'gas_water_heater', 'gas_range', 'gas_mixed_range', 'gas_oven', 'gas_cooktop', 'gas_fireplace', 'gas_cooling', 'construction_material'].map(k => show(pick(k))).join('')}</dl><p class="field-hint">${escape(c.disclaimer)}</p>`
     : '<p class="field-hint">No CoStar record for this scene; capacity presets are unavailable.</p>';
   const checks = scene.checks ? Object.entries(scene.checks).filter(([k]) => !['failed'].includes(k)) : [];
   $('provenance').innerHTML = `
@@ -1126,11 +1128,23 @@ function drawDynamic(): void {
   robot.position.copy(position(state.robot, 0));
   robot.rotation.y = state.heading;
   dynamicLayer.add(operatorOnly(robot));
-  if (state.sprinkler) {
-    const nozzle = position(state.sprinkler.origin, 0.65);
+  const sprinklers = state.sprinklers ?? [];
+  if (sprinklers.length) {
+    const height = wallHeightOf() - 0.1;
+    const heads = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.09, 0.12, 0.08, 12),
+      new THREE.MeshBasicMaterial({ color: '#55ceff' }), sprinklers.length,
+    );
+    const matrix = new THREE.Matrix4();
+    sprinklers.forEach(({ origin }, index) => heads.setMatrixAt(index, matrix.makeTranslation(position(origin, height))));
+    dynamicLayer.add(operatorOnly(heads));
+  }
+  for (const sprinkler of sprinklers) {
+    if (!sprinkler.cells.length) continue;
+    const nozzle = position(sprinkler.origin, wallHeightOf() - 0.15);
     const vertices: number[] = [];
-    const stride = Math.max(1, Math.ceil(state.sprinkler.cells.length / 32));
-    for (const [index, cell] of state.sprinkler.cells.entries()) {
+    const stride = Math.max(1, Math.ceil(sprinkler.cells.length / 32));
+    for (const [index, cell] of sprinkler.cells.entries()) {
       if (index % stride !== 0) continue;
       const ground = position(cell, 0.06);
       const arc = nozzle.clone().lerp(ground, 0.55);
