@@ -40,7 +40,7 @@ Record each consequential decision with the observation that triggered it, route
 
 ## Runtime status
 
-Updated 2026-11-14 on branch `scan-mesh-fire-tuning`. The controller is `rescuetwin/core.py`.
+The controller is `rescuetwin/core.py`.
 
 **Implemented in the controller**
 - **Escort limits:** human limits (heat 0.6, smoke 0.5, observed cells only) and the local interlock apply for
@@ -82,8 +82,10 @@ Updated 2026-11-14 on branch `scan-mesh-fire-tuning`. The controller is `rescuet
 - **When it is asked:** only when the robot has no committed goal. It is never asked during an escort, a
   withdrawal or a paired comparison.
 - **Models:** the configured model first, then the fallbacks in `GEMINI_FALLBACK_MODELS`, each with a 3 s
-  budget. Any failure or rejection is logged and the deterministic planner continues; the mission never pauses.
-- **Operator view:** a "Gemini supervisor" switch and live status sit in the Run simulation panel.
+  budget (configurable). Failures or rejections use deterministic fallback. In default decision-quality mode,
+  the mission clock pauses during inference; this is not real-time response performance.
+- **Operator view:** select Gemini under **Mission algorithm** in Mission settings; status and inference-pause
+  controls describe the active supervisor.
 
 **Still simplified**
 - **Mobility check:** it is scripted from the scenario, not perceived.

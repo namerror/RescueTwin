@@ -9,6 +9,14 @@ import pytest
 from scripts import bringup as b
 
 
+def test_missing_private_selection_explains_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(b, 'ROOT', tmp_path)
+    monkeypatch.setattr(sys, 'argv', ['bringup'])
+    monkeypatch.delenv('RESCUETWIN_MODEL_ID', raising=False)
+    with pytest.raises(ValueError, match='Set RESCUETWIN_MODEL_ID'):
+        b.main()
+
+
 def test_dotenv_is_data_and_environment_wins(tmp_path):
     path = tmp_path/'.env'
     path.write_text('export RESCUETWIN_MODEL_ID="scene"\nKEY=from-file # comment\nVALUE=$(touch /tmp/do-not-run)\n')
@@ -98,7 +106,7 @@ def test_scene_failure_preserves_published_bundle(tmp_path,monkeypatch):
     monkeypatch.setattr(b,'check_bundle',lambda *args:(_ for _ in ()).throw(ValueError('bad')))
     monkeypatch.setattr(b,'cached_obj',lambda *args:tmp_path/'mesh.obj')
     monkeypatch.setattr(prepare_scene,'fetch',lambda *args:(_ for _ in ()).throw(ValueError('fetch failed')))
-    with pytest.raises(ValueError,match='fetch failed'): b.prepare('m',{}, annotation={**json.loads((Path(__file__).resolve().parents[1]/'scenes/9A46aT7FCPg.json').read_text()), 'model':'m'})
+    with pytest.raises(ValueError,match='fetch failed'): b.prepare('m',{}, annotation={**json.loads((Path(__file__).resolve().parent/'fixtures/reviewed-scene.json').read_text()), 'model':'m'})
     assert manifest.read_text()=='previous bundle'
 
 
@@ -146,7 +154,7 @@ def test_missing_matterpak_attempts_fetch_and_preserves_bundle(tmp_path,monkeypa
         calls.append(model)
         raise ValueError('No MatterPak download link; check credentials/access')
     monkeypatch.setattr(scene_assets,'fetch_matterpak',fetch)
-    with pytest.raises(ValueError,match='credentials/access'):b.prepare('m',{}, annotation={**json.loads((Path(__file__).resolve().parents[1]/'scenes/9A46aT7FCPg.json').read_text()), 'model':'m'})
+    with pytest.raises(ValueError,match='credentials/access'):b.prepare('m',{}, annotation={**json.loads((Path(__file__).resolve().parent/'fixtures/reviewed-scene.json').read_text()), 'model':'m'})
     assert calls==['m'] and (bundle/'scene.json').read_text()=='previous'
 
 

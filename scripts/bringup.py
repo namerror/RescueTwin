@@ -329,7 +329,7 @@ def main():
     os.chdir(ROOT)
     env = dotenv(ROOT/'.env', os.environ)
     os.environ.update(env)
-    model = env.get('RESCUETWIN_MODEL_ID', '9A46aT7FCPg')
+    model = env.get('RESCUETWIN_MODEL_ID', '')
     if args.export_scenes:
         manifest = sharing.export(ROOT, args.export_scenes.resolve(), model)
         print(f"Exported {len(manifest['scenes'])} scenes to {args.export_scenes}.", flush=True)
@@ -337,8 +337,8 @@ def main():
     manifest = sharing.validate(json.loads(args.import_scenes.read_text())) if args.import_scenes else None
     if manifest:
         model = manifest['default_model']
-    if not manifest and (not re.fullmatch(r'[A-Za-z0-9]+', model) or not (sharing.annotation_path(ROOT, model).is_file() or (ROOT/'data/prepared'/model/'bundle/scene.json').is_file())):
-        raise ValueError('Model needs reviewed scenes/MODEL.json annotations. Supported: '+', '.join(p.stem for p in (ROOT/'scenes').glob('*.json')))
+    if not manifest and not args.environment and (not re.fullmatch(r'[A-Za-z0-9]+', model) or not (sharing.annotation_path(ROOT, model).is_file() or (ROOT/'data/prepared'/model/'bundle/scene.json').is_file())):
+        raise ValueError('Set RESCUETWIN_MODEL_ID in .env to a local reviewed scene, or use --import-scenes /path/to/private-scenes.json. See docs/DATA.md.')
     backend = port(env.get('RESCUETWIN_BACKEND_PORT','8000')); frontend = port(env.get('RESCUETWIN_FRONTEND_PORT','5173'))
     if backend == frontend: raise ValueError('Backend and frontend ports must differ')
     available_port(backend); available_port(frontend)

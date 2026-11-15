@@ -149,7 +149,7 @@ def export(root, destination, default_model):
     models = [entry['model'] for entry in entries]
     if not models:
         raise ValueError('No annotated prepared scenes to export')
-    default = default_model if default_model in models else ('9A46aT7FCPg' if '9A46aT7FCPg' in models else next(iter(models), None))
+    default = default_model if default_model in models else models[0]
     manifest = validate({'schema': SCHEMA, 'default_model': default, 'scenes': entries})
     write_json(destination, manifest)
     return manifest

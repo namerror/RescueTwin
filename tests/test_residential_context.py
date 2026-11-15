@@ -6,7 +6,7 @@ from scripts.residential_context import context
 def kit(tmp_path):
     (tmp_path/'data').mkdir();(tmp_path/'schemas').mkdir()
     (tmp_path/'residential-listings.csv').write_text('ListingId,MatterportModelId\n12,scan\n12,wrong\n')
-    listing=dict(id=12,property=dict(address=dict(fullStreetAddress='1 Main St'),stories=1),
+    listing=dict(id=12,property=dict(address=dict(fullStreetAddress='Synthetic test address'),stories=1),
                  media=[dict(videoKey='scan',externalReferenceType=36)])
     (tmp_path/'data/residential-listings.jsonl').write_text(json.dumps(listing)+'\n')
     (tmp_path/'data/residential-listing-features.jsonl').write_text(json.dumps(dict(id=12,features=[

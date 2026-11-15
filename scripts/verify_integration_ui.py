@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright
 from rescuetwin.core import line_visible
 
 
-def verify(url, output, timeout=180, model="9A46aT7FCPg", mission_only=False):
+def verify(url, output, timeout=180, model=None, mission_only=False):
     output.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=True,args=['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'])
@@ -32,7 +32,7 @@ def verify(url, output, timeout=180, model="9A46aT7FCPg", mission_only=False):
         page.goto(url);page.wait_for_function("!document.querySelector('#start').disabled",timeout=45000)
         options=page.locator('#scene-select option').evaluate_all('(els) => els.map(e => e.value)')
         results=[]
-        for sid in ([] if mission_only else ['9A46aT7FCPg-floor1','5p6KKvHqh3W-floor1']):
+        for sid in ([] if mission_only else [sid for sid in options if sid != 'development-apartment']):
             page.select_option('#scene-select',sid)
             page.wait_for_function("id => document.querySelector('#scene-select').value === id && !document.querySelector('#start').disabled",arg=sid,timeout=45000)
             page.locator('.view-options').evaluate('(el) => el.open = true');page.locator('#plan').click();page.screenshot(path=str(output/(sid+'-plan.png')),full_page=True)
@@ -124,4 +124,4 @@ def verify(url, output, timeout=180, model="9A46aT7FCPg", mission_only=False):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--url',default='http://127.0.0.1:5174');p.add_argument('--timeout',type=int,default=180);p.add_argument('--model',default='9A46aT7FCPg');p.add_argument('--mission-only',action='store_true');p.add_argument('--output',type=Path,default=Path('data/validation/browser'));a=p.parse_args();verify(a.url,a.output,a.timeout,a.model,a.mission_only)
+    p=argparse.ArgumentParser();p.add_argument('--url',default='http://127.0.0.1:5174');p.add_argument('--timeout',type=int,default=180);p.add_argument('--model',required=True);p.add_argument('--mission-only',action='store_true');p.add_argument('--output',type=Path,default=Path('data/validation/browser'));a=p.parse_args();verify(a.url,a.output,a.timeout,a.model,a.mission_only)

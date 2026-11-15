@@ -1,0 +1,17 @@
+{
+  "model": "demo",
+  "floor_label": "Floor 1",
+  "resolution": 0.25,
+  "property_id": 7,
+  "floor_plan_id": 8,
+  "exits": [
+    {
+      "id": "entry",
+      "label": "Synthetic entry",
+      "segment": [[0, 1], [0, 2]],
+      "verified": "Synthetic test fixture; not a surveyed property",
+      "evidence": ["Invented doorway for offline annotation validation"],
+      "beyond": "Synthetic exterior"
+    }
+  ]
+}

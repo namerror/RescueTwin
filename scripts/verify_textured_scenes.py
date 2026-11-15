@@ -36,7 +36,7 @@ def check_depth(scene, frame, depth):
     return records
 
 
-def verify(url='http://127.0.0.1:5174'):
+def verify(url, models):
     out = Path('data/validation/textured-scenes'); out.mkdir(parents=True, exist_ok=True)
     reports, errors, frames, failed, acknowledgements = [], [], [], [], []
     with sync_playwright() as p:
@@ -54,7 +54,7 @@ def verify(url='http://127.0.0.1:5174'):
         page.on('response', acknowledge)
         page.request.post(url+'/api/control', data={'action':'reset'})
         page.goto(url)
-        for i, model in enumerate(['9A46aT7FCPg', '5p6KKvHqh3W', '9A46aT7FCPg']):
+        for i, model in enumerate([*models, models[0]]):
             sid = model+'-floor1'
             with page.expect_response(lambda r: r.url.endswith('/api/scene') and r.request.method == 'POST') as switched:
                 page.select_option('#scene-select', sid)
@@ -103,4 +103,10 @@ def verify(url='http://127.0.0.1:5174'):
     assert not errors and not failed
 
 
-if __name__ == '__main__': verify()
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--url', default='http://127.0.0.1:5174')
+    parser.add_argument('--models', nargs='+', required=True)
+    args = parser.parse_args()
+    verify(args.url, args.models)

@@ -8,7 +8,7 @@ Three arms per scenario, same frozen scenario, analytic-development perception (
              during inference (NOT real-time performance)
 
 Model output is not deterministic and calls depend on service availability; treat results as illustrative.
-Usage: python scripts/agent_eval.py --seeds 1 2 3 --uses residential assembly --output data/validation/agent-eval.json
+Usage: python scripts/agent_eval.py --scene LOCAL_SCENE_ID --seeds 1 2 3 --uses residential assembly --output data/validation/agent-eval.json
 """
 import argparse
 import json
@@ -70,7 +70,7 @@ def run(scene, scenario, arm, agent):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--scene', default='9A46aT7FCPg-floor1')
+    parser.add_argument('--scene', required=True)
     parser.add_argument('--seeds', type=int, nargs='+', default=[1, 2, 3])
     parser.add_argument('--uses', nargs='+', default=['residential', 'assembly'])
     parser.add_argument('--arms', nargs='+', default=['built-in', 'realtime', 'paused'])

@@ -8,7 +8,7 @@ import sys
 import pytest
 from scripts import bringup as b, scene_sharing as s
 
-RECIPE = json.loads((Path(__file__).resolve().parents[1]/'scenes/9A46aT7FCPg.json').read_text())
+RECIPE = json.loads((Path(__file__).resolve().parent/'fixtures/reviewed-scene.json').read_text())
 
 
 def recipe(model='m'):
@@ -179,10 +179,12 @@ def test_import_publication_and_registration_recipe(tmp_path, monkeypatch, join)
 
 
 def test_catalog_annotations_roundtrip_without_losing_reviewed_fields(tmp_path):
-    root = Path(__file__).resolve().parents[1]
-    for path in sorted((root/'scenes').glob('*.json')):
-        reviewed = json.loads(path.read_text())
-        bundle(tmp_path, path.stem, reviewed)
-    data = s.export(tmp_path, tmp_path/'share.json', '9A46aT7FCPg')
+    reviewed = {model: recipe(model) for model in ('alpha', 'beta')}
+    reviewed['beta']['room_clips'] = [dict(room_id='room', polygon=[[0,0],[2,0],[2,2]], evidence='Synthetic review')]
+    reviewed['beta']['notes'] = ['Synthetic annotations retain optional fields.']
+    for model, annotation in reviewed.items():
+        bundle(tmp_path, model, annotation)
+    data = s.export(tmp_path, tmp_path/'share.json', 'beta')
+    assert data['default_model'] == 'beta'
     for entry in data['scenes']:
-        assert entry['annotation'] == json.loads((root/'scenes'/f"{entry['model']}.json").read_text())
+        assert entry['annotation'] == reviewed[entry['model']]

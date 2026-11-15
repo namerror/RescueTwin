@@ -1,122 +1,50 @@
-# RescueTwin architecture
+# Architecture
 
-## Design status and purpose
+RescueTwin combines static building scans with a local emergency simulation and a browser-rendered robot camera. The operator can inspect simulator truth; mission decisions use observations and belief.
 
-Accepted implementation target for a hackathon rehearsal tool for building safety
-teams; robotics engineers are a secondary audience. This document specifies desired
-behavior, not a completed or calibrated emergency-response product. Existing README
-language describes a broader vision. Real sponsor geometry/records must be distinguished
-from synthetic hazards, occupants, robot behavior, and any development fixture.
-
-Use Python/FastAPI/NumPy for authoritative simulation and a TypeScript/Three.js client.
-A kinematic mobile robot avoids heavy locomotion physics. Use a pretrained small YOLO
-person detector and a hosted Gemini tool-calling mission agent; no end-to-end VLA
-training. Model IDs are configuration, not guaranteed access: validate available
-weights/API capabilities before choosing a pinned release. No pooled multi-GPU memory
-assumption is permitted.
-
-The current selected scenes use complete textured MatterPak OBJ/MTL/JPEG packages,
-discovered through `model.bundle(id: "mp:matterpak").assets`. Their source geometry is
-shared between operator rendering and robot RGB-D; operator cutaway does not change
-camera geometry. Collision remains a reconciled 2D grid with recorded openable-door
-assumptions. See [data integration](DATA_INTEGRATION.md) for executable evidence.
-
-## Components and data flow
-
-```text
-CoStar + Matterport → prepared scene bundle → scenario editor
-                                              ↓
-                                  authoritative Python simulator
-                                   ↓                     ↓
-                           local sensor frames     operator truth view
-                                   ↓
-                       perception → belief state
-                                   ↓
-                        mission agent / tool calls
-                                   ↓
-                       action validator → A* → controller
-                                   ↓
-                               simulator
+```mermaid
+flowchart LR
+    C[CoStar property and listing data] --> P[Private scene preparation]
+    M[Matterport spatial data and MatterPak] --> P
+    P --> S[Validated local scene bundle]
+    S --> V[Three.js workbench and RGB-D renderer]
+    S --> N[Python simulation and navigation]
+    V --> Y[YOLO person detection]
+    Y --> B[Robot observations and belief]
+    N --> B
+    B --> G[Baseline / Mission A* / Gemini goals]
+    G --> N
+    N --> V
+    N --> R[Local recording and read-only replay]
 ```
 
-| Component | Responsibility |
-|---|---|
-| Scene preparation | Metric geometry, room labels, occupancy, verified exits, source provenance |
-| Hazard engine | Wall-aware 2D fuel/heat/smoke evolution, deterministic reset |
-| Controller | Bounded speed/turning, inflated footprint, swept collision checks |
-| Sensors/perception | RGB/depth, local heat/smoke, timestamp-aligned person evidence |
-| Belief state | Observed hazards, explored space, deduplicated potential survivors |
-| Mission agent | Inspect, request routes, navigate, escort, retreat/stop, report unresolved |
-| Planner | Distance-only baseline or risk/uncertainty-weighted A*, route revalidation |
-| Operator UI/evaluator | Edit scenarios, render truth/belief views, record events and paired metrics |
+## Scene preparation
 
-The simulator owns time and outcomes. Browser-rendered camera frames must be matched
-to simulation pose/timestamp; reject stale frames. Camera processing delays must not
-block controller updates. Initial targets: controller 20 Hz, hazards and route checks
-5 Hz, camera/detection 2–5 Hz, viewer 30 FPS; measure rather than promise these rates.
+Private annotations define floor scope, registration, robot start, and manually reviewed exits. Preparation combines Matterport spatial information and schematic floor plans with CoStar record joins. Textured MatterPak OBJ/MTL assets supply the rendered scan and geometry reconciliation. Validation checks asset integrity and navigability before publication; failed rebuilds retain the previous bundle.
 
-## Truth, sensing, and action boundaries
+Prepared bundles live in ignored `data/prepared/`. Each contains scene geometry, assets, navigation cells, assumptions, source provenance, and checks. Model IDs and source records remain local. The scene registry loads valid bundles alongside a labeled synthetic development fixture.
 
-Simulator truth is privileged: full hazard grids, scenario survivor locations, ignition
-points, and future deterministic evolution. Operator visualization and evaluation may
-read it. The agent may read static scanned geometry, simulator-provided localization,
-and local sensor observations only. Use separate serializers/endpoints for truth and
-agent data; hiding fields visually is insufficient. Do not pass scenario objects to
-the reasoning context. Test this boundary at API/tool level.
+## Runtime loop
 
-RGB-D has limited range/FOV, wall occlusion, smoke attenuation, and depth invalidation.
-Heat/smoke sensors measure local normalized values. Detection boxes/confidence originate
-from RGB inference, then synchronized depth/pose estimate world locations. Confirm
-across frames and spatially deduplicate. Detection indicates a potential survivor,
-not identity or medical state. Synthetic/oracle test detections are labeled fixtures.
+FastAPI owns scenario state and the simulation clock. NumPy arrays represent heat, smoke, and local belief. The controller executes grid A* navigation and simulated escort. Baseline chooses nearby search goals; Mission A* plans remaining mission goals; optional Gemini proposes goals from observations. All retain controller validation and human escort constraints.
 
-Reason on events: survivor confirmed, inspection complete, route invalidated, action
-failed. Tool results update subsequent decisions. Validate action name/arguments,
-observation version, destination, and current route feasibility; reject stale results.
-Record concise evidence and action rationale, not private chain-of-thought. On timeout
-or malformed response, stop safely or follow a still-validated retreat route; expose
-degraded operation. The model cannot override collision or hazard constraints.
+The TypeScript/Three.js frontend renders the textured scan, synthetic people, and hazards. In image mode it renders synchronized RGB and depth from the requested robot pose. The backend detects people using YOLO, projects detections into the static map with depth, and maintains perception-assigned tracks. The browser must remain available to supply frames. Camera imagery comes from the scan renderer, not a live feed.
 
-Risk-aware A* includes distance, observed heat/smoke, uncertainty, and conservative
-near-term risk inferred from observed growth. It cannot inspect future truth. Inflate
-obstacles for robot and follower clearance; apply separate hazard limits. Escort needs
-a sufficiently observed route. Unknown space can be inspected cautiously. Validate the
-follower position and exposure throughout movement; report unresolved when no viable
-route exists. A single survivor follows at a time.
+Fire, smoke, gas incidents, and sprinkler behavior are illustrative simulation mechanisms. Hazard measurements are analytic simulated sensors; YOLO is person detection only. CoStar building-use context can inform room-search priors, while marketed capacity only configures hypothetical workloads.
 
-## Shared interfaces
+## Knowledge and safety boundaries
 
-Use metres, seconds of simulation time, and Z-up internally. Version one explicit
-viewer transform; grid metadata includes origin, resolution, dimensions, and axis
-convention. Define shared serialized types before parallel implementation:
+- **Operator/evaluation truth:** full hazard fields, scenario placements, and simulated survivor entities.
+- **Robot belief:** static scanned map and known localization, local observations, perception tracks, coverage, and observed hazards. Hidden survivor placements are excluded.
+- **Execution:** goal proposals cannot bypass controller checks. Human escort limits remain in force even where the simulated robot can travel alone.
+- **Development fixtures:** analytic perception uses simulator truth and is explicitly labeled; it does not establish image-based performance.
 
-| Contract | Required content |
-|---|---|
-| SceneBundle | Scene/source IDs, geometry references, rooms, occupancy, exits, transform, CoStar context/provenance |
-| Scenario | Scene ID, seed, robot start, survivor/ignition placements, simulation configuration |
-| HazardFrame (privileged) | Timestamp, grid metadata, heat/smoke/fuel arrays |
-| Observation | Timestamp/version, pose, camera metadata, RGB/depth references, local readings, detection evidence |
-| MissionAction | Action ID, observation version, tool name, arguments |
-| MissionEvent | Timestamp, action/result, evidence references, readable explanation |
+The [robot constitution](ROBOT_CONSTITUTION.md) defines mission intent and is loaded by the interactive supervisor. Its aspirational reporting requirements are distinguished from implemented controller behavior in its runtime-status section.
 
-Provide REST scene/scenario/run controls and separate WebSocket visualization and
-observation streams. Reset clears belief, detections, pending actions, metrics, and
-hazards; pause freezes simulation time. Pin scenario/configuration and planner variant
-for reports. Persist seed/configuration and event history; model nondeterminism means
-a seed alone does not reproduce reasoning decisions.
+## Recording and comparisons
 
-## Stack decisions and extension points
+Recordings preserve scene assets, frozen scenario inputs, state history, submitted camera evidence, and decisions locally. Replay reads historical artifacts without executing inference or changing the live mission.
 
-| Technology | Decision |
-|---|---|
-| Terra Incognita / Isaac Sim | Defer quadruped dynamics and scene-conversion overhead |
-| TARE | Borrow coverage ideas; no ROS 1 dependency |
-| FAR | Optional two-hour post-baseline experiment behind planner interface |
-| Elevation Mapping CuPy | Defer; no terrain/debris requirement |
-| RTAB-Map / BIEVR-LIO | Defer SLAM; known geometry and perfect localization |
-| Nav2 | Future ROS execution/recovery integration |
+Paired distance-only/risk-aware comparisons freeze the scenario, sensors, hazards, and immediate safety rules. They exclude hosted reasoning. Tool-backed Gemini experiments use separate bounded tools and explicit campaign approval. Interactive Gemini normally pauses the mission clock during inference, so mission time is not a real-time latency measurement.
 
-Keep A* available if FAR fails integration or loses hazard/follower checks. Reconfirm
-upstream compatibility before attempting ROS integration; an existing ROS installation
-is not an MVP prerequisite. Vexcel exterior planning and full physical simulation are
-future work. The hazard engine is illustrative, not calibrated fire prediction.
+The prototype assumes one floor, one kinematic robot, static geometry, known localization, and survivors who can follow. It does not implement SLAM, physical manipulation, carrying, or structural collapse. See [Development](DEVELOPMENT.md) for interfaces and checks.

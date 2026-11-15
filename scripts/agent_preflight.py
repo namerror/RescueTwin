@@ -1,4 +1,5 @@
 """Offline campaign proposal. Does not instantiate a Gemini client or grant approval."""
+import argparse
 import json
 from pathlib import Path
 import sys
@@ -10,8 +11,9 @@ from rescuetwin.recording import encoded
 from scripts.experiment_campaign import cases
 
 def main():
+ parser=argparse.ArgumentParser();parser.add_argument('--models',nargs='+',required=True);args=parser.parse_args()
  registry=available();rows=[]
- for model in ('d5gwJczaCwc','TSpwHx7D8yC'):
+ for model in args.models:
   scene=registry[model+'-floor1'];case=next(c for c in cases(scene) if c['name']=='pickup')
   sim=Simulation(scene,case['scenario']);sim.status='running';sim.sense()
   captured=[]
@@ -20,7 +22,7 @@ def main():
   rows.append(dict(scene_id=scene.id,scenario=case['scenario'],initial_request_bytes=size,estimated_input_tokens=size/4))
  maximum_requests=144;mean_input=sum(r['estimated_input_tokens'] for r in rows)/len(rows)
  proposal=dict(approval='pending',model='gemini-3.5-flash-lite',thinking='low',output_token_limit=1024,
-  rpm=15,tpm=250000,rpd=500,quota_source='User supplied AI Studio limits 2026-11-15',wall_clock_limit_s=1800,
+  rpm=None,tpm=None,rpd=None,quota_source='Supply current account quotas before explicit campaign approval',wall_clock_limit_s=1800,
   maximum_requests=maximum_requests,requests_per_mission=24,architectures=['react','planner','contingent'],scenarios=rows,
   estimated_paid_usd=maximum_requests*(mean_input*.30+1024*2.50)/1e6,
   conservative_paid_usd_ceiling=maximum_requests*(32000*.30+1024*2.50)/1e6,

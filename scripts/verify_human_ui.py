@@ -10,8 +10,8 @@ from playwright.sync_api import sync_playwright
 from rescuetwin.scenes import load_bundle
 
 
-def verify(url):
-    scene=load_bundle(Path('data/prepared/TSpwHx7D8yC/bundle'));points=[]
+def verify(url, model):
+    scene=load_bundle(Path('data/prepared')/model/'bundle');points=[]
     for room in scene.rooms:
         for cell in sorted(room['cells'],key=lambda p:math.dist(p,room['observe'][0])):
             cell=tuple(cell)
@@ -46,4 +46,4 @@ def verify(url):
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--url',default='http://127.0.0.1:5178');verify(parser.parse_args().url)
+    parser=argparse.ArgumentParser();parser.add_argument('--url',default='http://127.0.0.1:5178');parser.add_argument('--model',required=True);args=parser.parse_args();verify(args.url,args.model)

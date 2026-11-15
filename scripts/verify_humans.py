@@ -92,4 +92,4 @@ def verify(url, model, selected=None, missions_only=False):
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--url',default='http://127.0.0.1:5178');parser.add_argument('--model',default='9A46aT7FCPg');parser.add_argument('--variants',nargs='*');parser.add_argument('--missions-only',action='store_true');args=parser.parse_args();verify(args.url,args.model,args.variants,args.missions_only)
+    parser=argparse.ArgumentParser();parser.add_argument('--url',default='http://127.0.0.1:5178');parser.add_argument('--model',required=True);parser.add_argument('--variants',nargs='*');parser.add_argument('--missions-only',action='store_true');args=parser.parse_args();verify(args.url,args.model,args.variants,args.missions_only)

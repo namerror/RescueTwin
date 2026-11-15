@@ -11,8 +11,27 @@ from rescuetwin.core import Simulation, compare, line_visible
 from rescuetwin.scenes import load_bundle
 
 ROOT = Path(__file__).resolve().parent.parent
-REAL = ROOT / 'data' / 'prepared' / '9A46aT7FCPg' / 'bundle'
+REAL = Path(os.environ.get('RESCUETWIN_TEST_BUNDLE', ROOT / 'data' / 'test-bundle'))
 KIT = ROOT / 'data' / 'costar-hackathon-kit'
+
+
+def test_default_scene_respects_private_environment_selection(monkeypatch):
+    from types import SimpleNamespace
+    from rescuetwin.scenes import default_scene
+    from rescuetwin.core import fixture
+    first = SimpleNamespace(id='first-floor', source='sponsor-source', meta={'frame': {'model': 'first'}})
+    second = SimpleNamespace(id='second-floor', source='sponsor-source', meta={'frame': {'model': 'second'}})
+    synthetic = fixture()
+    registry = {s.id: s for s in (first, second, synthetic)}
+    monkeypatch.delenv('RESCUETWIN_SCENE', raising=False)
+    monkeypatch.delenv('RESCUETWIN_MODEL_ID', raising=False)
+    assert default_scene(registry) is first
+    monkeypatch.setenv('RESCUETWIN_MODEL_ID', 'second')
+    assert default_scene(registry) is second
+    monkeypatch.setenv('RESCUETWIN_SCENE', first.id)
+    assert default_scene(registry) is first
+    monkeypatch.delenv('RESCUETWIN_SCENE')
+    assert default_scene({synthetic.id: synthetic}) is synthetic
 
 
 def write_bundle(directory, door=True, capacity=4):
@@ -221,18 +240,21 @@ def test_real_bundle_alignment_and_mission():
     assert all(r['status'] in ('completed', 'accounted', 'withdrawn', 'unresolved') for r in report.values())
 
 
-@pytest.mark.skipif(not KIT.exists(), reason='CoStar kit not present (data/ is ignored)')
+@pytest.mark.skipif(not KIT.exists() or not os.environ.get('RESCUETWIN_TEST_ANNOTATION'),
+                    reason='set RESCUETWIN_TEST_ANNOTATION to a private apartment annotation')
 def test_costar_context_provenance():
     import sys
     sys.path.insert(0, str(ROOT / 'scripts'))
     from inspect_sponsor import context
-    ctx = context(KIT, '9A46aT7FCPg', 22572250, 6106437)
+    annotation = json.loads(Path(os.environ['RESCUETWIN_TEST_ANNOTATION']).read_text())
+    model, property_id, plan_id = (annotation[k] for k in ('model', 'property_id', 'floor_plan_id'))
+    ctx = context(KIT, model, property_id, plan_id)
     fields = {f['key']: f for f in ctx['fields']}
-    assert ctx['max_occupants'] == 8 and fields['max_occupants']['field_path'].endswith('.maxOccupants')
-    assert fields['sprinkler_type']['value'].startswith('Unknown')
+    assert ctx['max_occupants'] is not None and fields['max_occupants']['field_path'].endswith('.maxOccupants')
+    assert fields['sprinkler_type']['value'] is not None
     assert all('email' not in json.dumps(f).lower() for f in ctx['fields'])
     with pytest.raises(ValueError):
-        context(KIT, '9A46aT7FCPg', 22572250, 1)
+        context(KIT, model, property_id, -1)
 
 
 def test_capacity_levels_deduplicate_and_keep_counts(mini):

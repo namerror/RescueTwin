@@ -65,7 +65,8 @@ def default_scene(scenes: dict[str, Scene]) -> Scene:
             raise RuntimeError(f'RESCUETWIN_SCENE={wanted} not found; available: {sorted(scenes)}')
         return scenes[wanted]
     real = [s for s in scenes.values() if s.source != 'synthetic']
-    return next((s for s in real if (s.meta.get('frame') or {}).get('model') == '9A46aT7FCPg'), real[0]) if real else scenes['development-apartment']
+    model = os.environ.get('RESCUETWIN_MODEL_ID')
+    return next((s for s in real if (s.meta.get('frame') or {}).get('model') == model), real[0]) if real else scenes['development-apartment']
 
 
 def asset_file(scene, name):

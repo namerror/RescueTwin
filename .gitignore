@@ -22,3 +22,10 @@ frontend/public/models/FemaleOlder.glb
 frontend/public/models/.survivor-*.tmp
 
 shared-scenes.json
+
+# Private sponsor inputs and reviewed property annotations (keep local copies).
+/scenes/
+/matterport_examples/
+/vexcel_resources/
+/.aws/
+/.claude/launch.json

@@ -1,80 +1,68 @@
 # RescueTwin contributor guide
 
-## Status and scope
+## Current scope
 
-The accepted hackathon design is documented in [architecture](docs/ARCHITECTURE.md),
-[MVP](docs/MVP.md), and [implementation guide](docs/IMPLEMENTATION.md). These are
-implementation targets, not evidence that the application is complete. Inspect the
-current source and executable checks before reporting any capability as working.
-The runnable app defaults to the prepared sponsor scene `9A46aT7FCPg` (single verified exit; see docs/SCENE_SELECTION.md) with YOLO on browser-rendered RGB-D. Both selected scenes have validated textured MatterPak bundles (see docs/DATA_INTEGRATION.md). Browser RGB-D is rendered from scans, not live imagery; the synthetic fixture/analytic detector are labelled development modes.
+Read [architecture](docs/ARCHITECTURE.md), [user guide](docs/USER_GUIDE.md),
+[data setup](docs/DATA.md), and [development reference](docs/DEVELOPMENT.md).
+Inspect source and executable checks before reporting a capability as working.
+Prioritize hazard awareness, potential-survivor identification, and adaptive evacuation:
+one floor, one kinematic robot, fire/smoke, and simple survivor escort.
+No carrying, manipulation, structural collapse, trained locomotion, or SLAM.
 
-Priorities: risk detection, potential-survivor identification, and adaptive evacuation
-routing. One floor, one kinematic robot, fire/smoke, and simple survivor escort.
-No structural destruction, carrying, manipulation, trained locomotion, or SLAM in MVP.
-The physics teammate owns the hazard module; agree its contract before integration.
+## Private inputs
 
-## Ignored sponsor data discovery
+Sponsor data cannot be published. `data/`, `scenes/`, `matterport_examples/`, and
+`vexcel_resources/` are ignored and remain local. Do not delete them during cleanup.
+Keep real model/property IDs, addresses, source downloads, weights, recordings,
+original captures, and private scene manifests out of tracked files. Use synthetic
+identifiers in tests and anonymized labels in publication media. Back up private
+files before changing tracking or annotations.
 
-`data/` is ignored by Git. Ordinary file discovery can miss the kit. From repo root:
+For kit discovery, use `rg --files --hidden --no-ignore data/costar-hackathon-kit`.
+Read its `index.md`, relevant `models/<dataset>.md`, `schemas/<dataset>.schema.json`,
+`schemas/enums.json`, and `concepts/data-quality-and-confidence.md` first. Stream
+JSONL records rather than dumping or expanding the full kit.
 
-```bash
-rg --files --hidden --no-ignore data/costar-hackathon-kit
-cat data/costar-hackathon-kit/index.md
-rg --files --hidden --no-ignore matterport_examples vexcel_resources
-```
+Commercial joins: CSV `PropertyId` → Commercial property `id`, plus exact attachment
+`videoKey`. Residential joins: CSV `ListingId` → Residential listings `id`, plus
+matching media `videoKey`; `ResidentialListingId` is a grouping key. Apartment
+floor plans join `apartmentModels[].id` → `propertyApartment.models[].id`.
+Never infer a match from address alone. Matterport reference enums 36 and 234
+identify scan/streaming keys.
 
-Read the kit's `index.md` first, then `models/<dataset>.md`,
-`schemas/<dataset>.schema.json`, `schemas/enums.json`, and
-`concepts/data-quality-and-confidence.md`. Stream JSONL records rather than dumping
-large files. Avoid expanding all datasets into thousands of files unnecessarily.
+Preserve source ID, record type, field path, units, and derivation in local provenance.
+Null and enum 0 follow the schema: unknown sprinklers are not false, structural
+material is not interior fuel, and marketed capacity is not live occupancy.
+Sponsor contact details must not be presented as real people.
 
-Commercial join: CSV `PropertyId` → commercial-property `id`, then verify the same
-`MatterportModelId` against attachment `videoKey`, including nested apartment
-models/units or commercial listings linked by `propertyId`. Residential join:
-`ListingId` → residential-listings `id`, then matching media `videoKey`.
-`ResidentialListingId` groups listings; it is not the MLS record key. Matterport
-reference enums 36 and 234 identify scans/streaming keys. Apartment listings join
-via `propertyId`; floor plans join via `apartmentModels[].id` to
-`propertyApartment.models[].id`. Never infer a floor-plan match from address alone.
+## Credentials and knowledge boundaries
 
-Preserve source ID, record type, field path, units, and derivation in scene provenance.
-Missing/null values and enum 0 must be interpreted using the schema, never silently
-converted to false or known values. `hasSprinklers: null` is unknown; structural
-material is not interior fuel. `maxOccupants` is a marketed capacity, not live occupancy.
-The kit describes real property data but substitutes fake contact emails/phone numbers.
-Do not present those contacts as real people.
+Use `.env.example` for names. Never print `.env`, `.aws`, credentials, or signed URLs.
+`MATTERPORT_API_KEY` / `MATTERPORT_API_TOKEN` take precedence over `MP_API_KEY` /
+`MP_API_TOKEN`; the key is the Basic Auth user and the token is its password.
+Keep API tokens and `GEMINI_API_KEY` server-side. Browser SDK credentials are separate.
 
-## Credentials and assets
+Only operator/evaluation views may read simulator placements and complete hazard
+fields. Agent tools consume observations and belief. Static geometry and known
+localization are explicit assumptions. Never expose survivor entity IDs/positions
+as person detections. Browser RGB-D is rendered from scans, not live imagery;
+synthetic and analytic fixtures must remain labeled and excluded from image claims.
+The runtime loads `docs/ROBOT_CONSTITUTION.md`; retain that path and the controller's
+mandatory human escort limits.
 
-Read `.env.example` for variable names; never print `.env`, `.aws`, tokens, or signed
-asset URLs. Repository names `MP_API_KEY` / `MP_API_TOKEN` correspond to the notebook's
-`MATTERPORT_API_KEY` / `MATTERPORT_API_TOKEN`. The metadata loader accepts either
-pair and prefers the canonical `MATTERPORT_*` pair. Never log values. API key is the Basic Auth user; token is the password. Browser SDK
-credentials (`SDK_KEY`, `SDK_DOMAINS`) are separate. Keep API tokens server-side.
-`VEXCEL_API_KEY` is optional for the deferred exterior layer. Add a server-side
-`GEMINI_API_KEY` and configurable `GEMINI_MODEL` when implementing reasoning.
-Do not commit sponsor downloads, model weights, credentials, or generated captures.
+Freeze scenario inputs for paired runs. Compare policies with the same scenario,
+sensors, hazard seed, and immediate safety rules. Do not attribute the whole routing
+difference to an LLM or call simulated exposure real-world safety validation.
+Do not initiate hosted experiments without explicit authorization and a new approved
+local campaign; completed campaigns stay closed. Replay requires no model calls.
 
-## Knowledge and implementation boundaries
+## Verification
 
-Simulator truth includes survivor/ignition placements and complete hazard fields.
-Only operator views and evaluation may read it. Agent tools consume versioned local
-observations and belief state; static scanned geometry and perfect localization are
-explicit assumptions. Never implement person detection by exposing simulator entity
-IDs/positions. Synthetic fixtures and oracle detectors must be visibly labeled and
-excluded from claims of image-based perception or sponsor integration.
-
-Editable scenarios must validate placements and freeze inputs during paired runs.
-Compare distance-only and risk-aware routing with the same scenario, sensors,
-hazard seed, and immediate safety rules. Do not attribute the whole difference to
-the LLM or describe normalized simulated exposure as real-world safety validation.
-
-## Verification and handoff
-
-Install with `pip install -e '.[test,scene,vision]'`; run `uvicorn rescuetwin.api:app --host 127.0.0.1 --port 8000`.
-Run the frontend with `cd frontend && npm install && npm run dev`.
+Use `./setup.sh` with authorized local inputs. For manual development, install
+`pip install -e '.[test,scene,vision]'`, run `uvicorn rescuetwin.api:app --host
+127.0.0.1 --port 8000`, and start `npm run dev` from `frontend/`.
 Check with `python3 -m pytest -q` and `cd frontend && npm run build`.
-Optional extras `agent` and `vision` require external credentials/weights and separate validation.
-Use its acceptance checklist for integration; keep generated artifacts out of source.
-Prioritize a complete mission before FAR, Vexcel, or visual polish. FAR has a two-hour
-post-baseline experiment budget and must retain A* as a fallback.
+Offline tests must work without private annotations or sponsor downloads. Optional
+sponsor checks use `RESCUETWIN_TEST_BUNDLE` and `RESCUETWIN_TEST_ANNOTATION`.
+Keep generated artifacts ignored. Prioritize a complete mission over deferred layers
+or visual polish; retain A* as the navigation fallback.
