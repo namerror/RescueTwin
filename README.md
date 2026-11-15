@@ -70,6 +70,45 @@ no dependency synchronization or asset downloads. Gemini is used when configured
 otherwise the existing deterministic mission policy runs. A mission starts only
 when the operator requests it in the browser.
 
+To share prepared scenes across devices without Git:
+
+```bash
+# Sender: export annotated, validated local sponsor scenes (no installs or downloads).
+./setup.sh --export-scenes /path/to/shared-scenes.json
+
+# Recipient: copy that JSON through file sharing, then fetch/rebuild and start.
+./setup.sh --import-scenes /path/to/shared-scenes.json
+```
+
+Recipients need the CoStar kit at `data/costar-hackathon-kit` and their own
+Matterport credentials for uncached assets. The versioned manifest includes model
+IDs, complete reviewed annotations (including exit evidence and registration),
+CoStar record references, and a default model. It excludes downloaded assets,
+credentials, and signed download URLs. Export includes only annotated prepared
+scenes and skips scenes without annotations. If none qualify, export reports an
+error without writing a manifest. Unannotated models still need reviewed exits
+before simulation use.
+The configured `RESCUETWIN_MODEL_ID` becomes the manifest default when included;
+otherwise export prefers `9A46aT7FCPg`, then the first exported model. Import uses
+the manifest default regardless of `RESCUETWIN_MODEL_ID`.
+
+Import validates the entire manifest first, attempts each model, and reports a
+summary. It starts services only if every model succeeds. Retry the same command
+after fixing a failure; successful scenes are cached. Preparation happens in
+staging and failed rebuilds preserve the previous published bundle. Bundles made
+before annotation fingerprinting rebuild once to establish their recipe; existing
+valid source downloads are reused. Later imports reuse unchanged validated bundles
+and rebuild when annotations change.
+
+Imported recipes stay inside ignored `data/prepared/<model>/bundle/scene.json`;
+tracked `scenes/` files are untouched. To reopen an imported scene later, run
+`RESCUETWIN_MODEL_ID=<model> ./setup.sh`. Re-export preserves the imported recipe.
+For these scenes the embedded recipe takes precedence over `scenes/<model>.json`;
+to revise it, edit the shared manifest and import it again. Models without an
+apartment property/floor-plan pair retain their annotation references and notes;
+the existing apartment CoStar property-card join does not apply to them.
+Export, import, and `--environment` are mutually exclusive.
+
 Dependency maintainers: update `uv.lock` with uv 0.11.25 and commit changes to
 `pyproject.toml`/`uv.lock` together; commit frontend dependency changes with
 `package-lock.json`. Teammates then run `./setup.sh --install`. Files under

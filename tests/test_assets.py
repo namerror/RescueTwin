@@ -65,7 +65,10 @@ def test_import_transaction_and_registration(tmp_path):
     with pytest.raises(ValueError,match='validation failed'):import_mesh(model,obj,tmp_path)
     assert manifest.read_bytes()==before
     obj.write_text('mtllib wall.mtl\nv 0 0 0\nv 2 0 0\nv 2 2 0\nv 0 2 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl wall\nf 1/1 2/2 3/3 4/4\n')
-    import_mesh(model,obj,tmp_path)
+    # A portable recipe must control registration even without scenes/test.json.
+    registration = tmp_path/'shared-annotation.json'
+    registration.write_text(json.dumps({'source_to_model': [[1,0,0,0],[0,1,0,0],[0,0,1,1],[0,0,0,1]], 'floor_elevation_m': 1}))
+    import_mesh(model,obj,tmp_path,annotation_path=registration)
     loaded=load_bundle(bundle)
     assert loaded.meta['mesh']['textured'] and loaded.source=='synthetic'
     assert loaded.meta['mesh']['validation']['floor_coverage']==1
@@ -215,8 +218,11 @@ def test_bundle_assets_download_and_redacted_status(tmp_path, monkeypatch):
     from scripts import prepare_scene, scene_assets
     monkeypatch.setitem(sys.modules, 'prepare_scene', prepare_scene)
     secret = 'https://example.invalid/pak.zip?secret=DO_NOT_SAVE'
-    def graph(model, **kwargs):
-        assert 'assets{url}' in prepare_scene.QUERY and 'resources' not in prepare_scene.QUERY
+    original_query = prepare_scene.QUERY
+    def graph(model, *, query, required):
+        assert 'assets{url}' in query and 'resources' not in query
+        assert required == ('bundle',)
+        assert prepare_scene.QUERY == original_query
         return {'bundle': {'assets': [{'url': secret}]}}
     monkeypatch.setattr(prepare_scene, 'graph', graph)
     data = io.BytesIO()

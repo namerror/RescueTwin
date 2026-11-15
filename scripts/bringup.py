@@ -15,6 +15,11 @@ import tempfile
 import time
 import urllib.request
 
+try:
+    from . import scene_sharing as sharing
+except ImportError:
+    import scene_sharing as sharing
+
 ROOT = Path(__file__).resolve().parents[1]
 UV_VERSION = '0.11.25'
 EXTRAS = ['scene', 'vision', 'agent', 'test']
@@ -160,17 +165,36 @@ def cached_obj(root):
     return None
 
 
-def prepare(model, env):
-    from prepare_scene import fetch, build
-    from scene_assets import fetch_matterpak, import_package
+def prepare(model, env, annotation=None):
+    if __package__:
+        from .prepare_scene import fetch, build
+        from .scene_assets import fetch_matterpak, import_package
+    else:
+        from prepare_scene import fetch, build
+        from scene_assets import fetch_matterpak, import_package
     root = ROOT/'data/prepared'; dest = root/model; bundle = dest/'bundle'
+    recipe = annotation
+    if recipe is None:
+        try: recipe = sharing.local_annotation(ROOT, model)
+        except (ValueError, OSError): pass
     try:
         sid = check_bundle(bundle, model)
+        manifest = json.loads((bundle/'scene.json').read_text())
+        if recipe is not None and manifest.get('annotation_sha256') != sharing.digest(recipe):
+            raise ValueError('Annotation changed or cache recipe unknown; rebuilding required')
         print(f'Using validated cached textured scene {model}.', flush=True)
         return sid
     except (ValueError, KeyError, OSError): pass
+    if recipe is None:
+        raise ValueError(f'{model}: reviewed annotations are required')
+    sharing.annotation(recipe, model)
     kit = ROOT/'data/costar-hackathon-kit'
-    required = ['commercial-properties.csv', 'data/commercial-property.jsonl', 'data/apartment-listing.jsonl', 'schemas/enums.json']
+    if recipe.get('residential_listing_id'):
+        required = ['residential-listings.csv', 'data/residential-listings.jsonl',
+                    'data/residential-listing-features.jsonl', 'schemas/enums.json']
+    else:
+        required = ['commercial-properties.csv', 'data/commercial-property.jsonl',
+                    'data/apartment-listing.jsonl', 'schemas/enums.json']
     if any(not (kit/p).is_file() for p in required):
         raise ValueError('Place the sponsor CoStar kit at data/costar-hackathon-kit before preparing this scene.')
     obj = cached_obj(dest)
@@ -191,8 +215,14 @@ def prepare(model, env):
             complete = all((work/'source'/p['file']).is_file() for p in plans) and bool(plans)
         except (OSError, KeyError, ValueError): pass
         if not complete: fetch(model, stage, None)
-        build(model, stage, ROOT/'scenes'/f'{model}.json', kit)
-        import_package(model, obj, stage)
+        recipe_file = work/'annotation.json'
+        sharing.write_json(recipe_file, recipe)
+        build(model, stage, recipe_file, kit)
+        import_package(model, obj, stage, annotation_path=recipe_file)
+        manifest = json.loads((work/'bundle/scene.json').read_text())
+        manifest['annotation_sha256'] = sharing.digest(recipe)
+        manifest['annotation'] = recipe
+        sharing.write_json(work/'bundle/scene.json', manifest)
         sid = check_bundle(work/'bundle', model)
         bundle.mkdir(parents=True, exist_ok=True)
         # Hash-named source assets never overwrite files used by the previous manifest.
@@ -202,11 +232,29 @@ def prepare(model, env):
             if target.exists() and target.read_bytes() == (work/'bundle'/name).read_bytes(): continue
             pending = bundle/(name+'.next'); shutil.copyfile(work/'bundle'/name, pending); pending.replace(target)
         shutil.copyfile(work/'bundle/scene.before-source.json', bundle/'scene.before-source.json')
-        pending = bundle/'scene.json.next'; shutil.copyfile(work/'bundle/scene.json', pending); pending.replace(bundle/'scene.json')
         for name in ['source-mesh-validation.json']:
             shutil.copyfile(work/name, dest/name)
-        if not source.exists(): shutil.copytree(work/'source', source)
+        shutil.copytree(work/'source', source, dirs_exist_ok=True)
+        pending = bundle/'scene.json.next'; shutil.copyfile(work/'bundle/scene.json', pending); pending.replace(bundle/'scene.json')
         return sid
+
+
+def import_scenes(manifest, env):
+    sharing.validate(manifest)
+    ready, failed = {}, []
+    for entry in manifest['scenes']:
+        model = entry['model']
+        try:
+            ready[model] = prepare(model, env, annotation=entry['annotation'])
+            print(f'{model}: ready', flush=True)
+        except (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError, SystemExit) as exc:
+            # Upstream download/build helpers historically use SystemExit for errors.
+            failed.append(model)
+            print(f'{model}: preparation failed ({type(exc).__name__}); check source access, kit and annotations, then retry.', file=sys.stderr)
+    print(f"Scene import: {len(ready)} ready, {len(failed)} failed.", flush=True)
+    if failed:
+        raise ValueError('Scene import incomplete; services not started. Retry the same manifest. Failed: '+', '.join(failed))
+    return ready[manifest['default_model']]
 
 
 def port(value):
@@ -272,14 +320,24 @@ def serve(python, env, sid, backend, frontend, environment_file=None):
 def main():
     parser = argparse.ArgumentParser(description='Install once, prepare missing textured scene data, then run backend + frontend. Root .env is supported; exported variables win.')
     parser.add_argument('--install', action='store_true', help='Resynchronize locked dependencies before starting')
-    parser.add_argument('--environment', type=Path, help='Start with a local annotated floor-plan JSON and analytic perception')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--export-scenes', type=Path, metavar='MANIFEST', help='Export prepared scene annotations without starting services')
+    mode.add_argument('--import-scenes', type=Path, metavar='MANIFEST', help='Fetch/rebuild all shared scenes, then start services')
+    mode.add_argument('--environment', type=Path, help='Start with a local annotated floor-plan JSON and analytic perception')
     parser.add_argument('--runtime', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     os.chdir(ROOT)
     env = dotenv(ROOT/'.env', os.environ)
     os.environ.update(env)
     model = env.get('RESCUETWIN_MODEL_ID', '9A46aT7FCPg')
-    if not re.fullmatch(r'[A-Za-z0-9]+', model) or not (ROOT/'scenes'/f'{model}.json').is_file():
+    if args.export_scenes:
+        manifest = sharing.export(ROOT, args.export_scenes.resolve(), model)
+        print(f"Exported {len(manifest['scenes'])} scenes to {args.export_scenes}.", flush=True)
+        return
+    manifest = sharing.validate(json.loads(args.import_scenes.read_text())) if args.import_scenes else None
+    if manifest:
+        model = manifest['default_model']
+    if not manifest and (not re.fullmatch(r'[A-Za-z0-9]+', model) or not (sharing.annotation_path(ROOT, model).is_file() or (ROOT/'data/prepared'/model/'bundle/scene.json').is_file())):
         raise ValueError('Model needs reviewed scenes/MODEL.json annotations. Supported: '+', '.join(p.stem for p in (ROOT/'scenes').glob('*.json')))
     backend = port(env.get('RESCUETWIN_BACKEND_PORT','8000')); frontend = port(env.get('RESCUETWIN_FRONTEND_PORT','5173'))
     if backend == frontend: raise ValueError('Backend and frontend ports must differ')
@@ -290,6 +348,8 @@ def main():
     if not args.runtime:
         python = bootstrap(env, args.install)
         runtime_args = ['--environment', str(args.environment.resolve())] if args.environment else []
+        if args.import_scenes:
+            runtime_args = ['--import-scenes', str(args.import_scenes.resolve())]
         os.execve(python, [str(python), str(Path(__file__).resolve()), '--runtime', *runtime_args], env)
     sys.path.insert(0, str(ROOT))
     prepare_human()
@@ -310,7 +370,7 @@ def main():
             env['YOLO_WEIGHTS'] = str(weights)
         serve(Path(sys.executable), env, 'development-apartment', backend, frontend, args.environment)
         return
-    sid = prepare(model, env)
+    sid = import_scenes(manifest, env) if manifest else prepare(model, env)
     weights = Path(env.get('YOLO_WEIGHTS', ROOT/'data/weights/yolo26n.pt')).resolve()
     if not weights.exists():
         if env.get('YOLO_WEIGHTS'): raise ValueError('YOLO_WEIGHTS must point to an existing local weights file')

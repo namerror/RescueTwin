@@ -88,7 +88,7 @@ def test_first_install_stamps_only_after_all_commands_succeed(tmp_path,monkeypat
 
 def test_scene_failure_preserves_published_bundle(tmp_path,monkeypatch):
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-    import prepare_scene
+    from scripts import prepare_scene
     monkeypatch.setattr(b,'ROOT',tmp_path)
     dest=tmp_path/'data/prepared/m';bundle=dest/'bundle';bundle.mkdir(parents=True)
     manifest=bundle/'scene.json';manifest.write_text('previous bundle')
@@ -98,7 +98,7 @@ def test_scene_failure_preserves_published_bundle(tmp_path,monkeypatch):
     monkeypatch.setattr(b,'check_bundle',lambda *args:(_ for _ in ()).throw(ValueError('bad')))
     monkeypatch.setattr(b,'cached_obj',lambda *args:tmp_path/'mesh.obj')
     monkeypatch.setattr(prepare_scene,'fetch',lambda *args:(_ for _ in ()).throw(ValueError('fetch failed')))
-    with pytest.raises(ValueError,match='fetch failed'): b.prepare('m',{})
+    with pytest.raises(ValueError,match='fetch failed'): b.prepare('m',{}, annotation={**json.loads((Path(__file__).resolve().parents[1]/'scenes/9A46aT7FCPg.json').read_text()), 'model':'m'})
     assert manifest.read_text()=='previous bundle'
 
 
@@ -132,7 +132,7 @@ def test_port_probe_allows_immediate_restart():
 
 def test_missing_matterpak_attempts_fetch_and_preserves_bundle(tmp_path,monkeypatch):
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-    import scene_assets
+    from scripts import scene_assets
     monkeypatch.setattr(b,'ROOT',tmp_path)
     dest=tmp_path/'data/prepared/m';bundle=dest/'bundle';bundle.mkdir(parents=True)
     (bundle/'scene.json').write_text('previous')
@@ -146,7 +146,7 @@ def test_missing_matterpak_attempts_fetch_and_preserves_bundle(tmp_path,monkeypa
         calls.append(model)
         raise ValueError('No MatterPak download link; check credentials/access')
     monkeypatch.setattr(scene_assets,'fetch_matterpak',fetch)
-    with pytest.raises(ValueError,match='credentials/access'):b.prepare('m',{})
+    with pytest.raises(ValueError,match='credentials/access'):b.prepare('m',{}, annotation={**json.loads((Path(__file__).resolve().parents[1]/'scenes/9A46aT7FCPg.json').read_text()), 'model':'m'})
     assert calls==['m'] and (bundle/'scene.json').read_text()=='previous'
 
 

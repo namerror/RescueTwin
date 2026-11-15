@@ -29,7 +29,7 @@ QUERY = '''query($id: ID!) { model(id:$id) { id name
 REQUIRED = ('floors', 'rooms', 'panoLocations', 'bundle', 'assets')
 
 
-def graph(model, attempts=3, required=REQUIRED):
+def graph(model, attempts=3, required=REQUIRED, *, query=None):
     """Query the model graph, retrying responses that omit fields the build depends on."""
     key, token = credentials()
     missing = ()
@@ -37,7 +37,7 @@ def graph(model, attempts=3, required=REQUIRED):
         if attempt:
             time.sleep(2 * attempt)
         result = subprocess.run(['curl', '-sS', '-K', '-', '-m', '90', '-H', 'Content-Type: application/json',
-                                 '-d', json.dumps({'query': QUERY, 'variables': {'id': model}}), API],
+                                 '-d', json.dumps({'query': query or QUERY, 'variables': {'id': model}}), API],
                                 input=f'user = "{key}:{token}"\n', capture_output=True, text=True)
         try:
             body = json.loads(result.stdout)
@@ -50,7 +50,7 @@ def graph(model, attempts=3, required=REQUIRED):
         if not data:
             raise SystemExit(f'Matterport returned no model for {model}; check the ID and API permissions')
         missing = tuple(k for k in required if data.get(k) is None)
-        if not missing and 'floors' in required and (data.get('assets', {}).get('floorplans') is None):
+        if not missing and 'floors' in required and ((data.get('assets') or {}).get('floorplans') is None):
             missing = ('assets.floorplans',)
         if not missing:
             return data

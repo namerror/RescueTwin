@@ -193,13 +193,13 @@ def reconcile(scene, vertices, faces):
     return checks, kinds, rooms, skipped, records
 
 
-def import_mesh(model, path, root, allow_untextured=False):
+def import_mesh(model, path, root, allow_untextured=False, annotation_path=None):
     bundle=root/model/'bundle'
     manifest=bundle/'scene.json'
     scene=json.loads(manifest.read_text())
     if (scene.get('mesh') or {}).get('format')=='obj' and (bundle/'scene.before-source.json').exists():
         scene=json.loads((bundle/'scene.before-source.json').read_text())
-    config_path=Path('scenes')/(model+'.json')
+    config_path=Path(annotation_path) if annotation_path is not None else Path('scenes')/(model+'.json')
     config=json.loads(config_path.read_text()) if config_path.exists() else {}
     matrix=np.array(config.get('source_to_model',np.eye(4).tolist()),dtype=float)
     if matrix.shape!=(4,4) or not np.isfinite(matrix).all() or not np.allclose(matrix[3],[0,0,0,1]): raise ValueError('Invalid source_to_model affine matrix')
@@ -241,9 +241,9 @@ def import_mesh(model, path, root, allow_untextured=False):
         print(json.dumps(report))
 
 
-def import_package(model, path, root, allow_untextured=False):
+def import_package(model, path, root, allow_untextured=False, annotation_path=None):
     if path.suffix.lower() != '.zip':
-        return import_mesh(model,path,root,allow_untextured)
+        return import_mesh(model,path,root,allow_untextured,annotation_path)
     with tempfile.TemporaryDirectory() as tmp:
         base=Path(tmp).resolve()  # macOS temp dirs resolve via /private; compare like with like
         with zipfile.ZipFile(path) as archive:
@@ -255,13 +255,13 @@ def import_package(model, path, root, allow_untextured=False):
             archive.extractall(base)
         objects=list(base.rglob('*.obj'))
         if len(objects)!=1: raise ValueError('Archive must contain one complete OBJ; select or assemble the correct package explicitly')
-        return import_mesh(model,objects[0],root,allow_untextured)
+        return import_mesh(model,objects[0],root,allow_untextured,annotation_path)
 
 
 def inspect(model, root, fetch=False):
     import prepare_scene as prep
-    prep.QUERY='''query($id: ID!){model(id:$id){id bundle(id:"mp:matterpak"){assets{url}} assets{ meshes{id filename format resolution status url} textures{id format resolution quality status textures urlTemplate} resources(format:"matterpak"){status filename url}}}}'''
-    response=prep.graph(model, required=('assets',));data=response['assets'];out=root/model/'source-assets';out.mkdir(parents=True,exist_ok=True)
+    query='''query($id: ID!){model(id:$id){id bundle(id:"mp:matterpak"){assets{url}} assets{ meshes{id filename format resolution status url} textures{id format resolution quality status textures urlTemplate} resources(format:"matterpak"){status filename url}}}}'''
+    response=prep.graph(model, query=query, required=('assets',));data=response['assets'];out=root/model/'source-assets';out.mkdir(parents=True,exist_ok=True)
     report={'model':model,'checked_at':datetime.now(timezone.utc).isoformat(),'meshes':[],'textures':[],'resources':[]}
     for group in report.keys() & data.keys():
         for index,a in enumerate(data[group]):
@@ -333,8 +333,8 @@ def matterpak_members(names):
 def fetch_matterpak(model, root):
     """Download only the textured OBJ package from a MatterPak, if the API offers one. Never logs URLs."""
     import prepare_scene as prep
-    prep.QUERY = 'query($id: ID!){model(id:$id){bundle(id:"mp:matterpak"){assets{url}}}}'
-    data = prep.graph(model, required=('bundle',))
+    query = 'query($id: ID!){model(id:$id){bundle(id:"mp:matterpak"){assets{url}}}}'
+    data = prep.graph(model, query=query, required=('bundle',))
     links = [a['url'] for a in (data.get('bundle') or {}).get('assets', []) if a.get('url')]
     if len(links) != 1:
         raise ValueError(f'MatterPak for {model}: expected one bundle ZIP link, found {len(links)}')

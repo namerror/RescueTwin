@@ -27,3 +27,22 @@ def test_bundle_query_does_not_require_unrequested_floor_metadata(monkeypatch):
     monkeypatch.setattr(prepare_scene,'credentials',lambda:('test-user','test-token'))
     monkeypatch.setattr(prepare_scene.subprocess,'run',lambda *a,**k:SimpleNamespace(stdout=json.dumps({'data':{'model':{'bundle':{'assets':[]}}}})))
     assert prepare_scene.graph('scan',required=('bundle',))=={'bundle':{'assets':[]}}
+
+
+@pytest.mark.parametrize('required, response', [
+    (('bundle',), {'bundle': {'assets': []}}),
+    (('assets',), {'assets': {'meshes': []}}),
+])
+def test_asset_queries_are_isolated_and_do_not_require_floorplans(monkeypatch, required, response):
+    import json
+    from types import SimpleNamespace
+    from scripts import prepare_scene
+    original = prepare_scene.QUERY
+    query = 'query AssetInspection { model { id } }'
+    monkeypatch.setattr(prepare_scene, 'credentials', lambda: ('test-user', 'test-token'))
+    def run(args, **kwargs):
+        assert json.loads(args[args.index('-d') + 1])['query'] == query
+        return SimpleNamespace(stdout=json.dumps({'data': {'model': response}}))
+    monkeypatch.setattr(prepare_scene.subprocess, 'run', run)
+    assert prepare_scene.graph('scan', 1, required, query=query) == response
+    assert prepare_scene.QUERY == original
