@@ -203,7 +203,7 @@ def angle_diff(a, b):
 
 
 class Simulation:
-    def __init__(self,scene=None,scenario=None,mode='adaptive',perception='analytic-development'):
+    def __init__(self,scene=None,scenario=None,mode='adaptive',perception='analytic-development',strategy='greedy'):
         self.scene=scene or fixture()
         self.base_scene = self.scene
         default=dict(survivors=[[26,6],[15,18]],ignitions=[[25,18]],seed=7) if self.scene.id=='development-apartment' else dict(survivors=[],ignitions=[],seed=7)
@@ -250,6 +250,10 @@ class Simulation:
         self.active_scan = None
         self.reports=[];self.decisions=[];self.decision_key=None;self.extra_views=[];self.withdraw_reason=None;self.comms_up=True
         self.immobile={tuple(p) for p in self.scenario.get('immobile',[])}
+        from .strategies import STRATEGIES   # experimental multi-person policies; 'greedy' is the baseline
+        if strategy not in STRATEGIES: raise ValueError('Unknown strategy')
+        self.strategy=strategy;self.walkers=[];self.detour_goal=None;self.detour_kind=None;self.detour_planned_at=-math.inf
+        self.peeks=0;self.zone=None
         self.agent_backoff_until=0.;self.metrics['inference_pause_s']=0.   # hosted-agent bookkeeping (decision-quality mode)
         self.survivors=[dict(id=f'person-{i}',position=tuple(p),status='unobserved') for i,p in enumerate(self.scenario['survivors'])]
         self.heat_dose = {person['id']: 0.0 for person in self.survivors}
@@ -738,7 +742,10 @@ class Simulation:
                 if (points := self.observe_points(room)) and all(p in self.searched_points for p in points)]
 
     def choose(self):
+        from . import strategies
         if self.escort:
+            detour=strategies.escort_goal(self)
+            if detour:return detour
             costs,prev=self.tree(True)
             options=[(costs[e],e) for e in self.scene.exits if e in costs]
             if options:
@@ -769,6 +776,10 @@ class Simulation:
                 if selected:return selected
                 self.goal=None
         self.mark_inaccessible(costs)
+        zone=strategies.zone_target(self,costs,prev)
+        if zone:return zone
+        planned=strategies.mission_goal(self)
+        if planned:return planned
         targets=[tuple(d['cell']) for d in self.detections if d['status']=='confirmed']
         options=[(costs[t],t) for t in targets if t in costs]
         if options:
@@ -852,7 +863,7 @@ class Simulation:
                 d['rechecking']=True;self.scan_remaining=2*math.pi if self.perception_mode=='image-yolo' else 0.
                 if self.scan_remaining<=0:self.scan_done()
         self.visited.add(self.robot)
-        if not self.escort and self.active_scan is None and self.robot not in self.searched_points:
+        if (not self.escort or self.strategy in ('mission-astar','mission-astar-cached')) and self.active_scan is None and self.robot not in self.searched_points:
             if any(self.robot in self.observe_points(room) for room in self.scene.rooms):
                 self.active_scan = self.robot
                 if self.perception_mode == 'image-yolo':
@@ -862,6 +873,8 @@ class Simulation:
                     self.scan_done()
         self.pair()
         self.update_rooms()
+        from . import strategies
+        strategies.credit_observed_rooms(self)
         if self.status!='running':return
         if self.withdraw_reason and self.robot in self.scene.exits and not self.escort:
             self.status='withdrawn';self.log(f'Withdrawn at the exit: {self.withdraw_reason}.');self.end_report(self.withdraw_reason);return
@@ -908,10 +921,11 @@ class Simulation:
                             self.log(f"Evacuated: {detection_id}")
                             self.version += 1
                     if at_exit:
-                        self.escort.clear()
+                        self.escort.clear();self.peeks=0;self.zone=None;self.detour_goal=None
                         self.escort_blocked_since = None
                         self.assistance_requested = False
         elif not self.route:self.progress=0
+        strategies.advance_walkers(self,dt)
         self.update_casualties(dt)
         if self.status!='running':return
         if self.survivors and self.metrics['evacuated']==len(self.survivors):
@@ -919,12 +933,12 @@ class Simulation:
         elif self.survivors and all(p['status'] in ('evacuated','casualty') for p in self.survivors):
             self.status='unresolved';self.log('Mission ended with simulated casualties.')
             self.end_report('every configured person evacuated or a simulated casualty')
-        elif (self.survivors and all(p['status'] in ('evacuated','assistance-requested','casualty') for p in self.survivors) and not self.escort
+        elif (self.survivors and all(p['status'] in ('evacuated','assistance-requested','casualty') for p in self.survivors) and not self.escort and not self.walkers
               and all(st['status']!='unvisited' for st in self.rooms_state.values())
               and not any(d['status']=='handoff' and d.get('retry') for d in self.detections)):
             self.status='accounted';self.log('All configured people evacuated or handed off to responders (simulator evaluation).')
             self.end_report('every configured person evacuated or handed off')
-        elif (not new and self.scan_remaining<=0 and not self.holding) or self.time>=self.scene.time_limit:
+        elif (not new and self.scan_remaining<=0 and not self.holding and not self.walkers) or self.time>=self.scene.time_limit:
             self.status='unresolved';self.log('Mission unresolved; unseen occupants are not confirmed absent.')
             self.end_report('time limit reached' if self.time>=self.scene.time_limit else 'no further reachable targets')
         if self.status=='running' and self.perception_mode=='image-yolo' and int(round(self.time/dt))%max(1,round(PERCEPTION_PERIOD/dt))==0:
@@ -977,6 +991,9 @@ class Simulation:
             if ((d['status'] != 'confirmed' and not retry) or math.dist(d['position'], here) > PAIR_M
                     or not line_visible(self.scene, self.robot, cell)):
                 continue
+            from . import strategies
+            if not retry and strategies.defer_contact(self):
+                continue
             wanted = ('assistance-requested',) if retry else ('unobserved',)
             candidates = [p for p in self.survivors if p['status'] in wanted
                           and math.dist(self.scene.world(p['position']), here) <= PAIR_M
@@ -1006,6 +1023,8 @@ class Simulation:
             if retry:
                 self.metrics['handoffs'] -= 1
                 self.log(f"Re-checked {d['id']}: a human-safe route is now available.")
+            elif strategies.self_evacuate(self, person, d):
+                continue
             person['status'] = 'escorting'
             person['position'] = self.robot
             self.escort[person['id']] = d['id']
@@ -1045,7 +1064,7 @@ class Simulation:
                     robot=self.robot,heading=round(self.heading,4),pose=self.camera_pose(),survivors=public,
                     heat=self.heat.round(3).tolist(),smoke=self.smoke.round(3).tolist(),observed=self.observed.astype(int).tolist(),
                     route=self.route,events=self.events,metrics={k:(round(v,3) if isinstance(v,float) else v) for k,v in self.metrics.items()},
-                    mode=self.mode,perception_mode=self.perception_mode,detections=self.detections,
+                    mode=self.mode,strategy=self.strategy,perception_mode=self.perception_mode,detections=self.detections,
                     searched_rooms=self.searched_rooms(),
                     frame_request=self.frame_request,degraded=self.degraded,scanning=self.scan_remaining>0,holding=self.holding,last_frame=self.last_frame,
                     reports=self.reports,rooms_state=list(self.rooms_state.values()),decisions=self.decisions[-30:],

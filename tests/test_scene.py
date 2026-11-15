@@ -146,6 +146,42 @@ def test_mission_on_bundle_evacuates_through_exit(mini):
         assert report[mode]['status'] == 'completed' and report[mode]['evacuated'] == 1
 
 
+def test_mission_astar_strategy_is_exposed_on_sim_state(mini):
+    sim = Simulation(mini, dict(scene_id='mini', survivors=[[28, 3]], ignitions=[], seed=1), strategy='mission-astar')
+    state = sim.state()
+    assert state['strategy'] == 'mission-astar'
+    assert sim.strategy == 'mission-astar'
+
+
+def test_mission_astar_urgency_uses_belief_and_raises_threatened_rooms(mini):
+    from rescuetwin.strategies import URGENCY_GAIN, mission_targets, room_urgency
+    sim = Simulation(mini, dict(scene_id='mini', survivors=[[28, 3]], ignitions=[], seed=1), strategy='mission-astar')
+    assert all(u == 1. for u in room_urgency(sim).values())        # nothing observed: every room neutral
+    room = next(r for r in sim.scene.rooms if sim.observe_points(r))
+    weight = lambda: sum(t['p'] for t in mission_targets(sim) if t['room'] == room['id'])
+    before = weight()
+    x, y = room['cells'][0]
+    sim.belief_heat[y, x] = 1.                                       # observed hazard inside one room
+    assert room_urgency(sim)[room['id']] == pytest.approx(1. + URGENCY_GAIN)
+    assert weight() == pytest.approx(before * (1. + URGENCY_GAIN))
+
+
+def test_mission_astar_never_plans_room_searches_while_escorting(mini):
+    from rescuetwin.strategies import mission_targets
+    sim = Simulation(mini, dict(scene_id='mini', survivors=[[28, 3]], ignitions=[], seed=1), strategy='mission-astar')
+    assert any(not t['person'] for t in mission_targets(sim))
+    sim.escort = {'p0': 'det-0'}
+    assert all(t['person'] for t in mission_targets(sim))
+
+
+def test_baseline_strategy_never_computes_mission_urgency(mini):
+    sim = Simulation(mini, dict(scene_id='mini', survivors=[[28, 3]], ignitions=[], seed=1))
+    sim.status = 'running'
+    for _ in range(50):
+        sim.tick()
+    assert sim.strategy == 'greedy' and 'room_urgency' not in sim.__dict__
+
+
 def test_observations_carry_detection_ids_not_simulator_ids(mini):
     sim = Simulation(mini, dict(scene_id='mini', survivors=[[10, 7]], ignitions=[], seed=1))
     sim.status = 'running'

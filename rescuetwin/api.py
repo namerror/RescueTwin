@@ -18,7 +18,8 @@ FRAME_TIMEOUT_S = float(os.environ.get('RESCUETWIN_FRAME_TIMEOUT', '10'))
 AGENT_PERIOD_S = float(os.environ.get('RESCUETWIN_AGENT_PERIOD', '5'))
 AGENT_TIMEOUT_S = 10.0   # ~3 models x 3 s budget; decisions older than 10 s of mission time are rejected anyway
 # Hosted agent status for the operator UI (no secrets). Excluded from paired comparisons by design.
-agent_status = dict(state='starting', enabled=os.environ.get('RESCUETWIN_AGENT', '1') != '0', model=None,
+# Off by default: the workbench's Gemini mission option is a placeholder; set RESCUETWIN_AGENT=1 to opt in.
+agent_status = dict(state='starting', enabled=os.environ.get('RESCUETWIN_AGENT', '0') == '1', model=None,
                     accepted=0, rejected=0, failed=0, latency_s=None, last=None, last_error=None,
                     # Decision-quality mode: freeze the mission clock (robot and fire) while the model is thinking.
                     pause_clock=False, thinking=False)
@@ -39,12 +40,12 @@ def default_perception(scene):
 uploaded_scenarios = {}
 
 
-def new_simulation(scene, scenario=None, mode='adaptive', perception=None):
+def new_simulation(scene, scenario=None, mode='adaptive', perception=None, strategy='greedy'):
     if scenario is None:
         scenario = uploaded_scenarios.get(scene.id)
     if scenario is None:
         scenario = presets.build(scene, 'standard')['scenario']
-    return Simulation(scene, scenario, mode, perception or default_perception(scene))
+    return Simulation(scene, scenario, mode, perception or default_perception(scene), strategy)
 
 
 sim = new_simulation(default_scene(scenes))
@@ -209,6 +210,7 @@ class Control(BaseModel):
     action:str
     mode:str|None=None
     perception:str|None=None
+    strategy:str|None=None
 
 class SceneChoice(BaseModel):
     id:str
@@ -269,7 +271,7 @@ def environment(body: dict):
             from dataclasses import replace
             from uuid import uuid4
             scene = replace(scene, id=f'uploaded-{uuid4().hex}')
-        next_sim = new_simulation(scene, scenario, sim.mode, 'analytic-development')
+        next_sim = new_simulation(scene, scenario, sim.mode, 'analytic-development', sim.strategy)
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise HTTPException(422, f'Invalid floor plan: {error}') from error
     scenes[scene.id] = scene
@@ -283,7 +285,7 @@ def choose_scene(body:SceneChoice):
     global sim
     if body.id not in scenes:raise HTTPException(404,'Unknown scene')
     if sim.status=='running' or sim.hazards_running or busy():raise HTTPException(409,'Pause or reset before switching scenes')
-    sim=new_simulation(scenes[body.id]);return sim.state()
+    sim=new_simulation(scenes[body.id], strategy=sim.strategy);return sim.state()
 
 @app.get('/api/scenes/{scene_id}/files/{name}')
 def scene_file(scene_id:str,name:str):
@@ -349,7 +351,7 @@ def scenario(body:Scenario):
     if data['human_variant'] is None:data.pop('human_variant')
     for key in ('building_use','immobile','comms_outages','room_risk','incident_room'):
         if not data.get(key):data.pop(key,None)   # unset fields stay out, so existing scenario hashes are unchanged
-    try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
+    try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode,sim.strategy)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     return sim.state()
 
@@ -359,17 +361,19 @@ def control(body:Control):
     if busy() and body.action!='reset':raise HTTPException(409,'Paired comparison in progress')
     if body.mode is not None and body.mode not in ('adaptive','baseline'):raise HTTPException(422,'Invalid mode')
     if body.perception is not None and body.perception not in ('image-yolo','analytic-development'):raise HTTPException(422,'Invalid perception mode')
+    if body.strategy is not None and body.strategy not in ('greedy','mission-astar','mission-astar-cached'):
+        raise HTTPException(422,'Invalid mission strategy')
     if body.perception=='image-yolo' and not VISION_AVAILABLE:raise HTTPException(422,'Vision extra not installed')
     if body.action=='reset':
         cancel_paired()
-        sim=Simulation(sim.base_scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode)
+        sim=Simulation(sim.base_scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode,body.strategy or sim.strategy)
     elif body.action=='start':
         if sim.status not in ('idle','paused'):raise HTTPException(409,'Reset a finished run first')
-        if sim.status!='idle' and ((body.mode and body.mode!=sim.mode) or (body.perception and body.perception!=sim.perception_mode)):
-            raise HTTPException(409,'Reset before changing policy or perception')
-        if sim.status=='idle' and body.perception and body.perception!=sim.perception_mode:
-            sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception)
-        sim.mode=body.mode or sim.mode;sim.status='running';sim.hazards_running=True
+        if sim.status!='idle' and ((body.mode and body.mode!=sim.mode) or (body.perception and body.perception!=sim.perception_mode) or (body.strategy and body.strategy!=sim.strategy)):
+            raise HTTPException(409,'Reset before changing policy, mission strategy or perception')
+        if sim.status=='idle' and (body.perception and body.perception!=sim.perception_mode or body.strategy and body.strategy!=sim.strategy):
+            sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode,body.strategy or sim.strategy)
+        sim.mode=body.mode or sim.mode;sim.strategy=body.strategy or sim.strategy;sim.status='running';sim.hazards_running=True
     elif body.action=='withdraw':
         if sim.status not in ('running','paused'):raise HTTPException(409,'No active mission to withdraw')
         sim.withdraw('operator stop');sim.status='running';sim.hazards_running=True
