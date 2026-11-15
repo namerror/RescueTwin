@@ -141,6 +141,20 @@ def test_room_risk_scenario_and_risk_map():
         client.post('/api/scenario',json={'survivors':[],'ignitions':[],'seed':1})
         assert 'room_risk' not in client.get('/api/state').json()['scenario']
 
+
+def test_run_speed_is_wall_clock_only_and_validated():
+    import rescuetwin.api as api
+    with TestClient(app) as client:
+        original = api.run_speed
+        try:
+            assert client.post('/api/speed', json={'speed': 4}).json()['run_speed'] == 4
+            assert client.get('/api/state').json()['run_speed'] == 4
+            assert client.post('/api/speed', json={'speed': 3}).status_code == 422
+            assert client.post('/api/speed', json={'speed': 0}).status_code == 422
+            assert api.TICK == .2          # simulated timestep is unchanged by the pace
+        finally:
+            api.run_speed = original
+
 def test_renderer_lease_prevents_competing_producers(monkeypatch):
     from rescuetwin import api
     monkeypatch.setitem(api.renderer_lease,'id',None)

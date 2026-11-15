@@ -35,7 +35,7 @@ def verify(url, output, timeout=180, model="9A46aT7FCPg", mission_only=False):
         for sid in ([] if mission_only else ['9A46aT7FCPg-floor1','5p6KKvHqh3W-floor1']):
             page.select_option('#scene-select',sid)
             page.wait_for_function("id => document.querySelector('#scene-select').value === id && !document.querySelector('#start').disabled",arg=sid,timeout=45000)
-            page.locator('#plan').click();page.screenshot(path=str(output/(sid+'-plan.png')),full_page=True)
+            page.locator('.view-options').evaluate('(el) => el.open = true');page.locator('#plan').click();page.screenshot(path=str(output/(sid+'-plan.png')),full_page=True)
             count=page.locator('#presets button').count()
             assert count>=4,(sid,count)
             results.append({'scene':sid,'loaded':True,'presets':count})

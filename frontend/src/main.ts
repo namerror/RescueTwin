@@ -46,7 +46,7 @@ interface SimState {
   events: { time: number; message: string }[]; metrics: Record<string, number>; mode: Mode; strategy: 'greedy' | 'mission-astar' | 'mission-astar-cached' | 'gemini'; perception_mode: Perception;
   detections: DetectionEntry[]; frame_request: { seq: number; time: number; pose: Pose } | null; degraded: boolean; scanning: boolean;
   last_frame: FrameResult | null; paired: Paired | null;
-  hazard_time: number; hazards_running: boolean; holding?: boolean;
+  hazard_time: number; hazards_running: boolean; holding?: boolean; run_speed?: number;
   reports?: Report[]; rooms_state?: RoomState[]; decisions?: Decision[]; withdraw_reason?: string | null; comms_up?: boolean;
 }
 interface Report { id: string; kind: string; time: number; floor: string; room: string | null; cell: Cell; confirmed: number; possible: number;
@@ -87,95 +87,133 @@ const key = (p: Cell): string => `${p[0]},${p[1]}`;
 $('app').innerHTML = `
   <a class="skip-link" href="#workspace">Skip to simulation</a>
   <header class="app-header">
-    <a class="brand" href="./">RescueTwin</a>
-    <div class="header-right"><span id="connection" class="connection" role="status"><i></i>Connecting</span></div>
+    <a class="brand" href="./"><svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h11v6h7v10H3z"/><path d="M9 4v7M3 13h6M14 14v6"/><circle cx="17" cy="7" r="1.6"/></svg>RescueTwin</a>
+    <span class="env-badge">SIMULATION &amp; REHEARSAL ENVIRONMENT</span>
+    <label class="header-scene" for="scene-select"><span>Scene</span><select id="scene-select"></select></label>
+    <div class="header-right">
+      <div class="run-badge"><span id="run-status">Awaiting backend</span></div>
+      <span id="connection" class="connection" role="status"><i></i>Connecting</span>
+    </div>
   </header>
   <main>
     <section class="page-intro">
       <div><h1 id="scene-heading">Waiting for scene</h1><p id="scene-size" class="subtle-label"></p></div>
-      <div class="run-badge"><span id="run-status">Awaiting backend</span><strong id="clock">—</strong></div>
+      <p class="disclosure-line" role="note"><b id="disclosure-tag">Loading</b> <span id="disclosure-body">Waiting for the backend.</span></p>
     </section>
-    <p class="disclosure-line" role="note"><b id="disclosure-tag">Loading</b> <span id="disclosure-body">Waiting for the backend.</span></p>
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div class="workspace-grid" id="workspace" tabindex="-1">
+
       <section class="panel scene-panel" aria-labelledby="scene-heading">
         <div class="scene-toolbar">
+          <div class="mission-playback" aria-label="Run controls">
+          <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div>
+          <div class="speed-row"><span class="speed-label" title="Wall-clock pace only. Every tick advances the same simulated time, so results do not change. Camera frames and YOLO inference can limit the achieved pace.">Simulation speed</span><div class="seg-buttons speed-buttons" role="group" aria-label="Playback speed"><button class="button small" data-speed="1" aria-pressed="true">1×</button><button class="button small" data-speed="2" aria-pressed="false">2×</button><button class="button small" data-speed="4" aria-pressed="false">4×</button><button class="button small" data-speed="8" aria-pressed="false">8×</button></div></div>
+          <p id="speed-actual" class="speed-actual" aria-live="polite"></p>
+          </div>
           <div class="camera-controls" aria-label="Camera">
-            <button id="orbit" class="button small" aria-pressed="true">3D</button>
-            <button id="plan" class="button small" aria-pressed="false">Plan</button>
-            <button id="recenter" class="button subtle small">Fit</button>
-            <button id="preview-hazards" class="button small" disabled>Preview hazards</button>
-            <button id="focus-survivor" class="button subtle small" disabled title="Zoom to each simulated survivor in Operator truth">Find survivor</button>
-            <button id="focus-fire" class="button subtle small" disabled>Find fire</button>
+            <div class="seg-buttons"><button id="orbit" class="button small" aria-pressed="true">Overview</button><button id="follow" class="button small" aria-pressed="false">Follow robot</button></div>
             <button id="expand" class="button subtle small">Fullscreen</button>
           </div>
-          <div class="segmented view-toggle" role="radiogroup" aria-label="Knowledge view"><label><input type="radio" name="view" value="truth" checked /><span>Operator truth</span></label><label><input type="radio" name="view" value="belief" /><span>Robot belief</span></label></div>
-          <div class="layer-controls" aria-label="Scene layers">
-            <label><input type="checkbox" id="walls-layer" checked />Walls</label>
-            <label id="cutaway-control" hidden title="Operator view clips the scanned mesh above this height; robot camera always sees full geometry">Cutaway <select id="cutaway-height"><option value="1.0">1.0 m</option><option value="1.6" selected>1.6 m</option><option value="2.2">2.2 m</option><option value="off">Off</option></select></label>
-            <label title="Room fire-risk map: gas source (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
-            <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
-            <label><input type="checkbox" id="fire-layer" checked />Flames</label>
-            <label><input type="checkbox" id="heat-layer" /><span class="swatch heat"></span>Heat map</label>
-            <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
-            <label><input type="checkbox" id="observed-layer" />Unobserved</label>
-            <label><input type="checkbox" id="route-layer" checked /><span class="swatch route"></span>Route</label>
-          </div>
         </div>
-        <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
-        <div class="scene-footer"><div class="legend"><span><i class="legend-person"></i>Survivor (simulated; blue through walls)</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas source</span><span><i class="legend-risk sprinkler"></i>Sprinkler risk tag</span><span><i class="legend-risk both"></i>Both</span><span><i class="legend-risk sprinkler"></i>Simulated ceiling sprinkler</span></div><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span></div>
-        <details class="keyboard-editor"><summary>Cell inspector & keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates are grid cells; the scene's origin and resolution convert them to metres in the scan frame. Choose an editing tool in Scenario setup, then apply it here or click the map.</p></details>
+        <details class="view-options"><summary>View options &amp; layers</summary>
+          <div class="scene-toolbar">
+            <div class="camera-controls" aria-label="More camera options">
+              <div class="seg-buttons"><button id="plan" class="button small" aria-pressed="false">Plan</button><button id="pov" class="button small" aria-pressed="false">Robot POV</button></div>
+              <button id="recenter" class="button subtle small">Fit scene</button>
+              <button id="focus-survivor" class="button subtle small" disabled title="Zoom to each simulated survivor in Operator truth">Find survivor</button>
+              <button id="focus-fire" class="button subtle small" disabled>Find fire</button>
+              <button id="preview-hazards" class="button subtle small" disabled>Preview hazards</button>
+            </div>
+            <div class="segmented view-toggle" role="radiogroup" aria-label="Knowledge view"><label><input type="radio" name="view" value="truth" checked /><span>Operator truth</span></label><label><input type="radio" name="view" value="belief" /><span>Robot belief</span></label></div>
+          </div>
+        <div class="layer-controls" aria-label="Scene layers">
+          <label title="Room fire-risk map: gas source (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
+          <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
+          <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
+          <label><input type="checkbox" id="heat-layer" /><span class="swatch heat"></span>Heat map</label>
+          <label><input type="checkbox" id="fire-layer" checked /><span class="swatch fire"></span>Flames</label>
+          <label><input type="checkbox" id="route-layer" checked /><span class="swatch route"></span>Route</label>
+          <label><input type="checkbox" id="observed-layer" /><span class="swatch observed"></span>Unobserved</label>
+          <label><input type="checkbox" id="walls-layer" checked />Walls</label>
+          <label id="cutaway-control" hidden title="Operator view clips the scanned mesh above this height; robot camera always sees full geometry">Cutaway <select id="cutaway-height"><option value="1.0">1.0 m</option><option value="1.6" selected>1.6 m</option><option value="2.2">2.2 m</option><option value="off">Off</option></select></label>
+        </div>
+        </details>
+        <div class="scene-stage">
+          <dl class="mission-metrics" aria-label="Mission metrics">
+            <div class="metric-card"><dt>Simulation</dt><dd id="clock">—</dd><dd class="metric-caption">Elapsed simulation time</dd></div>
+            <div class="metric-card"><dt>Evacuated</dt><dd id="evacuated">—</dd><dd class="metric-caption" id="population">No scenario loaded</dd></div>
+            <div class="metric-card"><dt>Robot distance</dt><dd><span id="distance">—</span><small> m</small></dd><dd class="metric-caption">Distance travelled</dd></div>
+            <div class="metric-card"><dt>Exposure</dt><dd id="exposure">—</dd><dd class="metric-caption">Normalized · simulated</dd></div>
+          </dl>
+          <div id="viewport" class="viewport"><div id="scene-empty" class="scene-empty"><strong>Waiting for simulation state</strong><p>Start the backend on port 8000 to load your scene.</p></div><div id="hazard-readout" class="hazard-readout"></div><span id="pov-flag" class="pov-flag" hidden>ROBOT POV · scanned mesh, full height</span><div id="cell-readout" class="cell-readout">Select a cell to inspect</div></div>
+          <section class="panel camera-panel" aria-labelledby="camera-heading"><div class="panel-heading compact"><div><h2 id="camera-heading">Robot camera</h2></div><span id="camera-status" class="subtle-label">No frame yet</span></div>
+            <div class="camera-body"><canvas id="robot-feed" width="${CAM_W}" height="${CAM_H}" aria-label="Robot camera frame rendered from the scanned mesh, with YOLO detection boxes"></canvas></div>
+            <p class="camera-caption">Rendered scan · simulated camera</p>
+          </section>
+          <section class="mission-status" aria-labelledby="mission-status-heading">
+            <h2 id="mission-status-heading">Awaiting connection</h2>
+            <p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
+          </section>
+          <aside class="scene-legend" aria-label="Scene legend"><h2>Scene legend</h2><div class="legend"><span><i class="legend-person"></i>Simulated survivor</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas source</span><span><i class="legend-risk sprinkler"></i>Sprinkler risk tag</span><span><i class="legend-risk sprinkler"></i>Simulated ceiling sprinkler</span><span><i class="legend-risk both"></i>Both</span></div><p>Survivors are simulated. Operator truth shows them through walls.</p></aside>
+        </div>
+        <div class="scene-footer"><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span><a class="settings-link" href="#controls-heading">Mission settings <span aria-hidden="true">↓</span></a></div>
+        <details class="keyboard-editor"><summary>Cell inspector &amp; keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates are grid cells; the scene's origin and resolution convert them to metres in the scan frame. Choose an editing tool in Place the conditions, then apply it here or click the map.</p></details>
       </section>
-      <aside class="sidebar">
-        <section class="panel" aria-labelledby="property-heading"><div class="panel-heading compact"><div><h2 id="property-heading">Property context</h2></div></div>
-          <label class="seed-label" for="scene-select">Scene <select id="scene-select"></select></label>
-            <button id="prepared-models" class="button small">Browse prepared models</button>
-            <button id="load-map" class="button small">Import custom floor plan JSON…</button>
-            <p class="field-hint">Choose a validated scene above, or browse every downloaded model. Plan shows the active scene from above. Import accepts annotated metric JSON, not images or PDFs.</p>
-            <input id="map-file" type="file" accept=".json,application/json" hidden />
-            <p id="sensor-readings" class="field-hint">Waiting for robot hazard sensor</p>
-          <div id="property-card" class="property-card"><p class="field-hint">No CoStar record for this scene.</p></div>
-          <details class="details-block"><summary>Provenance & scene checks</summary><div id="provenance"></div></details>
-        </section>
-        <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Run simulation</h2></div></div>
+
+
+      <aside class="sidebar left-rail" aria-label="Mission controls and scenario">
+        <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Mission settings</h2></div></div>
           <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Risk-aware</span></label><label><input type="radio" name="mode" value="baseline" /><span>Distance-only</span></label></div></fieldset>
           <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" checked /><span>Analytic fixture</span></label></div></fieldset>
           <fieldset id="strategy-fieldset"><legend>Mission algorithm</legend><div class="segmented"><label title="Baseline: searches the nearest unsearched room next and escorts each person straight to the exit."><input type="radio" name="strategy" value="greedy" checked /><span>Baseline</span></label><label title="Plans the whole remaining mission in one A* pass, ranking rooms by survivor likelihood and observed fire/smoke urgency, and re-plans each second. Changes only the room ordering; the local safety interlock is unchanged."><input type="radio" name="strategy" value="mission-astar" /><span>Mission A*</span></label><label title="Gemini mission planner: placeholder, not yet available."><input type="radio" name="strategy" value="gemini" disabled /><span>Gemini</span></label></div></fieldset>
           <p id="strategy-description" class="field-hint">Baseline: nearest unsearched room first.</p>
           <p id="agent-status" class="field-hint">Checking hosted agent…</p>
           <p id="mode-description" class="field-hint">Analytic fixture uses simulator truth and is not image perception.</p>
-          <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button><button id="withdraw" class="button subtle small" title="Operator stop: the robot finishes any escort, returns to the exit and files a mission-end report">Withdraw</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
+          <button id="withdraw" class="button subtle small full-width" title="Operator stop: the robot finishes any escort, returns to the exit and files a mission-end report">Withdraw robot</button>
         </section>
+
         <section class="panel" aria-labelledby="scenario-heading"><div class="panel-heading compact"><div><h2 id="scenario-heading">Place the conditions</h2></div></div>
+          <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p>
+          <fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label title="Mark or unmark a placed survivor as unable to follow the robot (checked on contact)"><input name="tool" type="radio" value="immobile" /><span><b aria-hidden="true">♿</b>Can't walk</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
+          <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
+          <div id="presets" class="preset-list"></div>
+          <label class="seed-label" for="human-variant">Survivor appearance <select id="human-variant"><option value="adult-male">Adult man</option><option value="adult-female">Adult woman</option><option value="child-male">Boy</option><option value="child-female">Girl</option><option value="older-male">Older man</option><option value="older-female">Older woman</option><option value="mixed">Mixed: one of each, repeated</option></select></label>
+          <p class="field-hint">Changes the rendered people only. YOLO detects a person; it does not predict age or gender.</p>
           <label class="seed-label" for="building-use" title="Static building information only; it changes where the robot searches first, never what it knows about people">Building use <select id="building-use"><option value="">Auto</option></select></label>
           <p id="building-use-hint" class="field-hint"></p>
-          <label class="seed-label" for="human-variant">Survivor appearance <select id="human-variant"><option value="adult-male">Adult man</option><option value="adult-female">Adult woman</option><option value="child-male">Boy</option><option value="child-female">Girl</option><option value="older-male">Older man</option><option value="older-female">Older woman</option><option value="mixed">Mixed: one of each, repeated</option></select></label>
-          <p class="field-hint">Synthetic character appearances. Apply to update the people in the scene; the selection stays fixed during runs and comparisons.</p>
           <div class="room-risk"><span class="seed-label" title="Pre-incident fixture tags per room. Gas source 1.5x search priority, sprinkler 0.8x, neither/unknown 1x">Room fire risk</span><div id="room-risk-list"></div><p id="room-risk-hint" class="field-hint"></p></div>
-          <div id="presets" class="preset-list"></div>
-          <p id="edit-hint" class="field-hint">Editing is available when the simulation is idle.</p><fieldset id="tool-fieldset"><legend class="sr-only">Map editing tool</legend><div class="tool-grid"><label><input name="tool" type="radio" value="inspect" checked /><span><b aria-hidden="true">⌖</b>Inspect</span></label><label><input name="tool" type="radio" value="survivor" /><span><b aria-hidden="true">♙</b>Survivor</span></label><label title="Mark or unmark a placed survivor as unable to follow the robot (checked on contact)"><input name="tool" type="radio" value="immobile" /><span><b aria-hidden="true">♿</b>Can't walk</span></label><label><input name="tool" type="radio" value="fire" /><span><b aria-hidden="true">♨</b>Ignition</span></label><label><input name="tool" type="radio" value="remove" /><span><b aria-hidden="true">−</b>Remove</span></label></div></fieldset>
-          <div class="scenario-counts"><span><i class="tiny-dot blue"></i><strong id="survivor-count">—</strong> survivors</span><span><i class="tiny-dot orange"></i><strong id="fire-count">—</strong> ignitions</span></div>
-          <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
-          <label class="seed-label" for="incident-room">Kitchen incident location <select id="incident-room"><option value="">Off</option></select></label>
-          <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div><div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
+          <div class="inline-fields">
+            <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
+            <label class="seed-label" for="incident-room">Kitchen incident <select id="incident-room"><option value="">Off</option></select></label>
+          </div>
+          <div class="save-row"><button id="apply" class="button secondary">Apply scenario</button><button id="discard" class="button subtle small">Discard</button></div>
+          <div class="file-actions"><button id="export" class="button subtle small">↓ Save JSON</button><button id="import" class="button subtle small">↑ Load JSON</button><input id="scenario-file" type="file" accept=".json,application/json" hidden /></div>
         </section>
+
         <section class="panel compare-callout"><h2>Compare runs</h2><p id="compare-text" class="field-hint">Distance-only vs risk-aware from the same frozen scenario, sensors, hazard model and safety rules.</p><button id="compare" class="button secondary full-width">Compare strategies <span aria-hidden="true">↗</span></button><p class="field-hint">For a CoStar workload, select a capacity preset, Apply it, then compare. The report includes its source field and scenario hash.</p></section>
       </aside>
-      <dl class="run-summary" aria-label="Mission metrics">
-        <div><dt>Evacuated</dt><dd><strong id="evacuated">—</strong> <span id="population"></span> <span id="unresolved-note" class="subtle-label"></span></dd></div>
-        <div><dt>Exposure (normalized)</dt><dd id="exposure">—</dd></div>
-        <div><dt>Distance (m)</dt><dd id="distance">—</dd></div>
-        <div><dt>Route</dt><dd id="route-note">—</dd></div>
-        <div><dt>Perception</dt><dd><span class="tiny-dot" id="perception-dot"></span> <span id="perception-label">—</span> · <span id="perception-note">—</span></dd></div>
-      </dl>
-      <section class="panel camera-panel" aria-labelledby="camera-heading"><div class="panel-heading compact"><div><h2 id="camera-heading">Person detection</h2></div><span id="camera-status" class="subtle-label">No frame yet</span></div>
-        <div class="camera-body"><canvas id="robot-feed" width="${CAM_W}" height="${CAM_H}" aria-label="Rendered robot camera frame with YOLO detection boxes"></canvas>
-          <div class="camera-side"><p class="field-hint" id="camera-explainer">Frames are rendered from the scanned-geometry scene at the simulator's camera pose and sent to the backend, where YOLO runs on the RGB image and depth places each box in the scan frame. Two consistent frames confirm a potential survivor.</p><ol id="detections" class="event-list detection-list"><li class="empty-line">No detections yet.</li></ol></div></div></section>
+
+      <aside class="sidebar right-rail" aria-label="Mission metrics and property">
+        <details class="panel camera-details"><summary>Detections &amp; camera details</summary><p class="field-hint" id="camera-explainer">Frames are rendered from the scanned mesh at the robot's camera pose and sent to the backend, where YOLO runs on the RGB image and depth places each box in the scan frame. Two consistent frames confirm a potential survivor.</p><ol id="detections" class="event-list detection-list"><li class="empty-line">No detections yet.</li></ol></details>
+        <dl class="run-summary panel" aria-label="Mission details">
+          <div><dt>Search progress</dt><dd id="unresolved-note">Waiting for a run</dd></div>
+          <div><dt>Route</dt><dd id="route-note">—</dd></div>
+          <div><dt>Perception</dt><dd><span class="tiny-dot" id="perception-dot"></span> <span id="perception-label">—</span> · <span id="perception-note">—</span></dd></div>
+        </dl>
+        <section class="panel" aria-labelledby="property-heading"><div class="panel-heading compact"><div><h2 id="property-heading">Property context</h2></div></div>
+          <p id="sensor-readings" class="field-hint">Waiting for robot hazard sensor</p>
+          <div id="property-card" class="property-card"><p class="field-hint">No CoStar record for this scene.</p></div>
+          <details class="details-block"><summary>Provenance &amp; scene checks</summary><div id="provenance"></div></details>
+          <div class="file-actions"><button id="prepared-models" class="button small">Browse prepared models</button><button id="load-map" class="button subtle small">Import floor plan JSON…</button></div>
+          <input id="map-file" type="file" accept=".json,application/json" hidden />
+        </section>
+      </aside>
+
+      <section class="panel event-panel events-main" aria-labelledby="events-heading"><div class="panel-heading compact"><div><h2 id="events-heading">Event timeline</h2></div></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
       <section class="panel event-panel" aria-labelledby="team-heading"><div class="panel-heading compact"><div><h2 id="team-heading">Outside team</h2><p class="subtle-label">Reports the robot sends to responders. You acknowledge on their behalf. <span id="comms-status"></span></p></div></div>
         <ol id="reports" class="event-list"><li class="empty-line">No reports yet.</li></ol>
         <details class="details-block"><summary>Rooms (<span id="rooms-summary">—</span>)</summary><ol id="rooms" class="event-list"></ol></details>
         <details class="details-block"><summary>Decision record</summary><ol id="decisions" class="event-list"></ol></details></section>
-      <section class="panel event-panel" aria-labelledby="events-heading"><div class="panel-heading compact"><div><h2 id="events-heading">Event timeline</h2></div></div><ol id="events" class="event-list"><li class="empty-line">Events appear here as the backend reports them.</li></ol></section>
       <section id="comparison" class="panel comparison-panel" aria-labelledby="comparison-heading" hidden><div class="panel-heading compact"><div><h2 id="comparison-heading">Strategy comparison</h2></div><button id="close-comparison" class="button subtle small">Close</button></div><p id="comparison-context" class="field-hint"></p><div id="comparison-body"></div></section>
     </div>
   </main>`;
@@ -201,7 +239,7 @@ let lastFrameSeq = -1;
 let lastFrameImage: ImageData | null = null;
 let shownPairedStatus = '';
 const world = new THREE.Scene();
-const background = new THREE.Color('#0d151f');
+const background = new THREE.Color('#e4e8ec');
 world.background = background;
 const staticLayer = new THREE.Group();
 const dynamicLayer = new THREE.Group();
@@ -283,7 +321,41 @@ flames.renderOrder = 4;
 const flameTransform = new THREE.Object3D();
 let focusCell: Cell | null = null;
 const hotColor = new THREE.Color('#e6451d');
-let cameraView: 'orbit' | 'plan' = 'orbit';
+let cameraView: 'orbit' | 'plan' | 'follow' | 'pov' = 'orbit';
+// Robot POV / Follow: the main viewport rides the simulator's camera pose over the real scanned mesh.
+const povCamera = new THREE.PerspectiveCamera(62, 1, 0.05, 60);
+povCamera.layers.set(0);
+povCamera.layers.enable(CAMERA_ONLY_LAYER);
+const followEye = new THREE.Vector3(), followLook = new THREE.Vector3();
+let followReady = false;
+let lastPreview = 0;
+let pendingSpeed: number | null = null;
+const paceSamples: { wall: number; sim: number }[] = [];
+/** Achieved pace over the last ~3 s of wall time while running: simulated seconds per real second. */
+function achievedPace(): number | null {
+  if (replayId || !state || state.status !== 'running') { paceSamples.length = 0; return null; }
+  const now = performance.now();
+  if (paceSamples.length && state.time < paceSamples[paceSamples.length - 1].sim) paceSamples.length = 0;
+  const last = paceSamples[paceSamples.length - 1];
+  if (!last || last.sim !== state.time) paceSamples.push({ wall: now, sim: state.time });
+  while (paceSamples.length > 2 && now - paceSamples[0].wall > 3000) paceSamples.shift();
+  const first = paceSamples[0];
+  return now - first.wall > 800 ? (state.time - first.sim) / ((now - first.wall) / 1000) : null;
+}
+/** Highlight the backend's current playback pace (1x/2x/4x/8x). */
+function syncSpeed(): void {
+  const current = pendingSpeed ?? state?.run_speed ?? 1;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
+    button.setAttribute('aria-pressed', String(Number(button.dataset.speed) === current));
+    button.disabled = !!replayId || !connected || state?.run_speed === undefined || pendingSpeed !== null;
+  }
+  const pace = achievedPace();
+  const requested = state?.run_speed ?? 1;
+  const limited = pace !== null && pace < requested * 0.75;
+  const readout = $('speed-actual');
+  readout.textContent = pace === null ? '' : `actual ${pace.toFixed(1)}×${limited && state?.perception_mode === 'image-yolo' ? ' · limited by camera frames + YOLO' : limited ? ' · limited by compute' : ''}`;
+  readout.classList.toggle('limited', limited);
+}
 let blockedCells = new Set<string>();
 const FLAME_HEAT = 0.3;   // matches the backend's FLAME_VISIBLE_HEAT
 world.add(wallLayer, heatField.mesh, smokeField.mesh, smokeClouds, flames);
@@ -393,6 +465,14 @@ function syncUI(): void {
   $('connection').innerHTML = `<i></i>${connected ? 'Backend connected' : state ? 'Connection lost' : 'Backend offline'}`;
   $('run-status').textContent = state ? (pairedRunning() ? `PAIRED · ${state.paired!.running?.toUpperCase()}` : state.status.toUpperCase()) : 'AWAITING BACKEND';
   $('run-status').classList.toggle('running', status === 'running');
+  const missionStatus = !connected ? 'Awaiting connection' : !sceneReady ? 'Loading scene' : busy ? 'Updating mission'
+    : pairedRunning() ? 'Comparing strategies' : dirty ? 'Scenario changes pending'
+    : status === 'running' ? (state?.holding ? 'Robot holding' : 'Search in progress')
+    : status === 'idle' ? 'Ready to begin' : status === 'paused' ? 'Simulation paused'
+    : status === 'unresolved' ? 'Search ended · unresolved' : 'Mission ended';
+  $('mission-status-heading').textContent = missionStatus;
+  $('mission-status-heading').parentElement!.classList.toggle('attention', !connected || dirty || status === 'unresolved');
+  syncSpeed();
   const preview = $<HTMLButtonElement>('preview-hazards');
   preview.disabled = !connected || busy || dirty || status === 'running' || pairedRunning() || !state || state.hazard_time >= 600;
   preview.textContent = state?.hazards_running && status !== 'running' ? 'Pause hazards' : 'Preview hazards';
@@ -410,6 +490,7 @@ function syncUI(): void {
   if (state && (!idle() || !strategySynced)) { strategySynced = true; document.querySelectorAll<HTMLInputElement>('input[name="strategy"]').forEach(input => { input.checked = input.value === (state!.strategy === 'mission-astar-cached' ? 'mission-astar' : state!.strategy); }); }
   $('strategy-description').textContent = STRATEGY_DESCRIPTION[chosen<Strategy>('strategy')];
   $<HTMLButtonElement>('load-map').disabled = !connected || busy || dirty || status === 'running' || !!state?.hazards_running || pairedRunning();
+  $<HTMLButtonElement>('prepared-models').disabled = !connected || busy || !!replayId;
   ($('scene-select') as HTMLSelectElement).disabled = !connected || busy || status === 'running' || pairedRunning();
   document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => { input.disabled = input.value !== 'inspect' && !editable; });
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => { b.disabled = !editable || b.dataset.unavailable === '1'; });
@@ -430,6 +511,14 @@ function syncUI(): void {
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
   $('survivor-count').textContent = draft ? String(draft.survivors.length) : '—';
   $('fire-count').textContent = draft ? String(draft.ignitions.length) : '—';
+  const recordingToggle = document.getElementById('record-next') as HTMLInputElement | null;
+  if (recordingToggle) recordingToggle.disabled = !!replayId || status === 'running' || !connected;
+  if (replayId) {
+    for (const id of ['start', 'pause', 'reset', 'withdraw', 'preview-hazards', 'load-map', 'scene-select', 'compare', 'discard', 'prepared-models'])
+      ($<HTMLButtonElement>(id)).disabled = true;
+    $('mission-status-heading').textContent = 'Recorded mission · read only';
+    $('control-hint').textContent = 'Viewing recorded history. Return to Live to control the active mission.';
+  }
   $('apply-cell').textContent = selectedTool === 'inspect' ? 'Inspect cell' : selectedTool === 'remove' ? 'Remove from cell' : `Place ${selectedTool === 'fire' ? 'ignition' : 'survivor'}`;
 }
 
@@ -595,11 +684,11 @@ function acceptState(next: SimState, newSceneSelection = false): void {
   }
   $('clock').textContent = `${number(next.time)} s`;
   $('evacuated').textContent = number(next.metrics.evacuated, 0);
-  $('population').textContent = `/ ${next.scenario.survivors.length} people`;
+  $('population').textContent = `of ${next.scenario.survivors.length} simulated people`;
   const casualties = next.survivors.filter(person => person.status === 'casualty').length;
   const searched = next.searched_rooms?.length ?? next.metrics.rooms_inspected ?? 0;
   const missionNote = next.status === 'unresolved' ? ' · Unresolved' : next.holding ? ' · Holding' : '';
-  $('unresolved-note').textContent = `· ${searched} rooms searched${casualties ? ` · ${casualties} casualties` : ''}${missionNote}`;
+  $('unresolved-note').textContent = `${searched} rooms searched${casualties ? ` · ${casualties} casualties` : ''}${missionNote}`;
 
   $('exposure').textContent = number(next.metrics.exposure, 2);
   $('distance').textContent = number(next.metrics.distance, 2);
@@ -834,7 +923,7 @@ function buildStaticScene(): void {
     scene.rooms.forEach(room => (room.observe ?? room.cells).forEach(cell => operatorOnly(cellBox(staticLayer, cell, 0.98, 0.025, '#2b3946', 0.01))));
   }
   scene.exits.forEach(cell => {
-    operatorOnly(cellBox(staticLayer, cell, 1.6, 0.05, '#2bcba1', 0.03));
+    operatorOnly(cellBox(staticLayer, cell, 1.6, 0.05, '#0f766e', 0.03));
     const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), position(cell, 0.1), 1.2, '#d0fff0', 0.3, 0.2);
     staticLayer.add(operatorOnly(arrow));
   });
@@ -1107,7 +1196,7 @@ function drawDynamic(): void {
     }
   }
   if (layers.route && state.route.length > 0) {
-    const material = new THREE.MeshBasicMaterial({ color: '#55e3c2' });
+    const material = new THREE.MeshBasicMaterial({ color: '#1d5b96' });
     const points = [state.robot, ...state.route];
     for (let i = 1; i < points.length; i++) {
       const a = position(points[i - 1], 0.12), b = position(points[i], 0.12);
@@ -1136,11 +1225,11 @@ function drawDynamic(): void {
     }
   }
   const robot = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.45), new THREE.MeshStandardMaterial({ color: '#5ce0ca' }));
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.45), new THREE.MeshStandardMaterial({ color: '#22282e', roughness: 0.5 }));
   body.position.y = 0.25;
-  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.7, 8), new THREE.MeshStandardMaterial({ color: '#d9fff7' }));
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.7, 8), new THREE.MeshStandardMaterial({ color: '#5f6974' }));
   mast.position.set(0.15, 0.7, 0);
-  const lens = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.08, 0.14), new THREE.MeshStandardMaterial({ color: '#10202c' }));
+  const lens = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.08, 0.14), new THREE.MeshBasicMaterial({ color: '#8fb8e0' }));
   lens.position.set(0.22, 1.0, 0);
   robot.add(body, mast, lens);
   robot.position.copy(position(state.robot, 0));
@@ -1253,18 +1342,18 @@ function drawFeed(result: FrameResult | null): void {
   else ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!result) return;
   ctx.lineWidth = 2;
-  ctx.font = '12px DM Sans, sans-serif';
+  ctx.font = '600 12px "JetBrains Mono", monospace';
   for (const d of result.rejected) {
     ctx.strokeStyle = '#9aa5b1'; ctx.setLineDash([5, 4]);
     ctx.strokeRect(d.box[0], d.box[1], d.box[2] - d.box[0], d.box[3] - d.box[1]);
   }
   ctx.setLineDash([]);
   for (const d of result.accepted) {
-    ctx.strokeStyle = '#59d7ff';
+    ctx.strokeStyle = '#f59e0b';
     ctx.strokeRect(d.box[0], d.box[1], d.box[2] - d.box[0], d.box[3] - d.box[1]);
     const label = `${d.detection ?? 'person'} ${(d.confidence * 100).toFixed(0)}%`;
-    ctx.fillStyle = '#59d7ff'; ctx.fillRect(d.box[0], Math.max(0, d.box[1] - 16), ctx.measureText(label).width + 8, 16);
-    ctx.fillStyle = '#07202b'; ctx.fillText(label, d.box[0] + 4, Math.max(12, d.box[1] - 4));
+    ctx.fillStyle = '#f59e0b'; ctx.fillRect(d.box[0], Math.max(0, d.box[1] - 16), ctx.measureText(label).width + 8, 16);
+    ctx.fillStyle = '#181c20'; ctx.fillText(label, d.box[0] + 4, Math.max(12, d.box[1] - 4));
   }
 }
 
@@ -1272,7 +1361,7 @@ function renderDetections(): void {
   if (!state) return;
   const image = state.perception_mode === 'image-yolo';
   $('camera-explainer').hidden = !image;
-  if (!image) $('camera-status').textContent = 'Analytic fixture mode: no camera frames';
+  if (!image) $('camera-status').textContent = 'Live preview · fixture mode, not sent to YOLO';
   const items = state.detections.slice().reverse();
   $('detections').innerHTML = items.length ? items.map(d => `<li><time>${escape(d.id)}</time><span>${escape(d.status)} · ${d.hits} obs · ${(d.confidence * 100).toFixed(0)}% · (${number(d.position[0], 2)}, ${number(d.position[1], 2)}) m · ${escape(d.source)}</span></li>`).join('') : '<li class="empty-line">No detections yet. Unobserved rooms are not confirmed empty.</li>';
 }
@@ -1317,17 +1406,60 @@ function recenter(): void {
 
 function setView(next: typeof cameraView): void {
   cameraView = next;
-  smokeClouds.visible = next === 'orbit';
+  const free = next === 'orbit' || next === 'plan';
+  smokeClouds.visible = next === 'orbit' || next === 'follow';
   smokeField.mesh.visible = next === 'plan';
   if (controls) {
+    controls.enabled = free;
     controls.enableRotate = next === 'orbit';
     controls.mouseButtons.LEFT = next === 'orbit' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
     controls.touches.ONE = next === 'orbit' ? THREE.TOUCH.ROTATE : THREE.TOUCH.PAN;
   }
-  $('orbit').setAttribute('aria-pressed', String(next === 'orbit'));
-  $('plan').setAttribute('aria-pressed', String(next === 'plan'));
-  $('map-help').textContent = next === 'plan' ? 'Drag to pan · Scroll to zoom' : 'Drag to orbit · Scroll to zoom · Right-drag to pan';
-  recenter();
+  for (const id of ['orbit', 'plan', 'follow', 'pov'] as const) $(id).setAttribute('aria-pressed', String(next === id));
+  $('pov-flag').hidden = next !== 'pov';
+  $('map-help').textContent = next === 'plan' ? 'Drag to pan · Scroll to zoom'
+    : next === 'follow' ? 'Chase camera behind the robot · switch to Overview or Plan to edit'
+    : next === 'pov' ? 'Robot camera pose over the full-height scan · switch to Overview or Plan to edit'
+    : 'Drag to orbit · Scroll to zoom · Right-drag to pan';
+  followReady = false;
+  if (free) recenter();
+}
+
+/** Robot pose in three.js space: eye position and unit forward vector (scan-frame yaw). */
+function robotEye(): { eye: THREE.Vector3; forward: THREE.Vector3 } | null {
+  const pose = state?.pose;
+  if (!pose || !Number.isFinite(pose.x)) return null;
+  const eye = toThree(pose.x, pose.y, pose.z);
+  const forward = toThree(pose.x + Math.cos(pose.yaw), pose.y + Math.sin(pose.yaw), pose.z).sub(eye).normalize();
+  return { eye, forward };
+}
+
+/** Live preview of the robot camera in fixture mode (no frames go to YOLO), throttled to ~4 fps. */
+function renderPreview(now: number): void {
+  // In YOLO mode the panel shows the frames actually sent for inference (with boxes) once a run produces them.
+  const yoloFrames = state?.perception_mode === 'image-yolo' && lastFrameImage !== null && (state.status === 'running' || state.status === 'paused');
+  if (replayId || !renderer || !state || !sceneReady || frameInFlight || yoloFrames || now - lastPreview < 250) return;
+  const rob = robotEye();
+  if (!rob) return;
+  lastPreview = now;
+  robotCamera.position.copy(rob.eye);
+  robotCamera.lookAt(rob.eye.clone().add(rob.forward));
+  robotCamera.updateMatrixWorld();
+  const previousBackground = world.background;
+  world.background = new THREE.Color('#e9e7e3');
+  sourceCutaway.constant = NO_CUT;
+  renderer.setRenderTarget(rgbTarget);
+  renderer.render(world, robotCamera);
+  const rgba = new Uint8Array(CAM_W * CAM_H * 4);
+  renderer.readRenderTargetPixels(rgbTarget, 0, 0, CAM_W, CAM_H, rgba);
+  renderer.setRenderTarget(null);
+  world.background = previousBackground;
+  const image = new ImageData(CAM_W, CAM_H);
+  for (let row = 0; row < CAM_H; row++) {
+    const src = (CAM_H - 1 - row) * CAM_W;
+    image.data.set(rgba.subarray(src * 4, (src + CAM_W) * 4), row * CAM_W * 4);
+  }
+  ($('robot-feed') as HTMLCanvasElement).getContext('2d')!.putImageData(image, 0, 0);
 }
 
 function setupRenderer(): void {
@@ -1368,6 +1500,32 @@ function setupRenderer(): void {
         incidentEffect.scale.setScalar(reducedMotion.matches ? 2 : .8 + 3.5 * age);
         incidentEffect.material.uniforms.age.value = age;
       }
+      renderPreview(now);
+      const rob = cameraView === 'follow' || cameraView === 'pov' ? robotEye() : null;
+      if (rob && cameraView === 'pov') {
+        // What the robot camera sees: full-height scan, physical flames, local smoke as fog.
+        const { width, height } = renderer.domElement.getBoundingClientRect();
+        povCamera.aspect = width / Math.max(height, 1);
+        povCamera.updateProjectionMatrix();
+        povCamera.position.copy(rob.eye);
+        povCamera.lookAt(rob.eye.clone().add(rob.forward));
+        const smokeHere = state ? state.smoke[state.robot[1]]?.[state.robot[0]] ?? 0 : 0;
+        world.fog = smokeHere > 0.02 ? new THREE.FogExp2(0x8d9299, 0.15 + smokeHere * 1.6) : null;
+        const previousBackground = world.background;
+        world.background = new THREE.Color('#e9e7e3');
+        sourceCutaway.constant = NO_CUT;
+        try { renderer.render(world, povCamera); }
+        finally { world.fog = null; world.background = previousBackground; }
+        return;
+      }
+      if (rob && cameraView === 'follow') {
+        const eye = rob.eye.clone().addScaledVector(rob.forward, -4.2).setY(rob.eye.y + 4.4);
+        const look = rob.eye.clone().addScaledVector(rob.forward, 1.2).setY(0.2);
+        if (!followReady) { followEye.copy(eye); followLook.copy(look); followReady = true; }
+        followEye.lerp(eye, 0.08); followLook.lerp(look, 0.12);
+        camera.position.copy(followEye);
+        camera.lookAt(followLook);
+      }
       sourceCutaway.constant = cutawayOn ? cutawayHeight : NO_CUT;
       flames.visible = layers.fire;
       try { renderer.render(world, camera); }
@@ -1381,6 +1539,7 @@ function setupRenderer(): void {
       if (!down || event.button !== 0 || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5) { down = null; return; }
       down = null;
       if (!scene || !camera) return;
+      if (cameraView === 'follow' || cameraView === 'pov') { notify('Switch to Overview or Plan to inspect or edit cells.'); return; }
       const bounds = canvas.getBoundingClientRect();
       pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
       raycaster.setFromCamera(pointer, camera);
@@ -1417,7 +1576,7 @@ function applyCell(cell: Cell): void {
   selectedCell = cell;
   inspectCell(cell);
   if (selectedTool !== 'inspect') {
-    if (!idle() || busy || !draft) { notify('Scenario editing is available only while idle and connected.', true); return; }
+    if (replayId || !idle() || busy || !draft) { notify('Scenario editing is available only while idle and connected.', true); return; }
     if (blocked(cell)) { notify('Choose a floor cell; walls and outside cells cannot contain survivors or ignitions.', true); return; }
     if (scene!.exits.some(p => same(p, cell))) { notify('Keep egress endpoints clear.', true); return; }
     if (selectedTool === 'remove') {
@@ -1489,7 +1648,7 @@ interface AgentInfo { state: string; enabled: boolean; pause_clock: boolean; thi
 async function refreshAgent(): Promise<void> {
   try {
     const info = await api<AgentInfo>('agent');
-    const states: Record<string, string> = { 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
+    const states: Record<string, string> = { 'approval-required': 'Gemini experiments require an approved campaign; built-in planners are available.', 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
     $('agent-status').textContent = info.state === 'ready'
       ? `${info.model} · ${info.enabled ? 'on' : 'off'}${info.thinking ? ' · thinking…' : ''}${info.pause_clock ? ' · clock paused while thinking' : ' · real time'} · ${info.accepted} accepted · ${info.rejected} rejected · ${info.failed} failed${info.latency_s != null ? ` · ${number(info.latency_s, 1)} s` : ''}` +
         (info.last ? ` · last: ${info.last.kind} ${info.last.id} (“${info.last.reason}”)` : '') + (info.last_error ? ` · last problem: ${info.last_error}` : '') +
@@ -1513,7 +1672,7 @@ for (const action of ['start', 'pause', 'reset'] as const) {
     const strategy = chosen<Strategy>('strategy');
     if (strategy === 'gemini') throw new Error('The Gemini planner is a placeholder and not yet available.');
     await api('control', action === 'start' ? { action, mode: chosen<Mode>('mode'), perception: chosen<Perception>('perception'), strategy } : action === 'reset' ? { action, perception: chosen<Perception>('perception'), strategy } : { action, strategy });
-    if (action === 'reset') { dirty = false; draft = null; lastFrameSeq = -1; }
+    if (action === 'reset') { paceSamples.length = 0; dirty = false; draft = null; lastFrameSeq = -1; }
     notify(action === 'reset' ? 'Reset requested. Waiting for the backend state.' : `${action === 'start' ? 'Start' : 'Pause'} requested.`);
   }));
 }
@@ -1672,6 +1831,21 @@ $('focus-fire').addEventListener('click', () => {
 });
 $('orbit').addEventListener('click', () => setView('orbit'));
 $('plan').addEventListener('click', () => setView('plan'));
+$('follow').addEventListener('click', () => setView('follow'));
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
+  button.addEventListener('click', async () => {
+    const speed = Number(button.dataset.speed);
+    paceSamples.length = 0; pendingSpeed = speed; syncSpeed();
+    try {
+      const result = await api<{ run_speed: number }>('speed', { speed });
+      if (state) state.run_speed = result.run_speed;
+      notify(`Playback ${speed}×. Wall-clock pace only; simulated time and results are unchanged.`);
+    } catch (error) {
+      notify(`Speed change failed: ${error instanceof Error ? error.message : 'error'}`, true);
+    } finally { pendingSpeed = null; syncSpeed(); }
+  });
+}
+$('pov').addEventListener('click', () => setView('pov'));
 $('walls-layer').addEventListener('change', applyWallLayer);
 $('human-variant').addEventListener('change', () => {
   if (!draft || !idle() || busy) return;
@@ -1727,7 +1901,13 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) void
 setupRenderer();
 syncUI();
 void poll();
-window.setInterval(() => void poll(), 200);
+// Poll faster during image-YOLO runs: the mission clock waits for each camera frame, so the delay before the page
+// notices a frame request directly limits the achievable pace (especially at 2x/4x/8x).
+(function schedulePoll() {
+  const current = state as SimState | null;  // module-level narrowing would otherwise treat it as null
+  const fast = current?.status === 'running' && current.perception_mode === 'image-yolo';
+  window.setTimeout(() => { void poll(); schedulePoll(); }, fast ? 50 : 200);
+})();
 // Exposed for automated end-to-end checks (headless browser); read-only accessors.
 (window as unknown as { rescuetwin: object }).rescuetwin = { state: () => state, scene: () => scene, lastFrameSeq: () => lastFrameSeq };
 
@@ -1741,12 +1921,12 @@ if (new URLSearchParams(location.search).has('sensorOnly')) {
     <input id="runs-filter" aria-label="Filter recorded scenes, policies and outcomes" placeholder="Filter scene, policy, outcome"><button id="runs-refresh">Refresh</button><select id="runs-list"><option value="">Select a recording</option></select>
     <button id="replay-open">Replay</button><button id="replay-live">Live</button>
     <button id="replay-next-event">Next decision / detection</button><button id="replay-play">Play / pause</button><button id="replay-step">Step</button>
-    <select id="replay-speed"><option>1</option><option>2</option><option>4</option></select> ×
+    <select id="replay-speed" aria-label="Replay speed"><option>1</option><option>2</option><option>4</option></select> ×
     <input id="replay-seek" aria-label="Recording event" type="range" min="0" max="0" value="0">
     <a id="replay-download">Download archive</a><p id="replay-label">Live view</p>
     <details><summary>Recorded evidence, tools and decisions</summary><pre id="replay-inspector" style="max-height:350px;overflow:auto;white-space:pre-wrap"></pre></details>`;
   panel.querySelectorAll('button').forEach(b=>b.className='button small');
-  document.querySelector('main')?.prepend(panel);
+  document.querySelector('.scene-panel')?.after(panel);
   if (!panel.isConnected) document.body.prepend(panel);
   const refresh = async () => {
     const rows = await api<{id:string;scene_name:string;strategy:string;status:string}[]>('runs');
@@ -1766,6 +1946,7 @@ if (new URLSearchParams(location.search).has('sensorOnly')) {
     document.getElementById('replay-label')!.textContent=`READ ONLY · ${row.time.toFixed(1)} s · ${row.kind}`;
     document.getElementById('replay-inspector')!.textContent=JSON.stringify(row.data,null,2);
     const historical=await api<{snapshot:any;frame:any}>(`runs/${id}/snapshot?seq=${row.seq}`);
+    if (replayId !== id) return;
     const display=historical.snapshot?.data;
     if (display) {
       riskMap={rooms:display.state.risk_map??[],building_default:'unknown',building_source:'Recorded room tags',tags:[],note:''};
@@ -1781,7 +1962,7 @@ if (new URLSearchParams(location.search).has('sensorOnly')) {
     }
     if (historical.frame) {
       const img = new Image();img.src=`/api/runs/${id}/artifacts/${historical.frame.data.rgb}`;
-      img.onload=() => { const canvas=document.querySelector('#robot-feed') as HTMLCanvasElement|null;canvas?.getContext('2d')?.drawImage(img,0,0,canvas.width,canvas.height); };
+      img.onload=() => { if (replayId !== id) return; const canvas=document.querySelector('#robot-feed') as HTMLCanvasElement|null;canvas?.getContext('2d')?.drawImage(img,0,0,canvas.width,canvas.height); };
     }
   };
   document.getElementById('replay-open')!.onclick=() => void (async () => {
@@ -1789,6 +1970,7 @@ if (new URLSearchParams(location.search).has('sensorOnly')) {
     replayPlaying=false;
     if (!sensorWorker) {sensorWorker=document.createElement('iframe');sensorWorker.src='/?sensorOnly=1';sensorWorker.style.cssText='position:fixed;width:2px;height:2px;left:-10px';document.body.append(sensorWorker);}
     await api('renderer',{id:rendererId,release:true});rendererOwned=false;
+    paceSamples.length=0; lastFrameImage=null;
     replayId=id;
     const manifest=await api<{entries:number}>(`runs/${id}`);
     replayScene=await api<SceneData>(`runs/${id}/artifacts/scene.json`);
@@ -1801,7 +1983,7 @@ if (new URLSearchParams(location.search).has('sensorOnly')) {
     (document.getElementById('replay-download') as HTMLAnchorElement).href=`/api/runs/${id}/download`;
     await show(0);
   })().catch(e=>notify(String(e),true));
-  document.getElementById('replay-live')!.onclick=() => {replayPlaying=false;replayId=null;replayScene=null;sensorWorker?.remove();sensorWorker=null;scene=null;void loadHumans(()=>{avatars.forEach(a=>avatarLayer.remove(a));avatars.clear();},m=>notify(m,true));void poll();document.getElementById('replay-label')!.textContent='Live view';};
+  document.getElementById('replay-live')!.onclick=() => {paceSamples.length=0;lastFrameImage=null;lastFrameSeq=-1;strategySynced=false;replayPlaying=false;replayId=null;replayScene=null;sensorWorker?.remove();sensorWorker=null;scene=null;void loadHumans(()=>{avatars.forEach(a=>avatarLayer.remove(a));avatars.clear();},m=>notify(m,true));void poll();document.getElementById('replay-label')!.textContent='Live view';};
   document.getElementById('replay-next-event')!.onclick=()=>void (async()=>{if(!replayId)return;const m=await api<{highlights?:{seq:number;kind:string}[]}>(`runs/${replayId}`);const next=m.highlights?.find(e=>e.seq>replayCursor&&['decision','detection','model','tool','report'].includes(e.kind));if(next)await show(next.seq);})();
   document.getElementById('replay-play')!.onclick=()=>{replayPlaying=!replayPlaying;};
   document.getElementById('replay-step')!.onclick=()=>void show(replayCursor+1);

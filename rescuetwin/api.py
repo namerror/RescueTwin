@@ -29,6 +29,10 @@ TICK = .2
 RUN_SPEED = float(os.environ.get('RESCUETWIN_RUN_SPEED', '1'))
 if not math.isfinite(RUN_SPEED) or RUN_SPEED <= 0:
     raise ValueError('RESCUETWIN_RUN_SPEED must be a positive, finite number')
+# Wall-clock pace only: every tick still advances the same TICK of simulated time, so results are unchanged.
+# The operator can change it at runtime (POST /api/speed); the env value is the startup default.
+SPEED_CHOICES = (1, 2, 4, 8)
+run_speed = RUN_SPEED
 
 scenes = available()
 
@@ -119,40 +123,57 @@ def frame_timeout_check():
         frame_requested_at = None
 
 
+async def simulation_clock():
+    global sim
+    next_due = 0.   # wall-clock time the next paced simulation step may run
+    paced_sim = None
+    while True:
+        tick_started = time.monotonic()
+        fast = paired is not None and paired.status == 'running'
+        current = sim
+        if current is not paced_sim:
+            paced_sim = current
+            next_due = 0.
+        if current.status == 'running' and inference_hold(current):
+            current.metrics['inference_pause_s'] += TICK      # labelled pause, reported with the run
+            await asyncio.sleep(TICK)
+            continue
+        if current.status == 'running':
+            frame_timeout_check()
+            # Pace complete steps, including supervision and recording; frame waits overlap the deadline.
+            if not current.needs_frame() and (fast or tick_started >= next_due):
+                supervisor = getattr(current, 'supervisor', None)
+                if supervisor:
+                    await asyncio.to_thread(supervisor.step)
+                    if current is not sim:
+                        continue
+                if current.status == 'running':
+                    current.tick(TICK)
+                    if getattr(current, 'recorder', None):
+                        current.recorder.capture(current)
+                next_due = tick_started + TICK / run_speed
+        elif current.hazards_running:
+            # Upstream PR #1: hazards can be previewed while the robot mission is idle or paused.
+            current.hazards(TICK)
+        if current.status != 'running' and current.hazard_time >= HAZARD_PREVIEW_LIMIT_S - 1e-8:
+            current.hazards_running = False
+        if fast and current is sim and current.status not in ('running', 'paused'):
+            paired.record(current)
+        if fast:
+            await asyncio.sleep(TICK / 8 if current.needs_frame() else 0)
+        else:
+            now = time.monotonic()
+            if current.status == 'running':
+                # Waiting on a frame: re-check often so the clock resumes as soon as it lands.
+                wait = TICK / 8 if current.needs_frame() else min(TICK, max(0., next_due - now))
+            else:
+                interval = TICK / run_speed if current.hazards_running else TICK
+                wait = max(0., interval - (now - tick_started))
+            await asyncio.sleep(wait)
+
+
 @asynccontextmanager
 async def lifespan(app):
-    async def clock():
-        global sim
-        while True:
-            tick_started = time.monotonic()
-            fast = paired is not None and paired.status == 'running'
-            current = sim
-            if current.status == 'running' and inference_hold(current):
-                current.metrics['inference_pause_s'] += TICK      # labelled pause, reported with the run
-                await asyncio.sleep(TICK)
-                continue
-            if current.status == 'running':
-                frame_timeout_check()
-                supervisor=getattr(current,'supervisor',None)
-                if supervisor and not current.needs_frame():
-                    await asyncio.to_thread(supervisor.step)
-                    if current is not sim:continue
-                current.tick(TICK)
-                if getattr(current,"recorder",None):current.recorder.capture(current)
-            elif current.hazards_running:
-                # Upstream PR #1: hazards can be previewed while the robot mission is idle or paused.
-                current.hazards(TICK)
-            if current.status != 'running' and current.hazard_time >= HAZARD_PREVIEW_LIMIT_S - 1e-8:
-                current.hazards_running = False
-            if fast and current is sim and current.status not in ('running', 'paused'):
-                paired.record(current)
-            if fast:
-                await asyncio.sleep(TICK / 8 if current.needs_frame() else 0)
-            else:
-                active = current.status == 'running' or current.hazards_running
-                interval = TICK / RUN_SPEED if active and not current.needs_frame() else TICK
-                await asyncio.sleep(max(0., interval - (time.monotonic() - tick_started)))
-
     async def reason():
         """Hosted supervisor: proposes goals; the controller validates and executes. Any failure or rejection falls
         back to the deterministic policy for that decision (the mission never pauses on the model's account)."""
@@ -193,7 +214,7 @@ async def lifespan(app):
 
     if VISION_AVAILABLE and os.environ.get('RESCUETWIN_PRELOAD_DETECTOR', '1') == '1':
         asyncio.get_running_loop().run_in_executor(None, load_detector)
-    tasks = [asyncio.create_task(reason()), asyncio.create_task(clock())]
+    tasks = [asyncio.create_task(reason()), asyncio.create_task(simulation_clock())]
     yield
     if getattr(sim,'recorder',None):sim.recorder.close('server shutdown')
     for task in tasks:
@@ -247,6 +268,7 @@ def state():
     supervisor=getattr(sim,'supervisor',None)
     s['agent_supervisor']=dict(architecture=supervisor.architecture,calls=supervisor.calls,active=supervisor.tools.active) if supervisor else None
     s['vision_installed'] = VISION_AVAILABLE
+    s['run_speed'] = run_speed
     return s
 
 @app.get('/api/observations')
@@ -350,6 +372,19 @@ def agent_toggle(body:AgentToggle):
         agent_status['pause_clock']=body.pause_clock
         sim.log(PAUSE_LABEL if body.pause_clock else 'Real-time mode: the mission clock runs during model inference.')
     return agent_info()
+
+class Speed(BaseModel):
+    speed: float
+
+@app.post('/api/speed')
+def set_speed(body: Speed):
+    """Playback pace (1x, 2x, 4x, 8x). Changes wall-clock pace only, never the simulated timestep."""
+    global run_speed
+    if body.speed not in SPEED_CHOICES:
+        raise HTTPException(422, f'speed must be one of {SPEED_CHOICES}')
+    run_speed = float(body.speed)
+    return dict(run_speed=run_speed, choices=SPEED_CHOICES,
+                note='Wall-clock pace only; camera frames, inference and compute can limit the achieved pace.')
 
 @app.get('/api/perception')
 def perception_status():

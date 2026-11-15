@@ -21,7 +21,7 @@ def verify(url='http://127.0.0.1:5174'):
            'mesh':{'file':next(n for n in assets if n.endswith('.obj')),'format':'obj','materials':mtls,'textured':True,'frame':'model','wall_height':3,'source':'SYNTHETIC test OBJ'},'assets':assets,
            'obstacle_overlay':{'furniture':[[5,5],[5,6],[6,5],[6,6]],'source_walls':[[7,r] for r in range(8)]}}
     zeros=[[0]*8 for _ in range(8)];seq=[0];frames=[];errors=[]
-    state={'scene_id':scene['id'],'scenario':{'scene_id':scene['id'],'survivors':[],'ignitions':[],'seed':7},'time':0,'status':'idle','robot':[2,2],'heading':0,'pose':{'x':1.25,'y':1.25,'z':1,'yaw':0},'survivors':[], 'heat':zeros,'smoke':zeros,'observed':zeros,'route':[],'events':[],'metrics':{},'mode':'adaptive','perception_mode':'image-yolo','detections':[],'frame_request':None,'degraded':False,'scanning':False,'last_frame':None,'paired':None,'hazard_time':0,'hazards_running':False}
+    state={'scene_id':scene['id'],'scenario':{'scene_id':scene['id'],'survivors':[],'ignitions':[],'seed':7},'time':0,'status':'idle','robot':[2,2],'heading':0,'pose':{'x':1.25,'y':1.25,'z':1,'yaw':0},'survivors':[], 'heat':zeros,'smoke':zeros,'observed':zeros,'route':[],'events':[],'metrics':{},'mode':'adaptive','strategy':'greedy','perception_mode':'image-yolo','detections':[],'frame_request':None,'degraded':False,'scanning':False,'last_frame':None,'paired':None,'hazard_time':0,'hazards_running':False}
     def respond(route):
         path=route.request.url.split('/api/',1)[1]
         if '/files/' in path:
@@ -31,9 +31,12 @@ def verify(url='http://127.0.0.1:5174'):
         if path=='scene':body=scene
         elif path=='scenes':body=[{'id':scene['id'],'name':scene['name'],'source':'synthetic','checks_passed':True}]
         elif path=='building-uses':body={'inferred':'residential','source':'synthetic fixture','profiles':[{'id':'residential','label':'Residential','rationale':'Synthetic test'}]}
+        elif path=='risk-map':body={'rooms':[],'tags':[],'building_default':'unknown','building_source':'synthetic fixture','note':''}
         elif path.startswith('presets'):body=[]
         elif path=='state':
             seq[0]+=1;state['frame_request']={'seq':seq[0],'time':0,'pose':state['pose']};body=state
+        elif path=='renderer':body={'owner':True}
+        elif path=='runs':body=[]
         elif path=='frames':
             payload=route.request.post_data_json
             (root/'robot-rgb.jpg').write_bytes(base64.b64decode(payload['rgb'].split(',',1)[1]))
@@ -49,6 +52,7 @@ def verify(url='http://127.0.0.1:5174'):
             if frames:break
             page.wait_for_timeout(500)
         before=frames[-1]['valid_depth_pixels']
+        page.locator('.view-options').evaluate('(el) => el.open = true')
         page.locator('#walls-layer').uncheck()
         count=len(frames)
         for _ in range(20):
@@ -63,7 +67,7 @@ def verify(url='http://127.0.0.1:5174'):
             page.wait_for_timeout(250)
             if len(frames)>count:break
         assert frames[-1]['valid_depth_pixels']==before,'Operator overlay/cutaway changed robot depth'
-        page.locator('#plan').click();page.screenshot(path=str(root/'topdown.png'),full_page=True)
+        page.locator('.view-options').evaluate('(el) => el.open = true');page.locator('#plan').click();page.screenshot(path=str(root/'topdown.png'),full_page=True)
         assert frames,'No rendered RGB-D frame'
         rgb=np.array(Image.open(root/'robot-rgb.jpg'));colored=((rgb[:,:,1]>rgb[:,:,0]*1.2)&(rgb[:,:,1]>rgb[:,:,2]*1.2)).mean()
         result={'synthetic_fixture':True,'green_pixel_fraction':float(colored),'frames':frames[-1:],'page_errors':errors,'overlay_and_cutaway_operator_only':True}
