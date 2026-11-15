@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 from rescuetwin.api import app
 
@@ -105,8 +106,8 @@ def test_decision_quality_mode_holds_clock_only_while_waiting_on_the_model(monke
     client = TestClient(api.app)
     client.post('/api/control', json={'action': 'reset'})
     monkeypatch.setitem(api.agent_status, 'state', 'ready')
-    assert client.post('/api/agent', json={'enabled': True}).status_code == 403
-    monkeypatch.setitem(api.agent_status, 'enabled', True)  # internal clock unit test; public activation is gated
+    api.sim.strategy = 'gemini'
+    monkeypatch.setitem(api.agent_status, 'enabled', True)
     info = client.post('/api/agent', json={'pause_clock': True}).json()
     assert info['pause_clock'] and 'not real-time' in api.sim.events[-1]['message']
     api.sim.status = 'running'
@@ -164,3 +165,57 @@ def test_renderer_lease_prevents_competing_producers(monkeypatch):
     assert not client.post('/api/renderer',json={'id':'two'}).json()['owner']
     client.post('/api/renderer',json={'id':'one','release':True})
     assert client.post('/api/renderer',json={'id':'two'}).json()['owner']
+
+
+def test_gemini_selection_reports_missing_configuration(monkeypatch):
+    from rescuetwin import api, agent
+    monkeypatch.setattr(agent, 'load_agent_env', lambda: None)
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.setattr(api.app.state, 'mission_agent', None, raising=False)
+    monkeypatch.setattr(api, 'sim', api.new_simulation(api.sim.base_scene))
+    client = TestClient(app)
+    reset = client.post('/api/control', json={'action': 'reset', 'strategy': 'gemini'})
+    assert reset.status_code == 200 and reset.json()['strategy'] == 'gemini'
+    response = client.post('/api/control', json={'action': 'start', 'strategy': 'gemini'})
+    assert response.status_code == 503 and 'GEMINI_API_KEY' in response.json()['detail']
+    assert api.sim.status == 'idle'
+    assert client.post('/api/agent', json={'enabled': True}).status_code == 503
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_gemini_runs_validated_decisions_and_builtin_planners_stay_offline(monkeypatch, fail):
+    import time
+    from rescuetwin import api, agent
+    calls = []
+    class FakeAgent:
+        model = 'test-model'
+        def decide(self, observation, scene, options):
+            assert 'scenario' not in observation
+            calls.append(observation)
+            if fail: raise RuntimeError('Simulated provider outage')
+            room = next(r for r in options['rooms'] if r['remaining_observation_points'] and r['travel_cost_m'])
+            return {'kind': 'room', 'id': room['id'], 'reason': 'Inspect a reachable room'}
+    monkeypatch.setattr(agent, 'MissionAgent', FakeAgent)
+    monkeypatch.setattr(agent, 'load_agent_env', lambda: None)
+    monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
+    monkeypatch.setattr(api.app.state, 'mission_agent', None, raising=False)
+    monkeypatch.setattr(api, 'sim', api.new_simulation(api.sim.base_scene))
+    monkeypatch.setattr(api, 'agent_status', dict(api.agent_status, enabled=False, accepted=0, failed=0, rejected=0, pause_clock=True))
+    with TestClient(app) as client:
+        response = client.post('/api/control', json={'action': 'start', 'strategy': 'gemini'})
+        assert response.status_code == 200 and response.json()['strategy'] == 'gemini'
+        deadline = time.monotonic() + 3
+        outcome = 'failed' if fail else 'accepted'
+        while not api.agent_status[outcome] and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert calls and api.agent_status[outcome] > 0
+        if fail:
+            assert api.sim.agent_backoff_until > api.sim.time
+            assert not api.inference_hold(api.sim)
+        else:
+            assert any('Hosted agent: room' in e['message'] for e in api.sim.events)
+        client.post('/api/control', json={'action': 'reset', 'strategy': 'greedy'})
+        assert not api.inference_hold(api.sim)
+        client.post('/api/control', json={'action': 'start', 'strategy': 'greedy'})
+        assert not api.agent_status['enabled']
+        client.post('/api/control', json={'action': 'reset'})

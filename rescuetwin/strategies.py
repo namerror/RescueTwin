@@ -16,7 +16,7 @@ from itertools import permutations
 
 from .core import ESCORT_HEAT_LIMIT, ESCORT_SMOKE_LIMIT, ROBOT_SPEED, extract, line_visible, route_tree
 
-STRATEGIES = ('greedy', 'greedy-credit', 'pickup', 'lookaround', 'horizon', 'zone', 'self-evac',
+STRATEGIES = ('gemini', 'greedy', 'greedy-credit', 'pickup', 'lookaround', 'horizon', 'zone', 'self-evac',
               'mission-astar', 'mission-astar-cached', 'time-aware', 'exposure-budget')
 MISSION = ('mission-astar', 'mission-astar-cached')
 

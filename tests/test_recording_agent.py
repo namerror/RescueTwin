@@ -43,8 +43,6 @@ def test_stale_commit_and_gate(tmp_path):
  with pytest.raises(ValueError,match='Stale'):t.commit('0','bad','x')
  p=tmp_path/'campaign.json';p.write_text('{}')
  with pytest.raises(PermissionError):GeminiProvider(p)
- from rescuetwin.agent import MissionAgent
- with pytest.raises(PermissionError):MissionAgent()
 
 def test_modalities_and_unknown_heat():
  s=Simulation(scenario=dict(survivors=[],ignitions=[],seed=1));s.sense()
@@ -135,3 +133,23 @@ def test_completed_campaign_cannot_spend_again(tmp_path):
  p=tmp_path/'approved-campaign.json';p.write_text(json.dumps(dict(approval='approve')))
  (tmp_path/'campaign-complete.json').write_text('{}')
  with pytest.raises(PermissionError,match='already completed'):GeminiProvider(p)
+
+
+def test_interactive_gemini_initializes_without_campaign_or_hosted_request(monkeypatch):
+ from types import ModuleType
+ from unittest.mock import Mock
+ from rescuetwin.agent import MissionAgent
+ import sys
+ google=ModuleType('google');genai=ModuleType('google.genai')
+ genai.Client=Mock();genai.types=Mock();google.genai=genai
+ monkeypatch.setitem(sys.modules,'google',google)
+ monkeypatch.setitem(sys.modules,'google.genai',genai)
+ monkeypatch.setenv('GEMINI_API_KEY','test-key')
+ monkeypatch.setenv('GEMINI_MODEL','configured-model')
+ agent=MissionAgent()
+ try:
+  assert agent.model=='configured-model'
+  assert genai.Client.call_args.kwargs['api_key']=='test-key'
+  genai.Client.return_value.models.generate_content.assert_not_called()
+ finally:
+  agent.pool.shutdown(wait=False)

@@ -29,7 +29,11 @@ All 14 prepared catalog models are selectable as textured simulation scenes.
 Real: the property record and scan-derived floor geometry. Synthetic: fire, smoke, people, robot. The unit
 has one verified exit (see `docs/SCENE_SELECTION.md`). Survivors are found by YOLO on robot-camera frames
 rendered in the browser; an analytic fixture detector remains for CI and the synthetic development scene.
-Hosted Gemini decisions are optional; without credentials the mission uses a deterministic policy.
+Select **Gemini** under Mission algorithm to enable hosted decisions. Set server-side `GEMINI_API_KEY`
+and optionally `GEMINI_MODEL` in `.env`; manual installs also need `pip install -e '.[agent]'`.
+Gemini uses robot observations and controller-validated goals, with deterministic fallback on errors.
+The mission clock pauses during inference by default (not real-time performance). Baseline and Mission A*
+run without hosted calls. Approved campaign experiments remain separate; see `docs/AGENT_EXPERIMENTS.md`.
 
 ```bash
 ./setup.sh

@@ -165,7 +165,7 @@ $('app').innerHTML = `
         <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Mission settings</h2></div></div>
           <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Risk-aware</span></label><label><input type="radio" name="mode" value="baseline" /><span>Distance-only</span></label></div></fieldset>
           <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" checked /><span>Analytic fixture</span></label></div></fieldset>
-          <fieldset id="strategy-fieldset"><legend>Mission algorithm</legend><div class="segmented"><label title="Baseline: searches the nearest unsearched room next and escorts each person straight to the exit."><input type="radio" name="strategy" value="greedy" checked /><span>Baseline</span></label><label title="Plans the whole remaining mission in one A* pass, ranking rooms by survivor likelihood and observed fire/smoke urgency, and re-plans each second. Changes only the room ordering; the local safety interlock is unchanged."><input type="radio" name="strategy" value="mission-astar" /><span>Mission A*</span></label><label title="Gemini mission planner: placeholder, not yet available."><input type="radio" name="strategy" value="gemini" disabled /><span>Gemini</span></label></div></fieldset>
+          <fieldset id="strategy-fieldset"><legend>Mission algorithm</legend><div class="segmented"><label title="Baseline: searches the nearest unsearched room next and escorts each person straight to the exit."><input type="radio" name="strategy" value="greedy" checked /><span>Baseline</span></label><label title="Plans the whole remaining mission in one A* pass, ranking rooms by survivor likelihood and observed fire/smoke urgency, and re-plans each second. Changes only the room ordering; the local safety interlock is unchanged."><input type="radio" name="strategy" value="mission-astar" /><span>Mission A*</span></label><label title="Gemini selects mission goals from robot observations; the controller validates decisions and falls back on errors. Requires a server API key."><input type="radio" name="strategy" value="gemini" /><span>Gemini</span></label></div></fieldset>
           <p id="strategy-description" class="field-hint">Baseline: nearest unsearched room first.</p>
           <p id="agent-status" class="field-hint">Checking hosted agent…</p>
           <p id="mode-description" class="field-hint">Analytic fixture uses simulator truth and is not image perception.</p>
@@ -1641,14 +1641,14 @@ type Strategy = 'greedy' | 'mission-astar' | 'gemini';
 const STRATEGY_DESCRIPTION: Record<Strategy, string> = {
   greedy: 'Baseline: nearest unsearched room first, then straight to the exit.',
   'mission-astar': 'Mission A*: whole-mission plan ranked by survivor likelihood and observed fire/smoke urgency; re-plans every second.',
-  gemini: 'Gemini planner: placeholder, not yet available.',
+  gemini: 'Gemini selects room, confirmed survivor and exit goals. Mission clock pauses while thinking; validated decisions use the existing navigation and safety rules.',
 };
 interface AgentInfo { state: string; enabled: boolean; pause_clock: boolean; thinking: boolean; model: string | null; accepted: number; rejected: number; failed: number;
   latency_s: number | null; last: { kind: string; id: string; reason: string; time: number } | null; last_error: string | null }
 async function refreshAgent(): Promise<void> {
   try {
     const info = await api<AgentInfo>('agent');
-    const states: Record<string, string> = { 'approval-required': 'Gemini experiments require an approved campaign; built-in planners are available.', 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
+    const states: Record<string, string> = { disabled: 'Select Gemini to enable hosted mission planning.', 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
     $('agent-status').textContent = info.state === 'ready'
       ? `${info.model} · ${info.enabled ? 'on' : 'off'}${info.thinking ? ' · thinking…' : ''}${info.pause_clock ? ' · clock paused while thinking' : ' · real time'} · ${info.accepted} accepted · ${info.rejected} rejected · ${info.failed} failed${info.latency_s != null ? ` · ${number(info.latency_s, 1)} s` : ''}` +
         (info.last ? ` · last: ${info.last.kind} ${info.last.id} (“${info.last.reason}”)` : '') + (info.last_error ? ` · last problem: ${info.last_error}` : '') +
@@ -1670,7 +1670,6 @@ for (const action of ['start', 'pause', 'reset'] as const) {
   $(action).addEventListener('click', () => void mutation(async () => {
     if (action === 'start' && dirty) throw new Error('Apply or discard your scenario changes first.');
     const strategy = chosen<Strategy>('strategy');
-    if (strategy === 'gemini') throw new Error('The Gemini planner is a placeholder and not yet available.');
     await api('control', action === 'start' ? { action, mode: chosen<Mode>('mode'), perception: chosen<Perception>('perception'), strategy } : action === 'reset' ? { action, perception: chosen<Perception>('perception'), strategy } : { action, strategy });
     if (action === 'reset') { paceSamples.length = 0; dirty = false; draft = null; lastFrameSeq = -1; }
     notify(action === 'reset' ? 'Reset requested. Waiting for the backend state.' : `${action === 'start' ? 'Start' : 'Pause'} requested.`);

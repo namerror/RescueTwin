@@ -18,11 +18,11 @@ FRAME_TIMEOUT_S = float(os.environ.get('RESCUETWIN_FRAME_TIMEOUT', '10'))
 AGENT_PERIOD_S = float(os.environ.get('RESCUETWIN_AGENT_PERIOD', '5'))
 AGENT_TIMEOUT_S = 10.0   # ~3 models x 3 s budget; decisions older than 10 s of mission time are rejected anyway
 # Hosted agent status for the operator UI (no secrets). Excluded from paired comparisons by design.
-# Off by default: the workbench's Gemini mission option is a placeholder; set RESCUETWIN_AGENT=1 to opt in.
+# Selecting Gemini enables hosted decisions for that strategy only.
 agent_status = dict(state='starting', enabled=os.environ.get('RESCUETWIN_AGENT', '0') == '1', model=None,
                     accepted=0, rejected=0, failed=0, latency_s=None, last=None, last_error=None,
                     # Decision-quality mode: freeze the mission clock (robot and fire) while the model is thinking.
-                    pause_clock=False, thinking=False)
+                    pause_clock=True, thinking=False)
 PAUSE_LABEL = 'Decision-quality mode: mission clock and fire paused during model inference; not real-time performance.'
 VISION_AVAILABLE = importlib.util.find_spec('ultralytics') is not None
 TICK = .2
@@ -176,22 +176,19 @@ async def simulation_clock():
 async def lifespan(app):
     async def reason():
         """Hosted supervisor: proposes goals; the controller validates and executes. Any failure or rejection falls
-        back to the deterministic policy for that decision (the mission never pauses on the model's account)."""
-        from .agent import BACKOFF_FAILED_S,BACKOFF_REJECTED_S,MissionAgent,apply_decision,decision_options,load_agent_env,scrub,wants_decision
-        if not agent_status['enabled']:
-            agent_status.update(state='approval-required');return
-        load_agent_env()
-        if not os.environ.get('GEMINI_API_KEY'):
-            agent_status.update(state='no-key');return
-        try:agent=MissionAgent()
-        except Exception as e:
-            agent_status.update(state='unavailable',last_error=scrub(type(e).__name__+': '+str(e)))
-            sim.log('Hosted agent unavailable; deterministic development policy active.');return
-        agent_status.update(state='ready',model=agent.model)
+        back to the deterministic policy for that decision; optional inference holds are labelled."""
+        from .agent import BACKOFF_FAILED_S,BACKOFF_REJECTED_S,apply_decision,decision_options,scrub,wants_decision
+        if agent_status['enabled']:
+            try: prepare_agent()
+            except HTTPException: pass
+        else:
+            agent_status.update(state='disabled')
         while True:
             await asyncio.sleep(TICK/2 if agent_status['pause_clock'] else AGENT_PERIOD_S)
             current=sim
-            if not agent_status['enabled'] or busy() or not wants_decision(current):continue
+            if not agent_status['enabled'] or current.strategy != 'gemini' or busy() or not wants_decision(current):continue
+            try: agent=prepare_agent()
+            except HTTPException: continue
             if agent_status['pause_clock'] and not getattr(current,'pause_logged',False):
                 current.pause_logged=True;current.log(PAUSE_LABEL)
             observation=deepcopy(current.observations());options=decision_options(current)
@@ -199,7 +196,7 @@ async def lifespan(app):
             try:
                 decision=await asyncio.wait_for(asyncio.to_thread(agent.decide,observation,current.scene,options),timeout=AGENT_TIMEOUT_S)
                 agent_status['latency_s']=round(time.time()-started,2)
-                if current is not sim:continue
+                if current is not sim or not agent_status['enabled'] or current.strategy != 'gemini' or busy():continue
                 apply_decision(current,decision,observation['time'])
                 agent_status['model']=agent.model;agent_status['accepted']+=1;agent_status['last']=dict(kind=decision.get('kind'),id=decision.get('id'),reason=str(decision.get('reason',''))[:300],time=round(current.time,1))
             except Exception as e:
@@ -359,14 +356,35 @@ def inference_hold(current):
     """Freeze the clock only in decision-quality mode, for the live run, while the robot waits on the model."""
     from .agent import wants_decision
     return (agent_status['pause_clock'] and agent_status['enabled'] and agent_status['state']=='ready' and not busy()
-            and current is sim and (agent_status['thinking'] or wants_decision(current)))
+            and current is sim and current.strategy == 'gemini' and (agent_status['thinking'] or wants_decision(current)))
+
+def prepare_agent():
+    """Initialize the interactive planner locally; no hosted request is made until a mission runs."""
+    from .agent import MissionAgent, load_agent_env, scrub
+    agent = getattr(app.state, 'mission_agent', None)
+    if agent is not None:
+        agent_status.update(state='ready', model=agent.model)
+        return agent
+    load_agent_env()
+    if not os.environ.get('GEMINI_API_KEY'):
+        agent_status.update(state='no-key')
+        raise HTTPException(503, 'Set GEMINI_API_KEY on the server to use Gemini.')
+    try:
+        agent = MissionAgent()
+    except Exception as error:
+        agent_status.update(state='unavailable', last_error=scrub(f'{type(error).__name__}: {error}'))
+        raise HTTPException(503, 'Gemini unavailable; install the agent extra and check server configuration.') from error
+    app.state.mission_agent = agent
+    agent_status.update(state='ready', model=agent.model, last_error=None)
+    return agent
+
 
 @app.post('/api/agent')
 def agent_toggle(body:AgentToggle):
     if body.enabled:
-        raise HTTPException(403,'Gemini experiments require explicit approved campaign; use the campaign runner')
+        prepare_agent()
     if body.enabled is not None:
-        agent_status['enabled']=False
+        agent_status['enabled']=body.enabled
         sim.log(f"Hosted agent {'enabled' if body.enabled else 'disabled'} by operator.")
     if body.pause_clock is not None:
         agent_status['pause_clock']=body.pause_clock
@@ -411,9 +429,11 @@ def control(body:Control):
     if busy() and body.action!='reset':raise HTTPException(409,'Paired comparison in progress')
     if body.mode is not None and body.mode not in ('adaptive','baseline'):raise HTTPException(422,'Invalid mode')
     if body.perception is not None and body.perception not in ('image-yolo','analytic-development'):raise HTTPException(422,'Invalid perception mode')
-    if body.strategy is not None and body.strategy not in ('greedy','mission-astar','mission-astar-cached'):
+    if body.strategy is not None and body.strategy not in ('greedy','mission-astar','mission-astar-cached','gemini'):
         raise HTTPException(422,'Invalid mission strategy')
     if body.perception=='image-yolo' and not VISION_AVAILABLE:raise HTTPException(422,'Vision extra not installed')
+    if body.action == 'start' and (body.strategy or sim.strategy) == 'gemini':
+        prepare_agent()
     if body.action=='reset':
         if getattr(sim,'recorder',None):sim.recorder.close()
         cancel_paired()
@@ -425,6 +445,7 @@ def control(body:Control):
         if sim.status=='idle' and (body.perception and body.perception!=sim.perception_mode or body.strategy and body.strategy!=sim.strategy):
             sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode,body.strategy or sim.strategy)
         sim.mode=body.mode or sim.mode;sim.strategy=body.strategy or sim.strategy;sim.status='running';sim.hazards_running=True
+        agent_status['enabled'] = sim.strategy == 'gemini'
         if recording_enabled and not getattr(sim,'recorder',None):
             from .recording import Recorder
             sim.recorder=Recorder(sim)
