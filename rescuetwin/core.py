@@ -241,7 +241,7 @@ class Simulation:
         self.heat_decay=.04+.16*exchange
         self.smoke_decay=.015+.24*exchange
         self.ignition_cells=set();self.hazard_time=0.;self.hazards_running=False
-        self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.)
+        self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.);self.heat_sampled_at=np.full((H,W),-1.);self.smoke_sampled_at=np.full((H,W),-1.)
         self.route=[];self.goal=None;self.visited=set();self.escort={}  # person ID to confirmed detection ID
         self.detections=[];self.next_detection=0;self.version=0
         self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.,detections=0,false_detections=0,route_changes=0,rooms_inspected=0,robot_hazard_s=0.,assistance_requests=0,handoffs=0,possible_detections=0,reports=0)
@@ -499,6 +499,8 @@ class Simulation:
         return dict(x=x,y=y,z=CAMERA_HEIGHT_M,yaw=self.heading)
 
     def sense(self):
+        if not hasattr(self, "heat_sampled_at"):
+            self.heat_sampled_at=self.grid(-1.);self.smoke_sampled_at=self.grid(-1.)
         rx,ry=self.robot
         image=self.perception_mode=='image-yolo'
         reach=CAMERA_RANGE_M if image else SENSE_RANGE_M
@@ -514,11 +516,12 @@ class Simulation:
                 if not line_visible(self.scene,self.robot,(x,y)): continue
                 # Analytic visual hazard sensing (not image-based): smoke density is visible along the line of
                 # sight, flames are visible where heat >= FLAME_VISIBLE_HEAT. Other heat is only measured locally.
-                self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time
+                self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time;self.smoke_sampled_at[y,x]=self.time
                 if self.smoke[y,x]>.5: continue   # dense smoke hides what is in the cell
-                if self.heat[y,x]>=FLAME_VISIBLE_HEAT: self.belief_heat[y,x]=self.heat[y,x]
-                elif self.belief_heat[y,x]>0 and self.heat[y,x]<self.belief_heat[y,x]: self.belief_heat[y,x]=self.heat[y,x]
+                if self.heat[y,x]>=FLAME_VISIBLE_HEAT: self.belief_heat[y,x]=self.heat[y,x];self.heat_sampled_at[y,x]=self.time
+                elif self.belief_heat[y,x]>0 and self.heat[y,x]<self.belief_heat[y,x]: self.belief_heat[y,x]=self.heat[y,x];self.heat_sampled_at[y,x]=self.time
                 changed|=not self.observed[y,x];self.observed[y,x]=1;self.last_seen[y,x]=self.time
+        self.heat_sampled_at[ry,rx]=self.time;self.smoke_sampled_at[ry,rx]=self.time
         self.belief_heat[ry,rx]=self.heat[ry,rx];self.belief_smoke[ry,rx]=self.smoke[ry,rx];self.hazard_seen[ry,rx]=self.time
         # The robot measures its own cell directly, smoke or not, so the path it has walked is observed.
         changed|=not self.observed[ry,rx];self.observed[ry,rx]=1;self.last_seen[ry,rx]=self.time
@@ -710,7 +713,7 @@ class Simulation:
                     rooms_state=deepcopy(list(self.rooms_state.values())),
                     risk_map=deepcopy(list(self.risk.values())),
                     reports=[{k:r[k] for k in ('id','kind','status','time','room','action')} for r in self.reports],
-                    perception=self.perception_mode,events=self.events[-8:])
+                    perception=self.perception_mode,events=[])
 
     # ---------------------------------------------------------------- planning
     def planning_fields(self):
@@ -743,6 +746,10 @@ class Simulation:
 
     def choose(self):
         from . import strategies
+        tools=self.__dict__.get("agent_tools")
+        if tools and not self.withdraw_reason:
+            path=tools.navigation()
+            if path is not None:return path
         if self.escort:
             detour=strategies.escort_goal(self)
             if detour:return detour
@@ -900,7 +907,7 @@ class Simulation:
             # it protects an escorted person unless the escort is cornered (last resort).
             guard=bool(self.escort)
             if guard and (self.heat[y,x]>=ESCORT_HEAT_LIMIT or self.smoke[y,x]>=ESCORT_SMOKE_LIMIT):
-                self.belief_heat[y,x]=self.heat[y,x];self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time
+                self.belief_heat[y,x]=self.heat[y,x];self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time;self.smoke_sampled_at[y,x]=self.time;self.heat_sampled_at[y,x]=self.time
                 self.observed[y,x]=1;self.progress=0;self.log('Local interlock stopped motion into hazard.')
             else:
                 self.heading=math.atan2(y-self.robot[1],x-self.robot[0])

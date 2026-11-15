@@ -105,7 +105,9 @@ def test_decision_quality_mode_holds_clock_only_while_waiting_on_the_model(monke
     client = TestClient(api.app)
     client.post('/api/control', json={'action': 'reset'})
     monkeypatch.setitem(api.agent_status, 'state', 'ready')
-    info = client.post('/api/agent', json={'enabled': True, 'pause_clock': True}).json()
+    assert client.post('/api/agent', json={'enabled': True}).status_code == 403
+    monkeypatch.setitem(api.agent_status, 'enabled', True)  # internal clock unit test; public activation is gated
+    info = client.post('/api/agent', json={'pause_clock': True}).json()
     assert info['pause_clock'] and 'not real-time' in api.sim.events[-1]['message']
     api.sim.status = 'running'
     assert api.inference_hold(api.sim)                    # no committed goal: wait for the model
@@ -138,3 +140,13 @@ def test_room_risk_scenario_and_risk_map():
         assert client.post('/api/scenario',json={**body,'room_risk':{room:'propane'}}).status_code==422
         client.post('/api/scenario',json={'survivors':[],'ignitions':[],'seed':1})
         assert 'room_risk' not in client.get('/api/state').json()['scenario']
+
+def test_renderer_lease_prevents_competing_producers(monkeypatch):
+    from rescuetwin import api
+    monkeypatch.setitem(api.renderer_lease,'id',None)
+    monkeypatch.setitem(api.renderer_lease,'until',0.)
+    client=TestClient(api.app)
+    assert client.post('/api/renderer',json={'id':'one'}).json()['owner']
+    assert not client.post('/api/renderer',json={'id':'two'}).json()['owner']
+    client.post('/api/renderer',json={'id':'one','release':True})
+    assert client.post('/api/renderer',json={'id':'two'}).json()['owner']

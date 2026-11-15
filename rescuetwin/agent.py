@@ -69,6 +69,7 @@ class MissionAgent:
     """Gemini supervisor. Tries the configured model first, then the fallbacks when a model is overloaded (503),
     out of quota (429) or slow. The model that answered last is tried first next time."""
     def __init__(self):
+        raise PermissionError("Legacy hosted selector disabled; use an explicitly approved campaign")
         from google import genai
         from google.genai import types
         from concurrent.futures import ThreadPoolExecutor

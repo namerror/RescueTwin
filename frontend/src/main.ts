@@ -32,6 +32,7 @@ interface DetectionEntry { id: string; position: [number, number]; cell: Cell; c
 interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
 interface Paired { experiment?: Record<string, unknown>; status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
+  agent_supervisor?: { architecture: string; calls: number; active: unknown } | null;
   incident?: { origin: Cell; debris: Cell | null; breached?: Cell[]; time: number } | null;
   vision_installed?: boolean;
   sprinklers?: { origin: Cell; cells: Cell[] }[];
@@ -56,6 +57,13 @@ interface Decision { time: number; decision: string; target: Cell | null; trigge
 interface Observation { heat: number[][]; smoke: number[][]; observed: number[][]; survivors: DetectionEntry[] }
 interface Preset { id: string; label: string; note: string; scenario?: Scenario; unavailable?: boolean; capacity?: number }
 
+const rendererId=crypto.randomUUID();
+let rendererOwned=false;
+window.addEventListener('pagehide',()=>navigator.sendBeacon('/api/renderer',new Blob([JSON.stringify({id:rendererId,release:true})],{type:'application/json'})));
+let replayId: string | null = null;
+let replayScene: SceneData | null = null;
+let replayPlaying = false, replayCursor = 0;
+let sensorWorker: HTMLIFrameElement | null = null;
 let sceneReady = false, sceneLoadVersion = 0;
 const sourceCutaway = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1.6);
 let cutawayOn = true, cutawayHeight = 1.6;
@@ -312,6 +320,8 @@ function notify(message: string, error = false): void {
 }
 
 async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  if (replayId && body !== undefined) throw new Error('Recorded runs are read only. Return to Live first.');
+  if (replayId && path === 'scene') return replayScene as T;
   const response = await fetch(`/api/${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? { Accept: 'application/json' } : { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -377,7 +387,7 @@ function pairedRunning(): boolean { return state?.paired?.status === 'running'; 
 function chosen<T extends string>(name: string): T { return document.querySelector<HTMLInputElement>(`input[name="${name}"]:checked`)!.value as T; }
 
 function syncUI(): void {
-  const editable = idle() && !busy;
+  const editable = idle() && !busy && !replayId;
   const status = state?.status.toLowerCase();
   $('connection').className = `connection ${connected ? 'online' : 'offline'}`;
   $('connection').innerHTML = `<i></i>${connected ? 'Backend connected' : state ? 'Connection lost' : 'Backend offline'}`;
@@ -414,7 +424,7 @@ function syncUI(): void {
   ($('import') as HTMLButtonElement).disabled = !editable;
   ($('export') as HTMLButtonElement).disabled = !draft;
   ($('compare') as HTMLButtonElement).disabled = !sceneReady || !humanReady(state?.scenario.human_variant) || !connected || busy || dirty || pairedRunning() || status === 'running';
-  const missionLabel = state?.strategy?.startsWith('mission-astar') ? ' · mission-level A*' : ' · baseline';
+  const missionLabel = state?.agent_supervisor ? ` · agent ${state.agent_supervisor.architecture} · ${state.agent_supervisor.calls} requests` : state?.strategy?.startsWith('mission-astar') ? ' · mission-level A*' : ' · baseline';
   $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy${missionLabel}. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
   $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Pick a preset or a tool, then click a floor cell. Changes stay local until applied.';
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
@@ -619,17 +629,21 @@ function acceptState(next: SimState, newSceneSelection = false): void {
 }
 
 async function poll(): Promise<void> {
-  if (pollInFlight || document.hidden) return;
+  if (replayId || pollInFlight || document.hidden) return;
   pollInFlight = true;
   try {
     const next = await api<unknown>('state', undefined, AbortSignal.timeout(4000));
+    if (replayId) return;
     validateState(next);
     const newSceneSelection = !scene || scene.id !== next.scene_id;
     if (newSceneSelection) { state = next; await loadScene(); }
     if (view === 'belief') belief = await api<Observation>('observations', undefined, AbortSignal.timeout(4000));
+    if (replayId) return;
     acceptState(next, newSceneSelection);
-    if (next.frame_request && next.frame_request.seq !== lastFrameSeq && !frameInFlight) void sendFrame(next);
+    rendererOwned=(await api<{owner:boolean}>('renderer',{id:rendererId})).owner;
+    if (rendererOwned && next.frame_request && next.frame_request.seq !== lastFrameSeq && !frameInFlight) void sendFrame(next);
   } catch (error) {
+    if(replayId)return;
     if (connected || !state) {
       $('scene-empty').querySelector('p')!.textContent = `Cannot load /api/state. Run the backend on port 8000. ${error instanceof Error ? error.message : ''}`;
       if (connected) notify('Connection lost. The map shows the last received state; controls are disabled.', true);
@@ -691,7 +705,7 @@ function disposeObject(object: THREE.Object3D): void {
 
 async function loadSceneMesh(current: SceneData, version: number): Promise<void> {
   const mesh = current.mesh!;
-  const base = `/api/scenes/${encodeURIComponent(current.id)}/files/`;
+  const base = replayId ? `/api/runs/${replayId}/artifacts/` : `/api/scenes/${encodeURIComponent(current.id)}/files/`;
   let failed = false, mounted = false, complete = false;
   const manager = new THREE.LoadingManager();
   const ready = () => { if (version === sceneLoadVersion && mounted && complete && !failed) { sceneReady = true; syncUI(); } };
@@ -771,7 +785,7 @@ function buildStaticScene(): void {
   const fi = scene.floor_image;
   if (fi) {
     const w = fi.width / fi.pixels_per_metre, h = fi.height / fi.pixels_per_metre;
-    const texture = new THREE.TextureLoader().load(`/api/scenes/${encodeURIComponent(scene.id)}/files/${fi.file}`);
+    const texture = new THREE.TextureLoader().load(replayId ? `/api/runs/${replayId}/artifacts/${fi.file}` : `/api/scenes/${encodeURIComponent(scene.id)}/files/${fi.file}`);
     texture.colorSpace = THREE.SRGBColorSpace;
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({ map: texture, transparent: true, roughness: 0.95 }));
     floor.rotation.x = -Math.PI / 2;
@@ -1172,7 +1186,7 @@ function drawDynamic(): void {
 /** Render RGB and linear depth from the requested camera pose and send them for YOLO inference. */
 async function sendFrame(snapshot: SimState): Promise<void> {
   const request = snapshot.frame_request;
-  if (!renderer || !scene || !request || !sceneReady) return;
+  if (replayId || !renderer || !scene || !request || !sceneReady) return;
   const frameSceneVersion = sceneLoadVersion;
   frameInFlight = true;
   lastFrameSeq = request.seq;
@@ -1219,13 +1233,13 @@ async function sendFrame(snapshot: SimState): Promise<void> {
     let binary = '';
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     lastFrameImage = image;
-    const result = await api<FrameResult>('frames', { seq: request.seq, width: CAM_W, height: CAM_H, rgb, depth: btoa(binary), intrinsics: [FX, FY, CAM_W / 2, CAM_H / 2], pose }, AbortSignal.timeout(20000));
-    if (frameSceneVersion !== sceneLoadVersion) return;
+    const result = await api<FrameResult>('frames', { renderer_id: rendererId, seq: request.seq, width: CAM_W, height: CAM_H, rgb, depth: btoa(binary), intrinsics: [FX, FY, CAM_W / 2, CAM_H / 2], pose }, AbortSignal.timeout(20000));
+    if (replayId || frameSceneVersion !== sceneLoadVersion) return;
     drawFeed(result);
     $('camera-status').textContent = `Frame ${result.seq} · t=${number(result.time)} s · ${result.accepted.length} person${result.accepted.length === 1 ? '' : 's'}`;
     void poll();
   } catch (error) {
-    if (frameSceneVersion !== sceneLoadVersion) return;
+    if (replayId || frameSceneVersion !== sceneLoadVersion) return;
     $('camera-status').textContent = `Frame not accepted: ${error instanceof Error ? error.message.slice(0, 120) : 'error'}`;
   } finally {
     frameInFlight = false;
@@ -1716,3 +1730,83 @@ void poll();
 window.setInterval(() => void poll(), 200);
 // Exposed for automated end-to-end checks (headless browser); read-only accessors.
 (window as unknown as { rescuetwin: object }).rescuetwin = { state: () => state, scene: () => scene, lastFrameSeq: () => lastFrameSeq };
+
+// An independent same-origin page renders live sensors while this viewer reads history.
+if (new URLSearchParams(location.search).has('sensorOnly')) {
+  document.body.style.opacity = '0';
+} else {
+  const panel = document.createElement('section');
+  panel.className = 'panel recordings';
+  panel.innerHTML = `<h2>Recorded runs</h2><label>Record next run <input id="record-next" type="checkbox" checked></label>
+    <input id="runs-filter" aria-label="Filter recorded scenes, policies and outcomes" placeholder="Filter scene, policy, outcome"><button id="runs-refresh">Refresh</button><select id="runs-list"><option value="">Select a recording</option></select>
+    <button id="replay-open">Replay</button><button id="replay-live">Live</button>
+    <button id="replay-next-event">Next decision / detection</button><button id="replay-play">Play / pause</button><button id="replay-step">Step</button>
+    <select id="replay-speed"><option>1</option><option>2</option><option>4</option></select> ×
+    <input id="replay-seek" aria-label="Recording event" type="range" min="0" max="0" value="0">
+    <a id="replay-download">Download archive</a><p id="replay-label">Live view</p>
+    <details><summary>Recorded evidence, tools and decisions</summary><pre id="replay-inspector" style="max-height:350px;overflow:auto;white-space:pre-wrap"></pre></details>`;
+  panel.querySelectorAll('button').forEach(b=>b.className='button small');
+  document.querySelector('main')?.prepend(panel);
+  if (!panel.isConnected) document.body.prepend(panel);
+  const refresh = async () => {
+    const rows = await api<{id:string;scene_name:string;strategy:string;status:string}[]>('runs');
+    const list = document.getElementById('runs-list') as HTMLSelectElement;
+    list.replaceChildren(new Option('Select a recording', ''), ...rows.filter(r=>`${r.scene_name} ${r.strategy} ${r.status}`.toLowerCase().includes((document.getElementById('runs-filter') as HTMLInputElement).value.toLowerCase())).map(r => new Option(`${r.scene_name} · ${r.strategy} · ${r.status}`, r.id)));
+  };
+  document.getElementById('runs-filter')!.oninput=()=>void refresh();
+  document.getElementById('runs-refresh')!.onclick = () => void refresh();
+  document.getElementById('record-next')!.onchange = () => void api('recording', {enabled:(document.getElementById('record-next') as HTMLInputElement).checked});
+  const show = async (cursor:number) => {
+    if (!replayId) return;
+    const id = replayId;
+    const rows = await api<{seq:number;time:number;kind:string;data:any}[]>(`runs/${id}/timeline?start=${cursor}&limit=1`);
+    if (!rows.length || replayId !== id) { replayPlaying=false; return; }
+    const row = rows[0]; replayCursor=row.seq;
+    (document.getElementById('replay-seek') as HTMLInputElement).value=String(row.seq);
+    document.getElementById('replay-label')!.textContent=`READ ONLY · ${row.time.toFixed(1)} s · ${row.kind}`;
+    document.getElementById('replay-inspector')!.textContent=JSON.stringify(row.data,null,2);
+    const historical=await api<{snapshot:any;frame:any}>(`runs/${id}/snapshot?seq=${row.seq}`);
+    const display=historical.snapshot?.data;
+    if (display) {
+      riskMap={rooms:display.state.risk_map??[],building_default:'unknown',building_source:'Recorded room tags',tags:[],note:''};
+      $('room-risk-list').innerHTML=riskMap.rooms.map(r=>`<p>${escape(r.name)} · ${escape(r.tag_label)}</p>`).join('');
+      buildingUses=null;$('building-use-hint').textContent='Recorded building-use settings; search prior, not occupancy.';
+      drawRiskLayer();
+      belief={...display.observation,heat:display.state.heat,smoke:display.state.smoke,survivors:display.observation.tracks};
+      // Reconstruct belief grids exclusively from recorded measurements, never truth.
+      belief!.heat=belief!.heat.map(r => r.map(() => 0));belief!.smoke=belief!.smoke.map(r => r.map(() => 0));
+      for (const sample of display.observation.samples) belief![sample.modality as 'heat'|'smoke'][sample.cell[1]][sample.cell[0]]=sample.value;
+      acceptState({...display.state,paired:null});
+      for (const id of ['start','pause','reset','withdraw','preview-hazards','load-map','scene-select']) (document.getElementById(id) as HTMLButtonElement).disabled=true;
+    }
+    if (historical.frame) {
+      const img = new Image();img.src=`/api/runs/${id}/artifacts/${historical.frame.data.rgb}`;
+      img.onload=() => { const canvas=document.querySelector('#robot-feed') as HTMLCanvasElement|null;canvas?.getContext('2d')?.drawImage(img,0,0,canvas.width,canvas.height); };
+    }
+  };
+  document.getElementById('replay-open')!.onclick=() => void (async () => {
+    const id=(document.getElementById('runs-list') as HTMLSelectElement).value;if(!id)return;
+    replayPlaying=false;
+    if (!sensorWorker) {sensorWorker=document.createElement('iframe');sensorWorker.src='/?sensorOnly=1';sensorWorker.style.cssText='position:fixed;width:2px;height:2px;left:-10px';document.body.append(sensorWorker);}
+    await api('renderer',{id:rendererId,release:true});rendererOwned=false;
+    replayId=id;
+    const manifest=await api<{entries:number}>(`runs/${id}`);
+    replayScene=await api<SceneData>(`runs/${id}/artifacts/scene.json`);
+    // Older recordings lack avatar assets; retain an explicit partial replay warning.
+    const avatarManifest=await fetch(`/api/runs/${id}/artifacts/avatar-humans.json`);
+    if(avatarManifest.ok) await loadHumans(()=>{avatars.forEach(a=>avatarLayer.remove(a));avatars.clear();},m=>notify(m,true),`/api/runs/${id}/artifacts/`,'avatar-');
+    else notify('Older recording: avatar assets were not archived; using installed appearance assets.');
+    scene=replayScene;buildStaticScene();renderSceneInfo();recenter();await loadSceneMesh(scene,++sceneLoadVersion);sceneReady=true;
+    (document.getElementById('replay-seek') as HTMLInputElement).max=String(manifest.entries-1);
+    (document.getElementById('replay-download') as HTMLAnchorElement).href=`/api/runs/${id}/download`;
+    await show(0);
+  })().catch(e=>notify(String(e),true));
+  document.getElementById('replay-live')!.onclick=() => {replayPlaying=false;replayId=null;replayScene=null;sensorWorker?.remove();sensorWorker=null;scene=null;void loadHumans(()=>{avatars.forEach(a=>avatarLayer.remove(a));avatars.clear();},m=>notify(m,true));void poll();document.getElementById('replay-label')!.textContent='Live view';};
+  document.getElementById('replay-next-event')!.onclick=()=>void (async()=>{if(!replayId)return;const m=await api<{highlights?:{seq:number;kind:string}[]}>(`runs/${replayId}`);const next=m.highlights?.find(e=>e.seq>replayCursor&&['decision','detection','model','tool','report'].includes(e.kind));if(next)await show(next.seq);})();
+  document.getElementById('replay-play')!.onclick=()=>{replayPlaying=!replayPlaying;};
+  document.getElementById('replay-step')!.onclick=()=>void show(replayCursor+1);
+  document.getElementById('replay-seek')!.oninput=()=>void show(Number((document.getElementById('replay-seek') as HTMLInputElement).value));
+  let showing=false;
+  setInterval(()=>{if(replayPlaying&&!showing){showing=true;void show(replayCursor+Number((document.getElementById('replay-speed') as HTMLSelectElement).value)).finally(()=>{showing=false;});}},200);
+  void refresh();
+}
