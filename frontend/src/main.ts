@@ -42,7 +42,7 @@ interface SimState {
   scene_id: string; scenario: Scenario; time: number; status: string; robot: Cell; heading: number; pose: Pose;
   survivors: { id: string; position: Cell; status: string; injured?: boolean }[];
   heat: number[][]; smoke: number[][]; observed: number[][]; route: Cell[];
-  events: { time: number; message: string }[]; metrics: Record<string, number>; mode: Mode; perception_mode: Perception;
+  events: { time: number; message: string }[]; metrics: Record<string, number>; mode: Mode; strategy: 'greedy' | 'mission-astar' | 'mission-astar-cached' | 'gemini'; perception_mode: Perception;
   detections: DetectionEntry[]; frame_request: { seq: number; time: number; pose: Pose } | null; degraded: boolean; scanning: boolean;
   last_frame: FrameResult | null; paired: Paired | null;
   hazard_time: number; hazards_running: boolean; holding?: boolean;
@@ -132,9 +132,8 @@ $('app').innerHTML = `
         <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Run simulation</h2></div></div>
           <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Risk-aware</span></label><label><input type="radio" name="mode" value="baseline" /><span>Distance-only</span></label></div></fieldset>
           <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" checked /><span>Analytic fixture</span></label></div></fieldset>
-          <label class="seed-label" for="agent-enabled" title="Gemini proposes which room, person or exit to go for next, under the robot decision constitution. The controller validates every choice; failures fall back to the built-in planner."><span><input id="agent-enabled" type="checkbox" /> Gemini supervisor</span></label>
-          <label class="seed-label" for="agent-pause" title="Freezes the mission clock and the fire while Gemini is thinking, and asks Gemini as soon as each goal is reached. Measures decision quality, not real-time performance."><span><input id="agent-pause" type="checkbox" /> Pause clock while Gemini thinks</span></label>
-          <p id="agent-pause-label" class="field-hint warning-hint" hidden>Decision-quality mode: clock and fire paused during model inference. Not real-time performance.</p>
+          <fieldset id="strategy-fieldset"><legend>Mission algorithm</legend><div class="segmented"><label title="Baseline: searches the nearest unsearched room next and escorts each person straight to the exit."><input type="radio" name="strategy" value="greedy" checked /><span>Baseline</span></label><label title="Plans the whole remaining mission in one A* pass, ranking rooms by survivor likelihood and observed fire/smoke urgency, and re-plans each second. Changes only the room ordering; the local safety interlock is unchanged."><input type="radio" name="strategy" value="mission-astar" /><span>Mission A*</span></label><label title="Gemini mission planner: placeholder, not yet available."><input type="radio" name="strategy" value="gemini" disabled /><span>Gemini</span></label></div></fieldset>
+          <p id="strategy-description" class="field-hint">Baseline: nearest unsearched room first.</p>
           <p id="agent-status" class="field-hint">Checking hosted agent…</p>
           <p id="mode-description" class="field-hint">Analytic fixture uses simulator truth and is not image perception.</p>
           <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button><button id="withdraw" class="button subtle small" title="Operator stop: the robot finishes any escort, returns to the exit and files a mission-end report">Withdraw</button></div><p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
@@ -178,6 +177,7 @@ let scene: SceneData | null = null;
 let belief: Observation | null = null;
 let draft: Scenario | null = null;
 let dirty = false;
+let strategySynced = false;   // adopt the backend's strategy once on load, then keep the operator's idle selection
 let busy = false;
 let connected = false;
 let selectedTool: Tool = 'inspect';
@@ -396,6 +396,9 @@ function syncUI(): void {
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
   ($('mode-fieldset') as HTMLFieldSetElement).disabled = !editable;
   ($('perception-fieldset') as HTMLFieldSetElement).disabled = !editable;
+  ($('strategy-fieldset') as HTMLFieldSetElement).disabled = !editable;
+  if (state && (!idle() || !strategySynced)) { strategySynced = true; document.querySelectorAll<HTMLInputElement>('input[name="strategy"]').forEach(input => { input.checked = input.value === (state!.strategy === 'mission-astar-cached' ? 'mission-astar' : state!.strategy); }); }
+  $('strategy-description').textContent = STRATEGY_DESCRIPTION[chosen<Strategy>('strategy')];
   $<HTMLButtonElement>('load-map').disabled = !connected || busy || dirty || status === 'running' || !!state?.hazards_running || pairedRunning();
   ($('scene-select') as HTMLSelectElement).disabled = !connected || busy || status === 'running' || pairedRunning();
   document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => { input.disabled = input.value !== 'inspect' && !editable; });
@@ -411,7 +414,8 @@ function syncUI(): void {
   ($('import') as HTMLButtonElement).disabled = !editable;
   ($('export') as HTMLButtonElement).disabled = !draft;
   ($('compare') as HTMLButtonElement).disabled = !sceneReady || !humanReady(state?.scenario.human_variant) || !connected || busy || dirty || pairedRunning() || status === 'running';
-  $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
+  const missionLabel = state?.strategy?.startsWith('mission-astar') ? ' · mission-level A*' : ' · baseline';
+  $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy${missionLabel}. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
   $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Pick a preset or a tool, then click a floor cell. Changes stay local until applied.';
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
   $('survivor-count').textContent = draft ? String(draft.survivors.length) : '—';
@@ -1460,16 +1464,17 @@ function renderTeam(next: SimState): void {
   $('decisions').innerHTML = (next.decisions ?? []).slice().reverse().map(d => `<li><time>${escape(number(d.time))} s</time><span><b>${escape(d.decision)}</b>${d.target ? ' → [' + d.target.join(', ') + ']' : ''} · ${escape(d.reason)} · trigger: ${escape(d.trigger)} · options: ${d.options.map(o => '[' + o.target.join(', ') + '] ' + number(o.cost)).join('; ')}</span></li>`).join('') || '<li class="empty-line">No decisions yet.</li>';
 }
 
+type Strategy = 'greedy' | 'mission-astar' | 'gemini';
+const STRATEGY_DESCRIPTION: Record<Strategy, string> = {
+  greedy: 'Baseline: nearest unsearched room first, then straight to the exit.',
+  'mission-astar': 'Mission A*: whole-mission plan ranked by survivor likelihood and observed fire/smoke urgency; re-plans every second.',
+  gemini: 'Gemini planner: placeholder, not yet available.',
+};
 interface AgentInfo { state: string; enabled: boolean; pause_clock: boolean; thinking: boolean; model: string | null; accepted: number; rejected: number; failed: number;
   latency_s: number | null; last: { kind: string; id: string; reason: string; time: number } | null; last_error: string | null }
 async function refreshAgent(): Promise<void> {
   try {
     const info = await api<AgentInfo>('agent');
-    const box = $('agent-enabled') as HTMLInputElement;
-    box.checked = info.enabled; box.disabled = info.state !== 'ready';
-    const pause = $('agent-pause') as HTMLInputElement;
-    pause.checked = info.pause_clock; pause.disabled = info.state !== 'ready' || !info.enabled;
-    $('agent-pause-label').hidden = !(info.pause_clock && info.enabled && info.state === 'ready');
     const states: Record<string, string> = { 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
     $('agent-status').textContent = info.state === 'ready'
       ? `${info.model} · ${info.enabled ? 'on' : 'off'}${info.thinking ? ' · thinking…' : ''}${info.pause_clock ? ' · clock paused while thinking' : ' · real time'} · ${info.accepted} accepted · ${info.rejected} rejected · ${info.failed} failed${info.latency_s != null ? ` · ${number(info.latency_s, 1)} s` : ''}` +
@@ -1478,17 +1483,8 @@ async function refreshAgent(): Promise<void> {
       : `${states[info.state] ?? info.state}${info.last_error ? ' ' + info.last_error : ''}`;
   } catch { $('agent-status').textContent = 'Hosted agent status unavailable.'; }
 }
-$('agent-enabled').addEventListener('change', () => void mutation(async () => {
-  const enabled = ($('agent-enabled') as HTMLInputElement).checked;
-  await api('agent', { enabled });
-  await refreshAgent();
-  notify(enabled ? 'Gemini supervisor on: it proposes goals; the controller validates them.' : 'Gemini supervisor off: built-in planner only.');
-}));
-$('agent-pause').addEventListener('change', () => void mutation(async () => {
-  const pause_clock = ($('agent-pause') as HTMLInputElement).checked;
-  await api('agent', { pause_clock });
-  await refreshAgent();
-  notify(pause_clock ? 'Decision-quality mode: the clock and fire pause while Gemini thinks. Not real-time performance.' : 'Real-time mode: the clock runs while Gemini thinks.');
+document.querySelectorAll<HTMLInputElement>('input[name="strategy"]').forEach(input => input.addEventListener('change', () => {
+  $('strategy-description').textContent = STRATEGY_DESCRIPTION[chosen<Strategy>('strategy')];
 }));
 window.setInterval(() => { if (connected) void refreshAgent(); }, 1000);
 
@@ -1500,7 +1496,9 @@ $('withdraw').addEventListener('click', () => void mutation(async () => {
 for (const action of ['start', 'pause', 'reset'] as const) {
   $(action).addEventListener('click', () => void mutation(async () => {
     if (action === 'start' && dirty) throw new Error('Apply or discard your scenario changes first.');
-    await api('control', action === 'start' ? { action, mode: chosen<Mode>('mode'), perception: chosen<Perception>('perception') } : action === 'reset' ? { action, perception: chosen<Perception>('perception') } : { action });
+    const strategy = chosen<Strategy>('strategy');
+    if (strategy === 'gemini') throw new Error('The Gemini planner is a placeholder and not yet available.');
+    await api('control', action === 'start' ? { action, mode: chosen<Mode>('mode'), perception: chosen<Perception>('perception'), strategy } : action === 'reset' ? { action, perception: chosen<Perception>('perception'), strategy } : { action, strategy });
     if (action === 'reset') { dirty = false; draft = null; lastFrameSeq = -1; }
     notify(action === 'reset' ? 'Reset requested. Waiting for the backend state.' : `${action === 'start' ? 'Start' : 'Pause'} requested.`);
   }));
