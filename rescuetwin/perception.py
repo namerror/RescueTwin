@@ -38,6 +38,10 @@ class PersonDetector:
             except ImportError:
                 device = 'cpu'
         self.device = device
+        if device == "cpu":
+            # Avoid CPU thread oversubscription starving the browser/simulator.
+            import torch
+            torch.set_num_threads(max(1, int(os.environ.get("RESCUETWIN_VISION_THREADS", "2"))))
 
     def detect(self, image, depth=None, intrinsics=None):
         """Depth is metres along camera Z; returned position is in camera coordinates."""

@@ -32,9 +32,10 @@ interface DetectionEntry { id: string; position: [number, number]; cell: Cell; c
 interface FrameResult { seq: number; time: number; accepted: { box: number[]; confidence: number; world?: number[]; detection?: string }[]; rejected: { box: number[]; confidence: number; reason: string }[] }
 interface Paired { experiment?: Record<string, unknown>; status: string; reports: Record<string, Record<string, unknown>>; running: string | null; note: string; seed: number; perception: string }
 interface SimState {
+  agent_supervisor?: { architecture: string; calls: number; active: unknown } | null;
   incident?: { origin: Cell; debris: Cell | null; breached?: Cell[]; time: number } | null;
   vision_installed?: boolean;
-  sprinkler?: { radius_m: number; origin: Cell; cells: Cell[] } | null;
+  sprinklers?: { origin: Cell; cells: Cell[] }[];
   fire?: number[][];
   searched_rooms?: string[];
   hazard_sensor?: { radius_m: number; source_distance_m: number | null;
@@ -42,7 +43,7 @@ interface SimState {
   scene_id: string; scenario: Scenario; time: number; status: string; robot: Cell; heading: number; pose: Pose;
   survivors: { id: string; position: Cell; status: string; injured?: boolean }[];
   heat: number[][]; smoke: number[][]; observed: number[][]; route: Cell[];
-  events: { time: number; message: string }[]; metrics: Record<string, number>; mode: Mode; perception_mode: Perception;
+  events: { time: number; message: string }[]; metrics: Record<string, number>; mode: Mode; strategy: 'greedy' | 'mission-astar' | 'mission-astar-cached' | 'gemini'; perception_mode: Perception;
   detections: DetectionEntry[]; frame_request: { seq: number; time: number; pose: Pose } | null; degraded: boolean; scanning: boolean;
   last_frame: FrameResult | null; paired: Paired | null;
   hazard_time: number; hazards_running: boolean; holding?: boolean; run_speed?: number;
@@ -56,6 +57,13 @@ interface Decision { time: number; decision: string; target: Cell | null; trigge
 interface Observation { heat: number[][]; smoke: number[][]; observed: number[][]; survivors: DetectionEntry[] }
 interface Preset { id: string; label: string; note: string; scenario?: Scenario; unavailable?: boolean; capacity?: number }
 
+const rendererId=crypto.randomUUID();
+let rendererOwned=false;
+window.addEventListener('pagehide',()=>navigator.sendBeacon('/api/renderer',new Blob([JSON.stringify({id:rendererId,release:true})],{type:'application/json'})));
+let replayId: string | null = null;
+let replayScene: SceneData | null = null;
+let replayPlaying = false, replayCursor = 0;
+let sensorWorker: HTMLIFrameElement | null = null;
 let sceneReady = false, sceneLoadVersion = 0;
 const sourceCutaway = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1.6);
 let cutawayOn = true, cutawayHeight = 1.6;
@@ -99,7 +107,7 @@ $('app').innerHTML = `
         <div class="scene-toolbar">
           <div class="mission-playback" aria-label="Run controls">
           <div class="control-buttons"><button id="start" class="button primary">▶ Start run</button><button id="pause" class="button secondary">Ⅱ Pause</button><button id="reset" class="button icon-button" title="Reset simulation" aria-label="Reset simulation">↺</button></div>
-          <div class="speed-row"><span class="speed-label" title="Wall-clock pace only. Every tick advances the same simulated time, so results do not change. Camera frames and YOLO inference can limit the achieved pace.">Playback speed</span><div class="seg-buttons speed-buttons" role="group" aria-label="Playback speed"><button class="button small" data-speed="1" aria-pressed="true">1×</button><button class="button small" data-speed="2" aria-pressed="false">2×</button><button class="button small" data-speed="4" aria-pressed="false">4×</button><button class="button small" data-speed="8" aria-pressed="false">8×</button></div></div>
+          <div class="speed-row"><span class="speed-label" title="Wall-clock pace only. Every tick advances the same simulated time, so results do not change. Camera frames and YOLO inference can limit the achieved pace.">Simulation speed</span><div class="seg-buttons speed-buttons" role="group" aria-label="Playback speed"><button class="button small" data-speed="1" aria-pressed="true">1×</button><button class="button small" data-speed="2" aria-pressed="false">2×</button><button class="button small" data-speed="4" aria-pressed="false">4×</button><button class="button small" data-speed="8" aria-pressed="false">8×</button></div></div>
           <p id="speed-actual" class="speed-actual" aria-live="polite"></p>
           </div>
           <div class="camera-controls" aria-label="Camera">
@@ -119,7 +127,7 @@ $('app').innerHTML = `
             <div class="segmented view-toggle" role="radiogroup" aria-label="Knowledge view"><label><input type="radio" name="view" value="truth" checked /><span>Operator truth</span></label><label><input type="radio" name="view" value="belief" /><span>Robot belief</span></label></div>
           </div>
         <div class="layer-controls" aria-label="Scene layers">
-          <label title="Room fire-risk map: gas heater (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
+          <label title="Room fire-risk map: gas source (searched first), sprinkler (slightly later); fixture tags, not sensor data"><input type="checkbox" id="risk-layer" checked /><span class="swatch risk"></span>Risk map</label>
           <label id="furniture-control" hidden title="Blocked cells derived from scan geometry: furniture/fixtures vs walls and door frames"><input type="checkbox" id="furniture-layer" /><span class="swatch furniture"></span>Scan obstacles</label>
           <label><input type="checkbox" id="smoke-layer" checked title="Smoke bands start at 0.015, 0.20, and 0.50 normalized intensity" /><span class="swatch smoke"></span>Smoke</label>
           <label><input type="checkbox" id="heat-layer" /><span class="swatch heat"></span>Heat map</label>
@@ -146,7 +154,7 @@ $('app').innerHTML = `
             <h2 id="mission-status-heading">Awaiting connection</h2>
             <p id="control-hint" class="field-hint">Connect to the backend to begin.</p>
           </section>
-          <aside class="scene-legend" aria-label="Scene legend"><h2>Scene legend</h2><div class="legend"><span><i class="legend-person"></i>Simulated survivor</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas heater</span><span><i class="legend-risk sprinkler"></i>Sprinkler</span><span><i class="legend-risk both"></i>Both</span></div><p>Survivors are simulated. Operator truth shows them through walls.</p></aside>
+          <aside class="scene-legend" aria-label="Scene legend"><h2>Scene legend</h2><div class="legend"><span><i class="legend-person"></i>Simulated survivor</span><span><i class="legend-robot"></i>Robot</span><span><i class="legend-exit"></i>Verified exit</span><span><i class="legend-fire"></i>Ignition</span><span><i class="legend-detection"></i>Detection</span><span><i class="legend-risk gas"></i>Gas source</span><span><i class="legend-risk sprinkler"></i>Sprinkler risk tag</span><span><i class="legend-risk sprinkler"></i>Simulated ceiling sprinkler</span><span><i class="legend-risk both"></i>Both</span></div><p>Survivors are simulated. Operator truth shows them through walls.</p></aside>
         </div>
         <div class="scene-footer"><span id="map-help" class="map-help">Drag to orbit · Scroll to zoom · Right-drag to pan</span><a class="settings-link" href="#controls-heading">Mission settings <span aria-hidden="true">↓</span></a></div>
         <details class="keyboard-editor"><summary>Cell inspector &amp; keyboard editing</summary><div class="cell-inputs"><label>Column x<input id="cell-x" type="number" min="0" step="1" value="0" /></label><label>Row y<input id="cell-y" type="number" min="0" step="1" value="0" /></label><button id="apply-cell" class="button secondary">Inspect cell</button></div><p>Coordinates are grid cells; the scene's origin and resolution convert them to metres in the scan frame. Choose an editing tool in Place the conditions, then apply it here or click the map.</p></details>
@@ -157,13 +165,10 @@ $('app').innerHTML = `
         <section class="panel" aria-labelledby="controls-heading"><div class="panel-heading compact"><div><h2 id="controls-heading">Mission settings</h2></div></div>
           <fieldset id="mode-fieldset"><legend>Planning strategy</legend><div class="segmented"><label><input type="radio" name="mode" value="adaptive" checked /><span>Risk-aware</span></label><label><input type="radio" name="mode" value="baseline" /><span>Distance-only</span></label></div></fieldset>
           <fieldset id="perception-fieldset"><legend>Survivor perception</legend><div class="segmented"><label><input type="radio" name="perception" value="image-yolo" /><span>YOLO · RGB-D</span></label><label><input type="radio" name="perception" value="analytic-development" checked /><span>Analytic fixture</span></label></div></fieldset>
+          <fieldset id="strategy-fieldset"><legend>Mission algorithm</legend><div class="segmented"><label title="Baseline: searches the nearest unsearched room next and escorts each person straight to the exit."><input type="radio" name="strategy" value="greedy" checked /><span>Baseline</span></label><label title="Plans the whole remaining mission in one A* pass, ranking rooms by survivor likelihood and observed fire/smoke urgency, and re-plans each second. Changes only the room ordering; the local safety interlock is unchanged."><input type="radio" name="strategy" value="mission-astar" /><span>Mission A*</span></label><label title="Gemini mission planner: placeholder, not yet available."><input type="radio" name="strategy" value="gemini" disabled /><span>Gemini</span></label></div></fieldset>
+          <p id="strategy-description" class="field-hint">Baseline: nearest unsearched room first.</p>
+          <p id="agent-status" class="field-hint">Checking hosted agent…</p>
           <p id="mode-description" class="field-hint">Analytic fixture uses simulator truth and is not image perception.</p>
-          <div class="agent-block">
-            <label class="check-label" for="agent-enabled" title="Gemini proposes which room, person or exit to go for next, under the robot decision constitution. The controller validates every choice; failures fall back to the built-in planner."><input id="agent-enabled" type="checkbox" /> Gemini supervisor</label>
-            <label class="check-label" for="agent-pause" title="Freezes the mission clock and the fire while Gemini is thinking, and asks Gemini as soon as each goal is reached. Measures decision quality, not real-time performance."><input id="agent-pause" type="checkbox" /> Pause clock while Gemini thinks</label>
-            <p id="agent-pause-label" class="field-hint warning-hint" hidden>Decision-quality mode: clock and fire paused during model inference. Not real-time performance.</p>
-            <p id="agent-status" class="field-hint">Checking hosted agent…</p>
-          </div>
           <button id="withdraw" class="button subtle small full-width" title="Operator stop: the robot finishes any escort, returns to the exit and files a mission-end report">Withdraw robot</button>
         </section>
 
@@ -176,7 +181,7 @@ $('app').innerHTML = `
           <p class="field-hint">Changes the rendered people only. YOLO detects a person; it does not predict age or gender.</p>
           <label class="seed-label" for="building-use" title="Static building information only; it changes where the robot searches first, never what it knows about people">Building use <select id="building-use"><option value="">Auto</option></select></label>
           <p id="building-use-hint" class="field-hint"></p>
-          <div class="room-risk"><span class="seed-label" title="Pre-incident fixture tags per room. Gas heater 1.5x search priority, sprinkler 0.8x, neither/unknown 1x">Room fire risk</span><div id="room-risk-list"></div><p id="room-risk-hint" class="field-hint"></p></div>
+          <div class="room-risk"><span class="seed-label" title="Pre-incident fixture tags per room. Gas source 1.5x search priority, sprinkler 0.8x, neither/unknown 1x">Room fire risk</span><div id="room-risk-list"></div><p id="room-risk-hint" class="field-hint"></p></div>
           <div class="inline-fields">
             <label class="seed-label" for="seed">Random seed <input id="seed" type="number" step="1" value="7" /></label>
             <label class="seed-label" for="incident-room">Kitchen incident <select id="incident-room"><option value="">Off</option></select></label>
@@ -218,6 +223,7 @@ let scene: SceneData | null = null;
 let belief: Observation | null = null;
 let draft: Scenario | null = null;
 let dirty = false;
+let strategySynced = false;   // adopt the backend's strategy once on load, then keep the operator's idle selection
 let busy = false;
 let connected = false;
 let selectedTool: Tool = 'inspect';
@@ -327,8 +333,9 @@ let pendingSpeed: number | null = null;
 const paceSamples: { wall: number; sim: number }[] = [];
 /** Achieved pace over the last ~3 s of wall time while running: simulated seconds per real second. */
 function achievedPace(): number | null {
-  if (!state || state.status !== 'running') { paceSamples.length = 0; return null; }
+  if (replayId || !state || state.status !== 'running') { paceSamples.length = 0; return null; }
   const now = performance.now();
+  if (paceSamples.length && state.time < paceSamples[paceSamples.length - 1].sim) paceSamples.length = 0;
   const last = paceSamples[paceSamples.length - 1];
   if (!last || last.sim !== state.time) paceSamples.push({ wall: now, sim: state.time });
   while (paceSamples.length > 2 && now - paceSamples[0].wall > 3000) paceSamples.shift();
@@ -340,7 +347,7 @@ function syncSpeed(): void {
   const current = pendingSpeed ?? state?.run_speed ?? 1;
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
     button.setAttribute('aria-pressed', String(Number(button.dataset.speed) === current));
-    button.disabled = !connected || state?.run_speed === undefined;
+    button.disabled = !!replayId || !connected || state?.run_speed === undefined || pendingSpeed !== null;
   }
   const pace = achievedPace();
   const requested = state?.run_speed ?? 1;
@@ -385,6 +392,8 @@ function notify(message: string, error = false): void {
 }
 
 async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  if (replayId && body !== undefined) throw new Error('Recorded runs are read only. Return to Live first.');
+  if (replayId && path === 'scene') return replayScene as T;
   const response = await fetch(`/api/${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? { Accept: 'application/json' } : { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -450,7 +459,7 @@ function pairedRunning(): boolean { return state?.paired?.status === 'running'; 
 function chosen<T extends string>(name: string): T { return document.querySelector<HTMLInputElement>(`input[name="${name}"]:checked`)!.value as T; }
 
 function syncUI(): void {
-  const editable = idle() && !busy;
+  const editable = idle() && !busy && !replayId;
   const status = state?.status.toLowerCase();
   $('connection').className = `connection ${connected ? 'online' : 'offline'}`;
   $('connection').innerHTML = `<i></i>${connected ? 'Backend connected' : state ? 'Connection lost' : 'Backend offline'}`;
@@ -477,7 +486,11 @@ function syncUI(): void {
   ($('reset') as HTMLButtonElement).disabled = !connected || busy || !state;
   ($('mode-fieldset') as HTMLFieldSetElement).disabled = !editable;
   ($('perception-fieldset') as HTMLFieldSetElement).disabled = !editable;
+  ($('strategy-fieldset') as HTMLFieldSetElement).disabled = !editable;
+  if (state && (!idle() || !strategySynced)) { strategySynced = true; document.querySelectorAll<HTMLInputElement>('input[name="strategy"]').forEach(input => { input.checked = input.value === (state!.strategy === 'mission-astar-cached' ? 'mission-astar' : state!.strategy); }); }
+  $('strategy-description').textContent = STRATEGY_DESCRIPTION[chosen<Strategy>('strategy')];
   $<HTMLButtonElement>('load-map').disabled = !connected || busy || dirty || status === 'running' || !!state?.hazards_running || pairedRunning();
+  $<HTMLButtonElement>('prepared-models').disabled = !connected || busy || !!replayId;
   ($('scene-select') as HTMLSelectElement).disabled = !connected || busy || status === 'running' || pairedRunning();
   document.querySelectorAll<HTMLInputElement>('input[name="tool"]').forEach(input => { input.disabled = input.value !== 'inspect' && !editable; });
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach(b => { b.disabled = !editable || b.dataset.unavailable === '1'; });
@@ -492,11 +505,20 @@ function syncUI(): void {
   ($('import') as HTMLButtonElement).disabled = !editable;
   ($('export') as HTMLButtonElement).disabled = !draft;
   ($('compare') as HTMLButtonElement).disabled = !sceneReady || !humanReady(state?.scenario.human_variant) || !connected || busy || dirty || pairedRunning() || status === 'running';
-  $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
+  const missionLabel = state?.agent_supervisor ? ` · agent ${state.agent_supervisor.architecture} · ${state.agent_supervisor.calls} requests` : state?.strategy?.startsWith('mission-astar') ? ' · mission-level A*' : ' · baseline';
+  $('control-hint').textContent = !sceneReady && connected ? 'Scene assets loading or unavailable; mission start is disabled.' : !connected ? 'Backend unavailable. Showing the last received state, if any.' : busy ? 'Waiting for the backend…' : pairedRunning() ? 'Paired comparison running; keep this tab open (it renders the robot camera).' : dirty ? 'Apply or discard scenario changes before starting.' : status === 'idle' ? 'Ready. Select a strategy and start your run.' : status === 'running' ? (state?.holding ? 'Robot holding: no viable route yet; waiting for hazards to change.' : `Running ${state?.mode === 'adaptive' ? 'risk-aware' : 'distance-only'} strategy${missionLabel}. Pause to inspect.`) : status === 'paused' ? 'Simulation paused. Resume or reset to edit.' : 'Reset the simulation to edit and start a new run.';
   $('edit-hint').textContent = !idle() ? 'Scenario editing is locked. Reset to idle to edit.' : dirty ? 'Unsaved changes · Apply to send to the backend.' : 'Pick a preset or a tool, then click a floor cell. Changes stay local until applied.';
   $('apply').textContent = dirty ? 'Apply scenario •' : 'Scenario applied';
   $('survivor-count').textContent = draft ? String(draft.survivors.length) : '—';
   $('fire-count').textContent = draft ? String(draft.ignitions.length) : '—';
+  const recordingToggle = document.getElementById('record-next') as HTMLInputElement | null;
+  if (recordingToggle) recordingToggle.disabled = !!replayId || status === 'running' || !connected;
+  if (replayId) {
+    for (const id of ['start', 'pause', 'reset', 'withdraw', 'preview-hazards', 'load-map', 'scene-select', 'compare', 'discard', 'prepared-models'])
+      ($<HTMLButtonElement>(id)).disabled = true;
+    $('mission-status-heading').textContent = 'Recorded mission · read only';
+    $('control-hint').textContent = 'Viewing recorded history. Return to Live to control the active mission.';
+  }
   $('apply-cell').textContent = selectedTool === 'inspect' ? 'Inspect cell' : selectedTool === 'remove' ? 'Remove from cell' : `Place ${selectedTool === 'fire' ? 'ignition' : 'survivor'}`;
 }
 
@@ -539,23 +561,25 @@ function syncBuildingUse(): void {
     : '';
 }
 
-interface RiskRoom { id: string; name: string; tag: string; tag_label: string; factor: number; source: string; provenance: string | null }
+interface RiskRoom { default_tag: string; simulated_sprinkler: boolean; id: string; name: string; tag: string; tag_label: string; factor: number; source: string; provenance: string | null }
 interface RiskMap { rooms: RiskRoom[]; building_default: string; building_source: string; tags: { id: string; label: string; factor: number }[]; note: string }
 let riskMap: RiskMap | null = null;
 const RISK_COLORS: Record<string, string> = { gas_heater: '#ff8a3d', sprinkler: '#4aa8ff', both: '#b07cff' };
-const RISK_LABELS: Record<string, string> = { gas_heater: 'Gas heater', sprinkler: 'Fire sprinkler', both: 'Gas heater + sprinkler', neither: 'Neither', unknown: 'Unknown' };
+const RISK_LABELS: Record<string, string> = { gas_heater: 'Gas source', sprinkler: 'Fire sprinkler', both: 'Gas source + sprinkler', neither: 'Neither', unknown: 'Unknown' };
 
 async function loadRiskMap(): Promise<void> {
   riskMap = await api<RiskMap>('risk-map');
-  const fallback = RISK_LABELS[riskMap.building_default] ?? riskMap.building_default;
-  $('room-risk-list').innerHTML = riskMap.rooms.map(r => `<label class="room-risk-row"><span>${escape(r.name)}</span><select data-room="${escape(r.id)}"><option value="">Default (kit: ${escape(fallback)})</option>` +
+  $('room-risk-list').innerHTML = riskMap.rooms.map(r => `<label class="room-risk-row"><span>${escape(r.name)}</span><select data-room="${escape(r.id)}"><option value="">Default (${escape(RISK_LABELS[r.default_tag] ?? r.default_tag)})</option>` +
     riskMap!.tags.map(t => `<option value="${escape(t.id)}">${escape(t.label)} · ${t.factor}×</option>`).join('') + '</select></label>').join('');
   syncRoomRisk();
 }
 
-/** Effective tag per room: the draft's operator override, else the CoStar building default. */
 function roomRiskTag(roomId: string): string {
-  return draft?.room_risk?.[roomId] ?? riskMap?.building_default ?? 'unknown';
+  const room = riskMap?.rooms.find(room => room.id === roomId);
+  const override = draft?.room_risk?.[roomId];
+  if (!override) return room?.default_tag ?? 'unknown';
+  if (!room?.simulated_sprinkler) return override;
+  return override === 'gas_heater' || override === 'both' ? 'both' : 'sprinkler';
 }
 
 function syncRoomRisk(): void {
@@ -565,8 +589,8 @@ function syncRoomRisk(): void {
     select.disabled = !idle() || busy;
   });
   const tagged = Object.keys(draft?.room_risk ?? {}).length;
-  $('room-risk-hint').textContent = `Default for untagged rooms: ${RISK_LABELS[riskMap.building_default] ?? riskMap.building_default} (${riskMap.building_source}). ` +
-    `${tagged ? `${tagged} operator tag${tagged > 1 ? 's' : ''}. ` : ''}Gas heater rooms are searched first, sprinklered rooms slightly later. Fixture tags, not sensor data.`;
+  $('room-risk-hint').textContent = `Simulated sprinkler heads count toward room risk. Building default: ${RISK_LABELS[riskMap.building_default] ?? riskMap.building_default} (${riskMap.building_source}). ` +
+    `${tagged ? `${tagged} operator tag${tagged > 1 ? 's' : ''}. ` : ''}Gas source rooms are searched first, sprinklered rooms slightly later. Fixture tags, not sensor data.`;
   drawRiskLayer();
 }
 
@@ -620,7 +644,7 @@ function renderSceneInfo(): void {
     return `<div class="property-row"><dt>${escape(f.label)}</dt><dd>${escape(value)}${f.note ? `<small>${escape(f.note)}</small>` : ''}</dd></div>`;
   };
   $('property-card').innerHTML = c
-    ? `<dl class="property-list">${['address', 'property_type', 'stories', 'total_units', 'year_built', 'floor_plan', 'beds', 'baths', 'area', 'max_occupants', 'sprinkler_type', 'has_sprinklers', 'smoke_detector', 'gas_heating', 'gas_water_heater', 'gas_range', 'gas_oven', 'construction_material'].map(k => show(pick(k))).join('')}</dl><p class="field-hint">${escape(c.disclaimer)}</p>`
+    ? `<dl class="property-list">${['address', 'property_type', 'stories', 'total_units', 'year_built', 'floor_plan', 'beds', 'baths', 'area', 'max_occupants', 'sprinkler_type', 'has_sprinklers', 'smoke_detector', 'gas_heating', 'gas_water_heater', 'gas_range', 'gas_mixed_range', 'gas_oven', 'gas_cooktop', 'gas_fireplace', 'gas_cooling', 'construction_material'].map(k => show(pick(k))).join('')}</dl><p class="field-hint">${escape(c.disclaimer)}</p>`
     : '<p class="field-hint">No CoStar record for this scene; capacity presets are unavailable.</p>';
   const checks = scene.checks ? Object.entries(scene.checks).filter(([k]) => !['failed'].includes(k)) : [];
   $('provenance').innerHTML = `
@@ -694,17 +718,21 @@ function acceptState(next: SimState, newSceneSelection = false): void {
 }
 
 async function poll(): Promise<void> {
-  if (pollInFlight || document.hidden) return;
+  if (replayId || pollInFlight || document.hidden) return;
   pollInFlight = true;
   try {
     const next = await api<unknown>('state', undefined, AbortSignal.timeout(4000));
+    if (replayId) return;
     validateState(next);
     const newSceneSelection = !scene || scene.id !== next.scene_id;
     if (newSceneSelection) { state = next; await loadScene(); }
     if (view === 'belief') belief = await api<Observation>('observations', undefined, AbortSignal.timeout(4000));
+    if (replayId) return;
     acceptState(next, newSceneSelection);
-    if (next.frame_request && next.frame_request.seq !== lastFrameSeq && !frameInFlight) void sendFrame(next);
+    rendererOwned=(await api<{owner:boolean}>('renderer',{id:rendererId})).owner;
+    if (rendererOwned && next.frame_request && next.frame_request.seq !== lastFrameSeq && !frameInFlight) void sendFrame(next);
   } catch (error) {
+    if(replayId)return;
     if (connected || !state) {
       $('scene-empty').querySelector('p')!.textContent = `Cannot load /api/state. Run the backend on port 8000. ${error instanceof Error ? error.message : ''}`;
       if (connected) notify('Connection lost. The map shows the last received state; controls are disabled.', true);
@@ -766,7 +794,7 @@ function disposeObject(object: THREE.Object3D): void {
 
 async function loadSceneMesh(current: SceneData, version: number): Promise<void> {
   const mesh = current.mesh!;
-  const base = `/api/scenes/${encodeURIComponent(current.id)}/files/`;
+  const base = replayId ? `/api/runs/${replayId}/artifacts/` : `/api/scenes/${encodeURIComponent(current.id)}/files/`;
   let failed = false, mounted = false, complete = false;
   const manager = new THREE.LoadingManager();
   const ready = () => { if (version === sceneLoadVersion && mounted && complete && !failed) { sceneReady = true; syncUI(); } };
@@ -846,7 +874,7 @@ function buildStaticScene(): void {
   const fi = scene.floor_image;
   if (fi) {
     const w = fi.width / fi.pixels_per_metre, h = fi.height / fi.pixels_per_metre;
-    const texture = new THREE.TextureLoader().load(`/api/scenes/${encodeURIComponent(scene.id)}/files/${fi.file}`);
+    const texture = new THREE.TextureLoader().load(replayId ? `/api/runs/${replayId}/artifacts/${fi.file}` : `/api/scenes/${encodeURIComponent(scene.id)}/files/${fi.file}`);
     texture.colorSpace = THREE.SRGBColorSpace;
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({ map: texture, transparent: true, roughness: 0.95 }));
     floor.rotation.x = -Math.PI / 2;
@@ -1207,11 +1235,23 @@ function drawDynamic(): void {
   robot.position.copy(position(state.robot, 0));
   robot.rotation.y = state.heading;
   dynamicLayer.add(operatorOnly(robot));
-  if (state.sprinkler) {
-    const nozzle = position(state.sprinkler.origin, 0.65);
+  const sprinklers = state.sprinklers ?? [];
+  if (sprinklers.length) {
+    const height = wallHeightOf() - 0.1;
+    const heads = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.09, 0.12, 0.08, 12),
+      new THREE.MeshBasicMaterial({ color: '#55ceff' }), sprinklers.length,
+    );
+    const matrix = new THREE.Matrix4();
+    sprinklers.forEach(({ origin }, index) => heads.setMatrixAt(index, matrix.makeTranslation(position(origin, height))));
+    dynamicLayer.add(operatorOnly(heads));
+  }
+  for (const sprinkler of sprinklers) {
+    if (!sprinkler.cells.length) continue;
+    const nozzle = position(sprinkler.origin, wallHeightOf() - 0.15);
     const vertices: number[] = [];
-    const stride = Math.max(1, Math.ceil(state.sprinkler.cells.length / 32));
-    for (const [index, cell] of state.sprinkler.cells.entries()) {
+    const stride = Math.max(1, Math.ceil(sprinkler.cells.length / 32));
+    for (const [index, cell] of sprinkler.cells.entries()) {
       if (index % stride !== 0) continue;
       const ground = position(cell, 0.06);
       const arc = nozzle.clone().lerp(ground, 0.55);
@@ -1235,7 +1275,7 @@ function drawDynamic(): void {
 /** Render RGB and linear depth from the requested camera pose and send them for YOLO inference. */
 async function sendFrame(snapshot: SimState): Promise<void> {
   const request = snapshot.frame_request;
-  if (!renderer || !scene || !request || !sceneReady) return;
+  if (replayId || !renderer || !scene || !request || !sceneReady) return;
   const frameSceneVersion = sceneLoadVersion;
   frameInFlight = true;
   lastFrameSeq = request.seq;
@@ -1282,13 +1322,13 @@ async function sendFrame(snapshot: SimState): Promise<void> {
     let binary = '';
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     lastFrameImage = image;
-    const result = await api<FrameResult>('frames', { seq: request.seq, width: CAM_W, height: CAM_H, rgb, depth: btoa(binary), intrinsics: [FX, FY, CAM_W / 2, CAM_H / 2], pose }, AbortSignal.timeout(20000));
-    if (frameSceneVersion !== sceneLoadVersion) return;
+    const result = await api<FrameResult>('frames', { renderer_id: rendererId, seq: request.seq, width: CAM_W, height: CAM_H, rgb, depth: btoa(binary), intrinsics: [FX, FY, CAM_W / 2, CAM_H / 2], pose }, AbortSignal.timeout(20000));
+    if (replayId || frameSceneVersion !== sceneLoadVersion) return;
     drawFeed(result);
     $('camera-status').textContent = `Frame ${result.seq} · t=${number(result.time)} s · ${result.accepted.length} person${result.accepted.length === 1 ? '' : 's'}`;
     void poll();
   } catch (error) {
-    if (frameSceneVersion !== sceneLoadVersion) return;
+    if (replayId || frameSceneVersion !== sceneLoadVersion) return;
     $('camera-status').textContent = `Frame not accepted: ${error instanceof Error ? error.message.slice(0, 120) : 'error'}`;
   } finally {
     frameInFlight = false;
@@ -1398,7 +1438,7 @@ function robotEye(): { eye: THREE.Vector3; forward: THREE.Vector3 } | null {
 function renderPreview(now: number): void {
   // In YOLO mode the panel shows the frames actually sent for inference (with boxes) once a run produces them.
   const yoloFrames = state?.perception_mode === 'image-yolo' && lastFrameImage !== null && (state.status === 'running' || state.status === 'paused');
-  if (!renderer || !state || !sceneReady || frameInFlight || yoloFrames || now - lastPreview < 250) return;
+  if (replayId || !renderer || !state || !sceneReady || frameInFlight || yoloFrames || now - lastPreview < 250) return;
   const rob = robotEye();
   if (!rob) return;
   lastPreview = now;
@@ -1499,7 +1539,7 @@ function setupRenderer(): void {
       if (!down || event.button !== 0 || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5) { down = null; return; }
       down = null;
       if (!scene || !camera) return;
-      if (cameraView === 'follow' || cameraView === 'pov') { notify('Switch to 3D or Plan to inspect or edit cells.'); return; }
+      if (cameraView === 'follow' || cameraView === 'pov') { notify('Switch to Overview or Plan to inspect or edit cells.'); return; }
       const bounds = canvas.getBoundingClientRect();
       pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
       raycaster.setFromCamera(pointer, camera);
@@ -1536,7 +1576,7 @@ function applyCell(cell: Cell): void {
   selectedCell = cell;
   inspectCell(cell);
   if (selectedTool !== 'inspect') {
-    if (!idle() || busy || !draft) { notify('Scenario editing is available only while idle and connected.', true); return; }
+    if (replayId || !idle() || busy || !draft) { notify('Scenario editing is available only while idle and connected.', true); return; }
     if (blocked(cell)) { notify('Choose a floor cell; walls and outside cells cannot contain survivors or ignitions.', true); return; }
     if (scene!.exits.some(p => same(p, cell))) { notify('Keep egress endpoints clear.', true); return; }
     if (selectedTool === 'remove') {
@@ -1597,17 +1637,18 @@ function renderTeam(next: SimState): void {
   $('decisions').innerHTML = (next.decisions ?? []).slice().reverse().map(d => `<li><time>${escape(number(d.time))} s</time><span><b>${escape(d.decision)}</b>${d.target ? ' → [' + d.target.join(', ') + ']' : ''} · ${escape(d.reason)} · trigger: ${escape(d.trigger)} · options: ${d.options.map(o => '[' + o.target.join(', ') + '] ' + number(o.cost)).join('; ')}</span></li>`).join('') || '<li class="empty-line">No decisions yet.</li>';
 }
 
+type Strategy = 'greedy' | 'mission-astar' | 'gemini';
+const STRATEGY_DESCRIPTION: Record<Strategy, string> = {
+  greedy: 'Baseline: nearest unsearched room first, then straight to the exit.',
+  'mission-astar': 'Mission A*: whole-mission plan ranked by survivor likelihood and observed fire/smoke urgency; re-plans every second.',
+  gemini: 'Gemini planner: placeholder, not yet available.',
+};
 interface AgentInfo { state: string; enabled: boolean; pause_clock: boolean; thinking: boolean; model: string | null; accepted: number; rejected: number; failed: number;
   latency_s: number | null; last: { kind: string; id: string; reason: string; time: number } | null; last_error: string | null }
 async function refreshAgent(): Promise<void> {
   try {
     const info = await api<AgentInfo>('agent');
-    const box = $('agent-enabled') as HTMLInputElement;
-    box.checked = info.enabled; box.disabled = info.state !== 'ready';
-    const pause = $('agent-pause') as HTMLInputElement;
-    pause.checked = info.pause_clock; pause.disabled = info.state !== 'ready' || !info.enabled;
-    $('agent-pause-label').hidden = !(info.pause_clock && info.enabled && info.state === 'ready');
-    const states: Record<string, string> = { 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
+    const states: Record<string, string> = { 'approval-required': 'Gemini experiments require an approved campaign; built-in planners are available.', 'no-key': 'No GEMINI_API_KEY on the server; built-in planner only.', unavailable: 'Hosted agent unavailable; built-in planner only.', starting: 'Starting hosted agent…' };
     $('agent-status').textContent = info.state === 'ready'
       ? `${info.model} · ${info.enabled ? 'on' : 'off'}${info.thinking ? ' · thinking…' : ''}${info.pause_clock ? ' · clock paused while thinking' : ' · real time'} · ${info.accepted} accepted · ${info.rejected} rejected · ${info.failed} failed${info.latency_s != null ? ` · ${number(info.latency_s, 1)} s` : ''}` +
         (info.last ? ` · last: ${info.last.kind} ${info.last.id} (“${info.last.reason}”)` : '') + (info.last_error ? ` · last problem: ${info.last_error}` : '') +
@@ -1615,17 +1656,8 @@ async function refreshAgent(): Promise<void> {
       : `${states[info.state] ?? info.state}${info.last_error ? ' ' + info.last_error : ''}`;
   } catch { $('agent-status').textContent = 'Hosted agent status unavailable.'; }
 }
-$('agent-enabled').addEventListener('change', () => void mutation(async () => {
-  const enabled = ($('agent-enabled') as HTMLInputElement).checked;
-  await api('agent', { enabled });
-  await refreshAgent();
-  notify(enabled ? 'Gemini supervisor on: it proposes goals; the controller validates them.' : 'Gemini supervisor off: built-in planner only.');
-}));
-$('agent-pause').addEventListener('change', () => void mutation(async () => {
-  const pause_clock = ($('agent-pause') as HTMLInputElement).checked;
-  await api('agent', { pause_clock });
-  await refreshAgent();
-  notify(pause_clock ? 'Decision-quality mode: the clock and fire pause while Gemini thinks. Not real-time performance.' : 'Real-time mode: the clock runs while Gemini thinks.');
+document.querySelectorAll<HTMLInputElement>('input[name="strategy"]').forEach(input => input.addEventListener('change', () => {
+  $('strategy-description').textContent = STRATEGY_DESCRIPTION[chosen<Strategy>('strategy')];
 }));
 window.setInterval(() => { if (connected) void refreshAgent(); }, 1000);
 
@@ -1637,8 +1669,10 @@ $('withdraw').addEventListener('click', () => void mutation(async () => {
 for (const action of ['start', 'pause', 'reset'] as const) {
   $(action).addEventListener('click', () => void mutation(async () => {
     if (action === 'start' && dirty) throw new Error('Apply or discard your scenario changes first.');
-    await api('control', action === 'start' ? { action, mode: chosen<Mode>('mode'), perception: chosen<Perception>('perception') } : action === 'reset' ? { action, perception: chosen<Perception>('perception') } : { action });
-    if (action === 'reset') { dirty = false; draft = null; lastFrameSeq = -1; }
+    const strategy = chosen<Strategy>('strategy');
+    if (strategy === 'gemini') throw new Error('The Gemini planner is a placeholder and not yet available.');
+    await api('control', action === 'start' ? { action, mode: chosen<Mode>('mode'), perception: chosen<Perception>('perception'), strategy } : action === 'reset' ? { action, perception: chosen<Perception>('perception'), strategy } : { action, strategy });
+    if (action === 'reset') { paceSamples.length = 0; dirty = false; draft = null; lastFrameSeq = -1; }
     notify(action === 'reset' ? 'Reset requested. Waiting for the backend state.' : `${action === 'start' ? 'Start' : 'Pause'} requested.`);
   }));
 }
@@ -1801,7 +1835,7 @@ $('follow').addEventListener('click', () => setView('follow'));
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
   button.addEventListener('click', async () => {
     const speed = Number(button.dataset.speed);
-    pendingSpeed = speed; syncSpeed();
+    paceSamples.length = 0; pendingSpeed = speed; syncSpeed();
     try {
       const result = await api<{ run_speed: number }>('speed', { speed });
       if (state) state.run_speed = result.run_speed;
@@ -1876,3 +1910,85 @@ void poll();
 })();
 // Exposed for automated end-to-end checks (headless browser); read-only accessors.
 (window as unknown as { rescuetwin: object }).rescuetwin = { state: () => state, scene: () => scene, lastFrameSeq: () => lastFrameSeq };
+
+// An independent same-origin page renders live sensors while this viewer reads history.
+if (new URLSearchParams(location.search).has('sensorOnly')) {
+  document.body.style.opacity = '0';
+} else {
+  const panel = document.createElement('section');
+  panel.className = 'panel recordings';
+  panel.innerHTML = `<h2>Recorded runs</h2><label>Record next run <input id="record-next" type="checkbox" checked></label>
+    <input id="runs-filter" aria-label="Filter recorded scenes, policies and outcomes" placeholder="Filter scene, policy, outcome"><button id="runs-refresh">Refresh</button><select id="runs-list"><option value="">Select a recording</option></select>
+    <button id="replay-open">Replay</button><button id="replay-live">Live</button>
+    <button id="replay-next-event">Next decision / detection</button><button id="replay-play">Play / pause</button><button id="replay-step">Step</button>
+    <select id="replay-speed" aria-label="Replay speed"><option>1</option><option>2</option><option>4</option></select> ×
+    <input id="replay-seek" aria-label="Recording event" type="range" min="0" max="0" value="0">
+    <a id="replay-download">Download archive</a><p id="replay-label">Live view</p>
+    <details><summary>Recorded evidence, tools and decisions</summary><pre id="replay-inspector" style="max-height:350px;overflow:auto;white-space:pre-wrap"></pre></details>`;
+  panel.querySelectorAll('button').forEach(b=>b.className='button small');
+  document.querySelector('.scene-panel')?.after(panel);
+  if (!panel.isConnected) document.body.prepend(panel);
+  const refresh = async () => {
+    const rows = await api<{id:string;scene_name:string;strategy:string;status:string}[]>('runs');
+    const list = document.getElementById('runs-list') as HTMLSelectElement;
+    list.replaceChildren(new Option('Select a recording', ''), ...rows.filter(r=>`${r.scene_name} ${r.strategy} ${r.status}`.toLowerCase().includes((document.getElementById('runs-filter') as HTMLInputElement).value.toLowerCase())).map(r => new Option(`${r.scene_name} · ${r.strategy} · ${r.status}`, r.id)));
+  };
+  document.getElementById('runs-filter')!.oninput=()=>void refresh();
+  document.getElementById('runs-refresh')!.onclick = () => void refresh();
+  document.getElementById('record-next')!.onchange = () => void api('recording', {enabled:(document.getElementById('record-next') as HTMLInputElement).checked});
+  const show = async (cursor:number) => {
+    if (!replayId) return;
+    const id = replayId;
+    const rows = await api<{seq:number;time:number;kind:string;data:any}[]>(`runs/${id}/timeline?start=${cursor}&limit=1`);
+    if (!rows.length || replayId !== id) { replayPlaying=false; return; }
+    const row = rows[0]; replayCursor=row.seq;
+    (document.getElementById('replay-seek') as HTMLInputElement).value=String(row.seq);
+    document.getElementById('replay-label')!.textContent=`READ ONLY · ${row.time.toFixed(1)} s · ${row.kind}`;
+    document.getElementById('replay-inspector')!.textContent=JSON.stringify(row.data,null,2);
+    const historical=await api<{snapshot:any;frame:any}>(`runs/${id}/snapshot?seq=${row.seq}`);
+    if (replayId !== id) return;
+    const display=historical.snapshot?.data;
+    if (display) {
+      riskMap={rooms:display.state.risk_map??[],building_default:'unknown',building_source:'Recorded room tags',tags:[],note:''};
+      $('room-risk-list').innerHTML=riskMap.rooms.map(r=>`<p>${escape(r.name)} · ${escape(r.tag_label)}</p>`).join('');
+      buildingUses=null;$('building-use-hint').textContent='Recorded building-use settings; search prior, not occupancy.';
+      drawRiskLayer();
+      belief={...display.observation,heat:display.state.heat,smoke:display.state.smoke,survivors:display.observation.tracks};
+      // Reconstruct belief grids exclusively from recorded measurements, never truth.
+      belief!.heat=belief!.heat.map(r => r.map(() => 0));belief!.smoke=belief!.smoke.map(r => r.map(() => 0));
+      for (const sample of display.observation.samples) belief![sample.modality as 'heat'|'smoke'][sample.cell[1]][sample.cell[0]]=sample.value;
+      acceptState({...display.state,paired:null});
+      for (const id of ['start','pause','reset','withdraw','preview-hazards','load-map','scene-select']) (document.getElementById(id) as HTMLButtonElement).disabled=true;
+    }
+    if (historical.frame) {
+      const img = new Image();img.src=`/api/runs/${id}/artifacts/${historical.frame.data.rgb}`;
+      img.onload=() => { if (replayId !== id) return; const canvas=document.querySelector('#robot-feed') as HTMLCanvasElement|null;canvas?.getContext('2d')?.drawImage(img,0,0,canvas.width,canvas.height); };
+    }
+  };
+  document.getElementById('replay-open')!.onclick=() => void (async () => {
+    const id=(document.getElementById('runs-list') as HTMLSelectElement).value;if(!id)return;
+    replayPlaying=false;
+    if (!sensorWorker) {sensorWorker=document.createElement('iframe');sensorWorker.src='/?sensorOnly=1';sensorWorker.style.cssText='position:fixed;width:2px;height:2px;left:-10px';document.body.append(sensorWorker);}
+    await api('renderer',{id:rendererId,release:true});rendererOwned=false;
+    paceSamples.length=0; lastFrameImage=null;
+    replayId=id;
+    const manifest=await api<{entries:number}>(`runs/${id}`);
+    replayScene=await api<SceneData>(`runs/${id}/artifacts/scene.json`);
+    // Older recordings lack avatar assets; retain an explicit partial replay warning.
+    const avatarManifest=await fetch(`/api/runs/${id}/artifacts/avatar-humans.json`);
+    if(avatarManifest.ok) await loadHumans(()=>{avatars.forEach(a=>avatarLayer.remove(a));avatars.clear();},m=>notify(m,true),`/api/runs/${id}/artifacts/`,'avatar-');
+    else notify('Older recording: avatar assets were not archived; using installed appearance assets.');
+    scene=replayScene;buildStaticScene();renderSceneInfo();recenter();await loadSceneMesh(scene,++sceneLoadVersion);sceneReady=true;
+    (document.getElementById('replay-seek') as HTMLInputElement).max=String(manifest.entries-1);
+    (document.getElementById('replay-download') as HTMLAnchorElement).href=`/api/runs/${id}/download`;
+    await show(0);
+  })().catch(e=>notify(String(e),true));
+  document.getElementById('replay-live')!.onclick=() => {paceSamples.length=0;lastFrameImage=null;lastFrameSeq=-1;strategySynced=false;replayPlaying=false;replayId=null;replayScene=null;sensorWorker?.remove();sensorWorker=null;scene=null;void loadHumans(()=>{avatars.forEach(a=>avatarLayer.remove(a));avatars.clear();},m=>notify(m,true));void poll();document.getElementById('replay-label')!.textContent='Live view';};
+  document.getElementById('replay-next-event')!.onclick=()=>void (async()=>{if(!replayId)return;const m=await api<{highlights?:{seq:number;kind:string}[]}>(`runs/${replayId}`);const next=m.highlights?.find(e=>e.seq>replayCursor&&['decision','detection','model','tool','report'].includes(e.kind));if(next)await show(next.seq);})();
+  document.getElementById('replay-play')!.onclick=()=>{replayPlaying=!replayPlaying;};
+  document.getElementById('replay-step')!.onclick=()=>void show(replayCursor+1);
+  document.getElementById('replay-seek')!.oninput=()=>void show(Number((document.getElementById('replay-seek') as HTMLInputElement).value));
+  let showing=false;
+  setInterval(()=>{if(replayPlaying&&!showing){showing=true;void show(replayCursor+Number((document.getElementById('replay-speed') as HTMLSelectElement).value)).finally(()=>{showing=false;});}},200);
+  void refresh();
+}

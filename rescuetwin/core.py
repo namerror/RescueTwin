@@ -203,7 +203,7 @@ def angle_diff(a, b):
 
 
 class Simulation:
-    def __init__(self,scene=None,scenario=None,mode='adaptive',perception='analytic-development'):
+    def __init__(self,scene=None,scenario=None,mode='adaptive',perception='analytic-development',strategy='greedy'):
         self.scene=scene or fixture()
         self.base_scene = self.scene
         default=dict(survivors=[[26,6],[15,18]],ignitions=[[25,18]],seed=7) if self.scene.id=='development-apartment' else dict(survivors=[],ignitions=[],seed=7)
@@ -241,7 +241,7 @@ class Simulation:
         self.heat_decay=.04+.16*exchange
         self.smoke_decay=.015+.24*exchange
         self.ignition_cells=set();self.hazard_time=0.;self.hazards_running=False
-        self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.)
+        self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.);self.heat_sampled_at=np.full((H,W),-1.);self.smoke_sampled_at=np.full((H,W),-1.)
         self.route=[];self.goal=None;self.visited=set();self.escort={}  # person ID to confirmed detection ID
         self.detections=[];self.next_detection=0;self.version=0
         self.events=[];self.metrics=dict(evacuated=0,exposure=0.,distance=0.,detections=0,false_detections=0,route_changes=0,rooms_inspected=0,robot_hazard_s=0.,assistance_requests=0,handoffs=0,possible_detections=0,reports=0)
@@ -250,6 +250,10 @@ class Simulation:
         self.active_scan = None
         self.reports=[];self.decisions=[];self.decision_key=None;self.extra_views=[];self.withdraw_reason=None;self.comms_up=True
         self.immobile={tuple(p) for p in self.scenario.get('immobile',[])}
+        from .strategies import STRATEGIES   # experimental multi-person policies; 'greedy' is the baseline
+        if strategy not in STRATEGIES: raise ValueError('Unknown strategy')
+        self.strategy=strategy;self.walkers=[];self.detour_goal=None;self.detour_kind=None;self.detour_planned_at=-math.inf
+        self.peeks=0;self.zone=None
         self.agent_backoff_until=0.;self.metrics['inference_pause_s']=0.   # hosted-agent bookkeeping (decision-quality mode)
         self.survivors=[dict(id=f'person-{i}',position=tuple(p),status='unobserved') for i,p in enumerate(self.scenario['survivors'])]
         self.heat_dose = {person['id']: 0.0 for person in self.survivors}
@@ -260,9 +264,6 @@ class Simulation:
         # Search prior from static building information only (never from survivor placements).
         self.prior=occupancy.weights(self.scene,self.scenario.get('building_use'))
         self.log(occupancy.describe(self.scene,self.prior))
-        # Room fire-risk map (gas heater / sprinkler fixture tags): static building information, multiplies the prior.
-        self.risk=risk.room_map(self.scene,self.scenario.get('room_risk'))
-        self.log(risk.describe(self.scene,self.risk))
         if HAZARD_TIME_SCALE!=1:self.log(f'Demo pacing: fire and smoke advance at {HAZARD_TIME_SCALE:g}x mission time.')
         self.rooms_state={r['id']:dict(id=r['id'],name=r['name'],label=r.get('label'),status='unvisited',observed_fraction=0.,
                                         viewpoints_tried=0,reason=None) for r in self.scene.rooms}
@@ -279,10 +280,18 @@ class Simulation:
         for xx,yy in self.ignition_cells:self.ignition_mask[yy,xx]=True
         self.fire=np.where(self.ignition_mask,self.heat,0.)
         self.ignition_strength = self.fire.copy()
-        self.spray_origin = None
-        self.spray_cells = ()
+        self.sprinkler_heads = []
+        self.sprinkler_coverage = []
+        self.active_sprinklers = set()
         self.spray_strength = self.grid()
-        self.spraying = False
+        if (self.scene.bundle is not None and self.scene.source != 'synthetic'
+                and risk.recorded_sprinklers(self.scene) is True):
+            self.sprinkler_heads = self.place_sprinklers()
+            self.sprinkler_coverage = [self.sprinkler_reach(head) for head in self.sprinkler_heads]
+
+        sprinkler_rooms = {self.room_of[head] for head in self.sprinkler_heads}
+        self.risk = risk.room_map(self.scene, self.scenario.get('room_risk'), sprinkler_rooms)
+        self.log(risk.describe(self.scene, self.risk))
 
     def grid(self,value=0.): return np.full((self.scene.height,self.scene.width),float(value))
 
@@ -375,7 +384,7 @@ class Simulation:
             self.free[1:, :] & self.free[:-1, :],
             self.free[:, 1:] & self.free[:, :-1],
         )
-        self.spray_origin = None
+        self.sprinkler_coverage = [self.sprinkler_reach(origin) for origin in self.sprinkler_heads]
         affected = {origin, *neighbours}
         for wall_cell in breached:
             affected.update(self.scene.neighbors(wall_cell))
@@ -397,30 +406,57 @@ class Simulation:
         self.incident = dict(origin=origin, debris=debris, breached=sorted(breached), time=round(self.time, 2))
         self.log(f'Kitchen incident: {len(breached)} wall cells opened, {injured} people affected.')
 
-    def automatic_sprinkler(self):
-        """Use local heat and flame readings within the nozzle's unobstructed reach."""
-        if self.robot != self.spray_origin:
-            self.spray_origin = self.robot
-            self.spray_strength.fill(0.)
-            cx, cy = self.robot
-            reach = math.ceil(SPRAY_RADIUS_M / self.scene.resolution)
-            cells = []
-            for y in range(max(0, cy - reach), min(self.scene.height, cy + reach + 1)):
-                for x in range(max(0, cx - reach), min(self.scene.width, cx + reach + 1)):
-                    distance = math.hypot(x - cx, y - cy) * self.scene.resolution
-                    if distance <= SPRAY_RADIUS_M and self.scene.free((x, y)) and line_visible(self.scene, self.robot, (x, y)):
-                        self.spray_strength[y, x] = 1. - .5 * distance / SPRAY_RADIUS_M
-                        cells.append((x, y))
-            self.spray_cells = tuple(cells)
-        return any(self.heat[y, x] >= HAZARD_HEAT or self.fire[y, x] >= SPRAY_FIRE_TRIGGER
-                   for x, y in self.spray_cells)
+    def place_sprinklers(self):
+        """Choose a single interior mounting point for each suitable scanned room."""
+        clearance = .5 / self.scene.resolution
+        reach = math.floor(clearance)
+        offsets = [(dx, dy) for dx in range(-reach, reach + 1)
+                   for dy in range(-reach, reach + 1)
+                   if math.hypot(dx, dy) <= clearance]
+        heads = []
+        for room in self.scene.rooms:
+            if room.get('label') in {'outdoor_other', 'balcony', 'patio', 'garage'}:
+                continue
+            cells = {tuple(cell) for cell in room['cells'] if self.scene.free(cell)}
+            interior = [(x, y) for x, y in cells
+                        if all((x + dx, y + dy) in cells for dx, dy in offsets)]
+            if interior:
+                center = tuple(sum(cell[axis] for cell in cells) / len(cells) for axis in (0, 1))
+                head = min(interior, key=lambda cell: (math.dist(cell, center), cell))
+                if head not in heads:
+                    heads.append(head)
+        return heads
+
+    def sprinkler_reach(self, origin):
+        cx, cy = origin
+        reach = math.ceil(SPRAY_RADIUS_M / self.scene.resolution)
+        rows, cols, weights = [], [], []
+        for y in range(max(0, cy - reach), min(self.scene.height, cy + reach + 1)):
+            for x in range(max(0, cx - reach), min(self.scene.width, cx + reach + 1)):
+                distance = math.hypot(x - cx, y - cy) * self.scene.resolution
+                if distance <= SPRAY_RADIUS_M and line_visible(self.scene, origin, (x, y)):
+                    rows.append(y)
+                    cols.append(x)
+                    weights.append(1. - .5 * distance / SPRAY_RADIUS_M)
+        return rows, cols, weights
+
+    def update_sprinklers(self):
+        self.spray_strength.fill(0.)
+        active = set()
+        if self.sprinkler_heads and (self.status == 'running' or self.hazards_running):
+            hot = (self.heat >= HAZARD_HEAT) | (self.fire >= SPRAY_FIRE_TRIGGER)
+            for i, (rows, cols, weights) in enumerate(self.sprinkler_coverage):
+                if hot[rows, cols].any():
+                    active.add(i)
+                    self.spray_strength[rows, cols] = np.maximum(self.spray_strength[rows, cols], weights)
+        if active - self.active_sprinklers:
+            self.log('Automatic scene sprinkler activated.')
+        self.active_sprinklers = active
+        return bool(active)
 
     def hazards(self,dt):
         """Advance finite fuel, wall-confined diffusion and ambient exchange."""
-        spraying = self.status == 'running' and self.automatic_sprinkler()
-        if spraying and not self.spraying:
-            self.log('Automatic sprinkler activated.')
-        self.spraying = spraying
+        spraying = self.update_sprinklers()
         dt = dt * HAZARD_TIME_SCALE   # demo pacing; see HAZARD_TIME_SCALE
         scale = (.2 / self.scene.resolution) ** 2
         kh, ks = .30 * scale, .50 * scale
@@ -463,6 +499,8 @@ class Simulation:
         return dict(x=x,y=y,z=CAMERA_HEIGHT_M,yaw=self.heading)
 
     def sense(self):
+        if not hasattr(self, "heat_sampled_at"):
+            self.heat_sampled_at=self.grid(-1.);self.smoke_sampled_at=self.grid(-1.)
         rx,ry=self.robot
         image=self.perception_mode=='image-yolo'
         reach=CAMERA_RANGE_M if image else SENSE_RANGE_M
@@ -478,11 +516,12 @@ class Simulation:
                 if not line_visible(self.scene,self.robot,(x,y)): continue
                 # Analytic visual hazard sensing (not image-based): smoke density is visible along the line of
                 # sight, flames are visible where heat >= FLAME_VISIBLE_HEAT. Other heat is only measured locally.
-                self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time
+                self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time;self.smoke_sampled_at[y,x]=self.time
                 if self.smoke[y,x]>.5: continue   # dense smoke hides what is in the cell
-                if self.heat[y,x]>=FLAME_VISIBLE_HEAT: self.belief_heat[y,x]=self.heat[y,x]
-                elif self.belief_heat[y,x]>0 and self.heat[y,x]<self.belief_heat[y,x]: self.belief_heat[y,x]=self.heat[y,x]
+                if self.heat[y,x]>=FLAME_VISIBLE_HEAT: self.belief_heat[y,x]=self.heat[y,x];self.heat_sampled_at[y,x]=self.time
+                elif self.belief_heat[y,x]>0 and self.heat[y,x]<self.belief_heat[y,x]: self.belief_heat[y,x]=self.heat[y,x];self.heat_sampled_at[y,x]=self.time
                 changed|=not self.observed[y,x];self.observed[y,x]=1;self.last_seen[y,x]=self.time
+        self.heat_sampled_at[ry,rx]=self.time;self.smoke_sampled_at[ry,rx]=self.time
         self.belief_heat[ry,rx]=self.heat[ry,rx];self.belief_smoke[ry,rx]=self.smoke[ry,rx];self.hazard_seen[ry,rx]=self.time
         # The robot measures its own cell directly, smoke or not, so the path it has walked is observed.
         changed|=not self.observed[ry,rx];self.observed[ry,rx]=1;self.last_seen[ry,rx]=self.time
@@ -674,7 +713,7 @@ class Simulation:
                     rooms_state=deepcopy(list(self.rooms_state.values())),
                     risk_map=deepcopy(list(self.risk.values())),
                     reports=[{k:r[k] for k in ('id','kind','status','time','room','action')} for r in self.reports],
-                    perception=self.perception_mode,events=self.events[-8:])
+                    perception=self.perception_mode,events=[])
 
     # ---------------------------------------------------------------- planning
     def planning_fields(self):
@@ -706,7 +745,14 @@ class Simulation:
                 if (points := self.observe_points(room)) and all(p in self.searched_points for p in points)]
 
     def choose(self):
+        from . import strategies
+        tools=self.__dict__.get("agent_tools")
+        if tools and not self.withdraw_reason:
+            path=tools.navigation()
+            if path is not None:return path
         if self.escort:
+            detour=strategies.escort_goal(self)
+            if detour:return detour
             costs,prev=self.tree(True)
             options=[(costs[e],e) for e in self.scene.exits if e in costs]
             if options:
@@ -737,6 +783,10 @@ class Simulation:
                 if selected:return selected
                 self.goal=None
         self.mark_inaccessible(costs)
+        zone=strategies.zone_target(self,costs,prev)
+        if zone:return zone
+        planned=strategies.mission_goal(self)
+        if planned:return planned
         targets=[tuple(d['cell']) for d in self.detections if d['status']=='confirmed']
         options=[(costs[t],t) for t in targets if t in costs]
         if options:
@@ -820,7 +870,7 @@ class Simulation:
                 d['rechecking']=True;self.scan_remaining=2*math.pi if self.perception_mode=='image-yolo' else 0.
                 if self.scan_remaining<=0:self.scan_done()
         self.visited.add(self.robot)
-        if not self.escort and self.active_scan is None and self.robot not in self.searched_points:
+        if (not self.escort or self.strategy in ('mission-astar','mission-astar-cached')) and self.active_scan is None and self.robot not in self.searched_points:
             if any(self.robot in self.observe_points(room) for room in self.scene.rooms):
                 self.active_scan = self.robot
                 if self.perception_mode == 'image-yolo':
@@ -830,6 +880,8 @@ class Simulation:
                     self.scan_done()
         self.pair()
         self.update_rooms()
+        from . import strategies
+        strategies.credit_observed_rooms(self)
         if self.status!='running':return
         if self.withdraw_reason and self.robot in self.scene.exits and not self.escort:
             self.status='withdrawn';self.log(f'Withdrawn at the exit: {self.withdraw_reason}.');self.end_report(self.withdraw_reason);return
@@ -855,7 +907,7 @@ class Simulation:
             # it protects an escorted person unless the escort is cornered (last resort).
             guard=bool(self.escort)
             if guard and (self.heat[y,x]>=ESCORT_HEAT_LIMIT or self.smoke[y,x]>=ESCORT_SMOKE_LIMIT):
-                self.belief_heat[y,x]=self.heat[y,x];self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time
+                self.belief_heat[y,x]=self.heat[y,x];self.belief_smoke[y,x]=self.smoke[y,x];self.hazard_seen[y,x]=self.time;self.smoke_sampled_at[y,x]=self.time;self.heat_sampled_at[y,x]=self.time
                 self.observed[y,x]=1;self.progress=0;self.log('Local interlock stopped motion into hazard.')
             else:
                 self.heading=math.atan2(y-self.robot[1],x-self.robot[0])
@@ -876,10 +928,11 @@ class Simulation:
                             self.log(f"Evacuated: {detection_id}")
                             self.version += 1
                     if at_exit:
-                        self.escort.clear()
+                        self.escort.clear();self.peeks=0;self.zone=None;self.detour_goal=None
                         self.escort_blocked_since = None
                         self.assistance_requested = False
         elif not self.route:self.progress=0
+        strategies.advance_walkers(self,dt)
         self.update_casualties(dt)
         if self.status!='running':return
         if self.survivors and self.metrics['evacuated']==len(self.survivors):
@@ -887,12 +940,12 @@ class Simulation:
         elif self.survivors and all(p['status'] in ('evacuated','casualty') for p in self.survivors):
             self.status='unresolved';self.log('Mission ended with simulated casualties.')
             self.end_report('every configured person evacuated or a simulated casualty')
-        elif (self.survivors and all(p['status'] in ('evacuated','assistance-requested','casualty') for p in self.survivors) and not self.escort
+        elif (self.survivors and all(p['status'] in ('evacuated','assistance-requested','casualty') for p in self.survivors) and not self.escort and not self.walkers
               and all(st['status']!='unvisited' for st in self.rooms_state.values())
               and not any(d['status']=='handoff' and d.get('retry') for d in self.detections)):
             self.status='accounted';self.log('All configured people evacuated or handed off to responders (simulator evaluation).')
             self.end_report('every configured person evacuated or handed off')
-        elif (not new and self.scan_remaining<=0 and not self.holding) or self.time>=self.scene.time_limit:
+        elif (not new and self.scan_remaining<=0 and not self.holding and not self.walkers) or self.time>=self.scene.time_limit:
             self.status='unresolved';self.log('Mission unresolved; unseen occupants are not confirmed absent.')
             self.end_report('time limit reached' if self.time>=self.scene.time_limit else 'no further reachable targets')
         if self.status=='running' and self.perception_mode=='image-yolo' and int(round(self.time/dt))%max(1,round(PERCEPTION_PERIOD/dt))==0:
@@ -945,6 +998,9 @@ class Simulation:
             if ((d['status'] != 'confirmed' and not retry) or math.dist(d['position'], here) > PAIR_M
                     or not line_visible(self.scene, self.robot, cell)):
                 continue
+            from . import strategies
+            if not retry and strategies.defer_contact(self):
+                continue
             wanted = ('assistance-requested',) if retry else ('unobserved',)
             candidates = [p for p in self.survivors if p['status'] in wanted
                           and math.dist(self.scene.world(p['position']), here) <= PAIR_M
@@ -974,6 +1030,8 @@ class Simulation:
             if retry:
                 self.metrics['handoffs'] -= 1
                 self.log(f"Re-checked {d['id']}: a human-safe route is now available.")
+            elif strategies.self_evacuate(self, person, d):
+                continue
             person['status'] = 'escorting'
             person['position'] = self.robot
             self.escort[person['id']] = d['id']
@@ -1004,13 +1062,16 @@ class Simulation:
         return dict(scene_id=self.scene.id,scenario=self.scenario,time=round(self.time,2),status=self.status,
                     hazard_time=round(self.hazard_time,2),hazards_running=self.hazards_running,
                     incident=self.incident,
-                    sprinkler=dict(radius_m=SPRAY_RADIUS_M, origin=self.spray_origin, cells=self.spray_cells)
-                    if self.spraying and self.status == 'running' else None,
+                    sprinklers=[
+                        dict(origin=origin, cells=list(zip(self.sprinkler_coverage[i][1], self.sprinkler_coverage[i][0]))
+                             if i in self.active_sprinklers and (self.status == 'running' or self.hazards_running) else [])
+                        for i, origin in enumerate(self.sprinkler_heads)
+                    ],
                     hazard_sensor=self.hazard_sensor(),fire=self.fire.round(3).tolist(),
                     robot=self.robot,heading=round(self.heading,4),pose=self.camera_pose(),survivors=public,
                     heat=self.heat.round(3).tolist(),smoke=self.smoke.round(3).tolist(),observed=self.observed.astype(int).tolist(),
                     route=self.route,events=self.events,metrics={k:(round(v,3) if isinstance(v,float) else v) for k,v in self.metrics.items()},
-                    mode=self.mode,perception_mode=self.perception_mode,detections=self.detections,
+                    mode=self.mode,strategy=self.strategy,perception_mode=self.perception_mode,detections=self.detections,
                     searched_rooms=self.searched_rooms(),
                     frame_request=self.frame_request,degraded=self.degraded,scanning=self.scan_remaining>0,holding=self.holding,last_frame=self.last_frame,
                     reports=self.reports,rooms_state=list(self.rooms_state.values()),decisions=self.decisions[-30:],

@@ -10,7 +10,12 @@ except ImportError:
 FIXTURES = {
     2893: ('gas_heating', 'Gas heating'), 2706: ('gas_heating', 'Natural gas heating'),
     2966: ('has_sprinklers', 'Fire sprinkler system'), 2965: ('smoke_detector', 'Fire and smoke detector'),
-    1620: ('gas_water_heater', 'Gas water heater'), 1602: ('gas_oven', 'Gas oven'), 1604: ('gas_range', 'Gas range'),
+    1620: ('gas_water_heater', 'Gas water heater'),
+    1602: ('gas_oven', 'Gas oven'), 1071: ('gas_oven', 'Built-in gas oven'),
+    1604: ('gas_range', 'Gas range'), 1580: ('gas_range', 'Gas oven and range'),
+    1577: ('gas_mixed_range', 'Gas and electric range'), 1582: ('gas_cooktop', 'Gas cooktop'),
+    3137: ('gas_fireplace', 'Gas log fireplace'), 3410: ('gas_fireplace', 'Gas fireplace'),
+    2739: ('gas_cooling', 'Gas-powered cooling'),
 }
 
 

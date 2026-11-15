@@ -351,3 +351,14 @@ input[type=number] { border: 1px solid var(--line); border-radius: 4px; backgrou
   .view-toggle { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
+
+.recordings { padding: 18px; margin: 20px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.recordings h2, .recordings details, #replay-label { flex-basis: 100%; margin: 0; }
+.recordings select { width: auto; max-width: 65vw; }
+.recordings #runs-list { flex: 1 1 400px; }
+.recordings input[type=range] { flex: 1 1 240px; }
+.recordings label { display: flex; align-items: center; gap: 8px; }
+.recordings #replay-inspector { font-size: 12px; color: var(--ink-2); }
+
+.recordings { grid-column: 1 / -1; margin: 0; }
+.recordings #replay-inspector { max-width: 100%; }

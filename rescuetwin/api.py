@@ -18,7 +18,8 @@ FRAME_TIMEOUT_S = float(os.environ.get('RESCUETWIN_FRAME_TIMEOUT', '10'))
 AGENT_PERIOD_S = float(os.environ.get('RESCUETWIN_AGENT_PERIOD', '5'))
 AGENT_TIMEOUT_S = 10.0   # ~3 models x 3 s budget; decisions older than 10 s of mission time are rejected anyway
 # Hosted agent status for the operator UI (no secrets). Excluded from paired comparisons by design.
-agent_status = dict(state='starting', enabled=os.environ.get('RESCUETWIN_AGENT', '1') != '0', model=None,
+# Off by default: the workbench's Gemini mission option is a placeholder; set RESCUETWIN_AGENT=1 to opt in.
+agent_status = dict(state='starting', enabled=os.environ.get('RESCUETWIN_AGENT', '0') == '1', model=None,
                     accepted=0, rejected=0, failed=0, latency_s=None, last=None, last_error=None,
                     # Decision-quality mode: freeze the mission clock (robot and fire) while the model is thinking.
                     pause_clock=False, thinking=False)
@@ -43,12 +44,12 @@ def default_perception(scene):
 uploaded_scenarios = {}
 
 
-def new_simulation(scene, scenario=None, mode='adaptive', perception=None):
+def new_simulation(scene, scenario=None, mode='adaptive', perception=None, strategy='greedy'):
     if scenario is None:
         scenario = uploaded_scenarios.get(scene.id)
     if scenario is None:
         scenario = presets.build(scene, 'standard')['scenario']
-    return Simulation(scene, scenario, mode, perception or default_perception(scene))
+    return Simulation(scene, scenario, mode, perception or default_perception(scene), strategy)
 
 
 sim = new_simulation(default_scene(scenes))
@@ -70,6 +71,8 @@ class Paired:
         mode = self.order[len(self.reports)]
         sim = Simulation(self.scene, self.scenario, mode, self.perception)
         sim.status = 'running'
+        from .recording import Recorder
+        sim.recorder=Recorder(sim,dict(kind='paired'))
         sim.log(f'Paired comparison: {mode} run ({len(self.reports) + 1}/2) from frozen scenario.')
 
     def record(self, finished):
@@ -120,50 +123,63 @@ def frame_timeout_check():
         frame_requested_at = None
 
 
+async def simulation_clock():
+    global sim
+    next_due = 0.   # wall-clock time the next paced simulation step may run
+    paced_sim = None
+    while True:
+        tick_started = time.monotonic()
+        fast = paired is not None and paired.status == 'running'
+        current = sim
+        if current is not paced_sim:
+            paced_sim = current
+            next_due = 0.
+        if current.status == 'running' and inference_hold(current):
+            current.metrics['inference_pause_s'] += TICK      # labelled pause, reported with the run
+            await asyncio.sleep(TICK)
+            continue
+        if current.status == 'running':
+            frame_timeout_check()
+            # Pace complete steps, including supervision and recording; frame waits overlap the deadline.
+            if not current.needs_frame() and (fast or tick_started >= next_due):
+                supervisor = getattr(current, 'supervisor', None)
+                if supervisor:
+                    await asyncio.to_thread(supervisor.step)
+                    if current is not sim:
+                        continue
+                if current.status == 'running':
+                    current.tick(TICK)
+                    if getattr(current, 'recorder', None):
+                        current.recorder.capture(current)
+                next_due = tick_started + TICK / run_speed
+        elif current.hazards_running:
+            # Upstream PR #1: hazards can be previewed while the robot mission is idle or paused.
+            current.hazards(TICK)
+        if current.status != 'running' and current.hazard_time >= HAZARD_PREVIEW_LIMIT_S - 1e-8:
+            current.hazards_running = False
+        if fast and current is sim and current.status not in ('running', 'paused'):
+            paired.record(current)
+        if fast:
+            await asyncio.sleep(TICK / 8 if current.needs_frame() else 0)
+        else:
+            now = time.monotonic()
+            if current.status == 'running':
+                # Waiting on a frame: re-check often so the clock resumes as soon as it lands.
+                wait = TICK / 8 if current.needs_frame() else min(TICK, max(0., next_due - now))
+            else:
+                interval = TICK / run_speed if current.hazards_running else TICK
+                wait = max(0., interval - (now - tick_started))
+            await asyncio.sleep(wait)
+
+
 @asynccontextmanager
 async def lifespan(app):
-    async def clock():
-        global sim
-        next_due = 0.   # wall-clock time the next paced simulation step may run
-        while True:
-            tick_started = time.monotonic()
-            fast = paired is not None and paired.status == 'running'
-            current = sim
-            if current.status == 'running' and inference_hold(current):
-                current.metrics['inference_pause_s'] += TICK      # labelled pause, reported with the run
-                await asyncio.sleep(TICK)
-                continue
-            if current.status == 'running':
-                frame_timeout_check()
-                # Deadline pacing: one TICK of simulated time per TICK/run_speed of wall time, measured from the
-                # previous step. A camera-frame wait overlaps that interval instead of adding to it, and the pace
-                # never exceeds the requested speed. tick() itself is a no-op while a frame is outstanding.
-                if fast or (not current.needs_frame() and tick_started >= next_due):
-                    current.tick(TICK)
-                    next_due = tick_started + TICK / run_speed
-            elif current.hazards_running:
-                # Upstream PR #1: hazards can be previewed while the robot mission is idle or paused.
-                current.hazards(TICK)
-            if current.status != 'running' and current.hazard_time >= HAZARD_PREVIEW_LIMIT_S - 1e-8:
-                current.hazards_running = False
-            if fast and current is sim and current.status not in ('running', 'paused'):
-                paired.record(current)
-            if fast:
-                await asyncio.sleep(TICK / 8 if current.needs_frame() else 0)
-            else:
-                now = time.monotonic()
-                if current.status == 'running':
-                    # Waiting on a frame: re-check often so the clock resumes as soon as it lands.
-                    wait = TICK / 8 if current.needs_frame() else min(TICK, max(0., next_due - now))
-                else:
-                    interval = TICK / run_speed if current.hazards_running else TICK
-                    wait = max(0., interval - (now - tick_started))
-                await asyncio.sleep(wait)
-
     async def reason():
         """Hosted supervisor: proposes goals; the controller validates and executes. Any failure or rejection falls
         back to the deterministic policy for that decision (the mission never pauses on the model's account)."""
         from .agent import BACKOFF_FAILED_S,BACKOFF_REJECTED_S,MissionAgent,apply_decision,decision_options,load_agent_env,scrub,wants_decision
+        if not agent_status['enabled']:
+            agent_status.update(state='approval-required');return
         load_agent_env()
         if not os.environ.get('GEMINI_API_KEY'):
             agent_status.update(state='no-key');return
@@ -198,8 +214,9 @@ async def lifespan(app):
 
     if VISION_AVAILABLE and os.environ.get('RESCUETWIN_PRELOAD_DETECTOR', '1') == '1':
         asyncio.get_running_loop().run_in_executor(None, load_detector)
-    tasks = [asyncio.create_task(reason()), asyncio.create_task(clock())]
+    tasks = [asyncio.create_task(reason()), asyncio.create_task(simulation_clock())]
     yield
+    if getattr(sim,'recorder',None):sim.recorder.close('server shutdown')
     for task in tasks:
         task.cancel()
     for task in tasks:
@@ -224,6 +241,7 @@ class Control(BaseModel):
     action:str
     mode:str|None=None
     perception:str|None=None
+    strategy:str|None=None
 
 class SceneChoice(BaseModel):
     id:str
@@ -233,6 +251,7 @@ class CompareRequest(BaseModel):
 
 class Frame(BaseModel):
     seq:int
+    renderer_id:str|None=None
     width:int=Field(gt=0,le=1280)
     height:int=Field(gt=0,le=960)
     rgb:str=Field(max_length=8_000_000)
@@ -246,6 +265,8 @@ def busy():
 @app.get('/api/state')
 def state():
     s=sim.state();s['paired']=paired.public() if paired else None
+    supervisor=getattr(sim,'supervisor',None)
+    s['agent_supervisor']=dict(architecture=supervisor.architecture,calls=supervisor.calls,active=supervisor.tools.active) if supervisor else None
     s['vision_installed'] = VISION_AVAILABLE
     s['run_speed'] = run_speed
     return s
@@ -285,7 +306,7 @@ def environment(body: dict):
             from dataclasses import replace
             from uuid import uuid4
             scene = replace(scene, id=f'uploaded-{uuid4().hex}')
-        next_sim = new_simulation(scene, scenario, sim.mode, 'analytic-development')
+        next_sim = new_simulation(scene, scenario, sim.mode, 'analytic-development', sim.strategy)
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise HTTPException(422, f'Invalid floor plan: {error}') from error
     scenes[scene.id] = scene
@@ -299,7 +320,7 @@ def choose_scene(body:SceneChoice):
     global sim
     if body.id not in scenes:raise HTTPException(404,'Unknown scene')
     if sim.status=='running' or sim.hazards_running or busy():raise HTTPException(409,'Pause or reset before switching scenes')
-    sim=new_simulation(scenes[body.id]);return sim.state()
+    sim=new_simulation(scenes[body.id], strategy=sim.strategy);return sim.state()
 
 @app.get('/api/scenes/{scene_id}/files/{name}')
 def scene_file(scene_id:str,name:str):
@@ -342,8 +363,10 @@ def inference_hold(current):
 
 @app.post('/api/agent')
 def agent_toggle(body:AgentToggle):
+    if body.enabled:
+        raise HTTPException(403,'Gemini experiments require explicit approved campaign; use the campaign runner')
     if body.enabled is not None:
-        agent_status['enabled']=body.enabled
+        agent_status['enabled']=False
         sim.log(f"Hosted agent {'enabled' if body.enabled else 'disabled'} by operator.")
     if body.pause_clock is not None:
         agent_status['pause_clock']=body.pause_clock
@@ -378,7 +401,7 @@ def scenario(body:Scenario):
     if data['human_variant'] is None:data.pop('human_variant')
     for key in ('building_use','immobile','comms_outages','room_risk','incident_room'):
         if not data.get(key):data.pop(key,None)   # unset fields stay out, so existing scenario hashes are unchanged
-    try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode)
+    try:sim=Simulation(sim.scene,data,sim.mode,sim.perception_mode,sim.strategy)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     return sim.state()
 
@@ -388,17 +411,23 @@ def control(body:Control):
     if busy() and body.action!='reset':raise HTTPException(409,'Paired comparison in progress')
     if body.mode is not None and body.mode not in ('adaptive','baseline'):raise HTTPException(422,'Invalid mode')
     if body.perception is not None and body.perception not in ('image-yolo','analytic-development'):raise HTTPException(422,'Invalid perception mode')
+    if body.strategy is not None and body.strategy not in ('greedy','mission-astar','mission-astar-cached'):
+        raise HTTPException(422,'Invalid mission strategy')
     if body.perception=='image-yolo' and not VISION_AVAILABLE:raise HTTPException(422,'Vision extra not installed')
     if body.action=='reset':
+        if getattr(sim,'recorder',None):sim.recorder.close()
         cancel_paired()
-        sim=Simulation(sim.base_scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode)
+        sim=Simulation(sim.base_scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode,body.strategy or sim.strategy)
     elif body.action=='start':
         if sim.status not in ('idle','paused'):raise HTTPException(409,'Reset a finished run first')
-        if sim.status!='idle' and ((body.mode and body.mode!=sim.mode) or (body.perception and body.perception!=sim.perception_mode)):
-            raise HTTPException(409,'Reset before changing policy or perception')
-        if sim.status=='idle' and body.perception and body.perception!=sim.perception_mode:
-            sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception)
-        sim.mode=body.mode or sim.mode;sim.status='running';sim.hazards_running=True
+        if sim.status!='idle' and ((body.mode and body.mode!=sim.mode) or (body.perception and body.perception!=sim.perception_mode) or (body.strategy and body.strategy!=sim.strategy)):
+            raise HTTPException(409,'Reset before changing policy, mission strategy or perception')
+        if sim.status=='idle' and (body.perception and body.perception!=sim.perception_mode or body.strategy and body.strategy!=sim.strategy):
+            sim=Simulation(sim.scene,sim.scenario,body.mode or sim.mode,body.perception or sim.perception_mode,body.strategy or sim.strategy)
+        sim.mode=body.mode or sim.mode;sim.strategy=body.strategy or sim.strategy;sim.status='running';sim.hazards_running=True
+        if recording_enabled and not getattr(sim,'recorder',None):
+            from .recording import Recorder
+            sim.recorder=Recorder(sim)
     elif body.action=='withdraw':
         if sim.status not in ('running','paused'):raise HTTPException(409,'No active mission to withdraw')
         sim.withdraw('operator stop');sim.status='running';sim.hazards_running=True
@@ -445,6 +474,8 @@ def comparison_status():
 @app.post('/api/frames')
 async def frame(body:Frame):
     current=sim
+    if renderer_lease['until']>time.monotonic() and body.renderer_id!=renderer_lease['id']:
+        raise HTTPException(409,'Another renderer owns the camera')
     request=current.frame_request
     if current.perception_mode!='image-yolo' or request is None or body.seq!=request['seq']:
         raise HTTPException(409,'Stale or unrequested frame')
@@ -456,6 +487,7 @@ async def frame(body:Frame):
         image=decode_rgb(body.rgb);depth=decode_depth(body.depth,body.width,body.height)
     except (ValueError,OSError) as error:raise HTTPException(422,f'Bad frame: {error}') from error
     if image.size!=(body.width,body.height):raise HTTPException(422,'RGB size does not match declared dimensions')
+    if getattr(current,'recorder',None):current.recorder.frame(body.model_dump(),dict(status='submitted'),current.time)
     model=await asyncio.to_thread(load_detector)
     if model is None:
         raise HTTPException(503,f'Detector unavailable: {detector_error or "vision extra not installed"}')
@@ -469,6 +501,7 @@ async def frame(body:Frame):
         if d:
             matched.add(d['id'])
     current.last_frame=dict(seq=body.seq,time=request['time'],accepted=accepted,rejected=rejected)
+    if getattr(current,'recorder',None):current.recorder.event('frame-result',current.last_frame,current.time)
     current.frame_request=None
     return current.last_frame
 
@@ -480,3 +513,95 @@ async def stream(ws:WebSocket):
         while True:
             await ws.send_json(state());await asyncio.sleep(.2)
     except WebSocketDisconnect:pass
+
+# Recording access is read-only; these endpoints never run a policy or inference.
+recording_enabled=True
+class RecordingToggle(BaseModel):
+    enabled:bool
+@app.post('/api/recording')
+def recording_toggle(body:RecordingToggle):
+    global recording_enabled
+    if sim.status=='running':raise HTTPException(409,'Choose recording before starting')
+    recording_enabled=body.enabled
+    return dict(enabled=recording_enabled)
+@app.get('/api/runs')
+def runs():
+    from .recording import listing
+    return listing()
+@app.get('/api/runs/{identity}')
+def run_manifest(identity:str):
+    from .recording import manifest
+    try:return manifest(identity)
+    except (ValueError,FileNotFoundError):raise HTTPException(404,'Recording not found')
+@app.get('/api/runs/{identity}/timeline')
+def run_timeline(identity:str,start:int=0,limit:int=25):
+    from .recording import timeline
+    try:return timeline(identity,max(0,start),min(100,max(1,limit)))
+    except (ValueError,FileNotFoundError):raise HTTPException(404,'Recording not found')
+@app.get('/api/runs/{identity}/artifacts/{name}')
+def run_artifact(identity:str,name:str):
+    from .recording import artifact
+    try:return FileResponse(artifact(identity,name))
+    except (ValueError,FileNotFoundError):raise HTTPException(404,'Artifact unavailable')
+@app.get('/api/runs/{identity}/download')
+def run_download(identity:str):
+    from .recording import archive
+    try:return FileResponse(archive(identity),filename=identity+'.zip')
+    except (ValueError,FileNotFoundError):raise HTTPException(404,'Recording not found')
+
+class ExperimentRun(BaseModel):
+    scene_id:str
+    scenario:dict
+    policy:str='mission-astar'
+    perception:str='image-yolo'
+@app.post('/api/experiments/run')
+def experiment_run(body:ExperimentRun):
+    global sim
+    if sim.status=='running' or busy():raise HTTPException(409,'A mission is active')
+    if body.scene_id not in scenes:raise HTTPException(422,'Unknown scene')
+    provider=None
+    if body.policy.startswith('agent-'):
+        from .reasoning import GeminiProvider, ARCHITECTURES
+        architecture=body.policy.removeprefix('agent-')
+        if architecture not in ARCHITECTURES:raise HTTPException(422,'Unknown architecture')
+        campaign=os.environ.get('RESCUETWIN_APPROVED_CAMPAIGN')
+        if not campaign:raise HTTPException(403,'Explicit approved campaign required')
+        if not getattr(app.state,'campaign_provider',None):app.state.campaign_provider=GeminiProvider(campaign)
+        provider=app.state.campaign_provider
+        from .recording import digest
+        allowed=provider.config.get('scenarios',[])
+        if architecture not in provider.config.get('architectures',[]) or not any(r['scene_id']==body.scene_id and digest(r['scenario'])==digest(body.scenario) for r in allowed):
+            raise HTTPException(403,'Scene/scenario/architecture outside the approved campaign')
+    elif body.policy not in ('distance','greedy','mission-astar'):raise HTTPException(422,'Unknown policy')
+    if body.perception not in ('image-yolo','analytic-development'):raise HTTPException(422,'Unknown perception')
+    if body.scenario.get('incident_room'):raise HTTPException(422,'Structural incidents excluded from experiment contract')
+    from .recording import Recorder
+    try:sim=Simulation(scenes[body.scene_id],body.scenario,'baseline' if body.policy=='distance' else 'adaptive',body.perception,'greedy' if body.policy!='mission-astar' else 'mission-astar')
+    except ValueError as error:raise HTTPException(422,str(error))
+    sim.status='running'
+    sim.recorder=Recorder(sim,dict(policy=body.policy,latency_excluded=True))
+    if provider:
+        from .reasoning import Supervisor
+        sim.supervisor=Supervisor(sim,provider,architecture,request_limit=provider.config.get('requests_per_mission',24))
+    return dict(run_id=sim.recorder.id)
+
+@app.get('/api/runs/{identity}/snapshot')
+def recorded_snapshot(identity:str,seq:int=0):
+    from .recording import snapshot
+    try:return snapshot(identity,max(0,seq))
+    except (ValueError,FileNotFoundError):raise HTTPException(404,'Recording not found')
+
+renderer_lease=dict(id=None,until=0.)
+class RendererLease(BaseModel):
+    id:str=Field(min_length=1,max_length=64)
+    release:bool=False
+@app.post('/api/renderer')
+def renderer_claim(body:RendererLease):
+    now=time.monotonic()
+    if body.release:
+        if renderer_lease['id']==body.id:renderer_lease.update(id=None,until=0.)
+        return dict(owner=False)
+    if renderer_lease['id']==body.id or renderer_lease['until']<=now:
+        renderer_lease.update(id=body.id,until=now+6.)
+        return dict(owner=True)
+    return dict(owner=False)

@@ -98,30 +98,43 @@ def test_incident_opens_partition_and_affects_people():
     assert sim.survivors[1]['status'] == 'evacuated'
 
 
-def test_automatic_sprinkler_extinguishes_nearby_fire_without_crossing_wall():
+@pytest.mark.parametrize('resolution', [.2, .25, .4, .5])
+def test_fixed_sprinklers_suppress_fire_without_robot_or_wall_penetration(tmp_path, resolution):
     scene = fixture()
+    scene.resolution = resolution
+    scene.bundle = tmp_path
+    scene.source = 'Matterport fixture'
     scene.default_material = 'inert'
-    sim = Simulation(scene, scenario=dict(survivors=[], ignitions=[[8, 10], [11, 10]], seed=7))
-    sim.robot = (9, 10)
-    sim.hazards(.2)
-    assert sim.state()['sprinkler'] is None
+    scene.rooms = [dict(id='sprinkler-room', name='Sprinkler room', observe=[(24, 15)],
+                        cells=[(x, y) for x in range(21, 28) for y in range(12, 19)])]
+    fire = (24, 15)
+    assert Simulation(scene).state()['sprinklers'] == []
+    fields = [dict(key='has_sprinklers', value=False)]
+    scene.meta['costar'] = dict(fields=fields)
+    assert Simulation(scene).state()['sprinklers'] == []
+    fields[0]['value'] = True
+    sim = Simulation(scene, scenario=dict(survivors=[], ignitions=[fire], seed=7))
+    heads = [entry['origin'] for entry in sim.state()['sprinklers']]
+    assert heads == [(24, 15)]
+    assert sim.risk['sprinkler-room']['tag'] == 'sprinkler'
+    assert sim.risk['sprinkler-room']['factor'] == .8
+    tagged = Simulation(scene, scenario=dict(survivors=[], ignitions=[], seed=7,
+                     room_risk={'sprinkler-room': 'gas_heater'}))
+    assert tagged.risk['sprinkler-room']['tag'] == 'both'
+    assert not any(entry['cells'] for entry in sim.state()['sprinklers'])
 
     sim.status = 'running'
     sim.hazards(.2)
-    spray = sim.state()['sprinkler']
-    assert spray['origin'] == (9, 10)
-    assert (8, 10) in spray['cells']
-    assert (11, 10) not in spray['cells']
-    assert (6, 8) not in spray['cells']
-    assert .12 <= sim.state()['fire'][10][8] < sim.state()['fire'][10][11]
-
+    active = [entry for entry in sim.state()['sprinklers'] if entry['cells']]
+    assert any(fire in entry['cells'] for entry in active)
+    assert all(line_visible(scene, entry['origin'], cell) for entry in active for cell in entry['cells'])
+    assert sim.robot != fire
+    sim.robot = (6, 6)
     for _ in range(30):
         sim.hazards(.2)
-    assert sim.fire[10, 8] < .12
-    assert sim.state()['sprinkler'] is None
-    sim.robot = (6, 6)
-    sim.hazards(.2)
-    assert sim.fire[10, 8] < .12 <= sim.fire[10, 11]
+    assert sim.fire[fire[1], fire[0]] < .12
+    assert [entry['origin'] for entry in sim.state()['sprinklers']] == heads
+    assert not any(entry['cells'] for entry in sim.state()['sprinklers'])
 
 
 def test_risk_route_avoids_heat_and_escort_requires_observation():
@@ -148,10 +161,9 @@ def test_agent_rejects_hidden_survivor_and_stale_decision():
     with pytest.raises(ValueError):apply_decision(s,dict(kind='room',id='room-0'),0)
 
 
-def test_fire_proof_robot_crosses_fire_at_dash_speed(monkeypatch):
+def test_fire_proof_robot_crosses_fire_at_dash_speed():
     from rescuetwin.core import ROBOT_DASH_SPEED, ROBOT_SPEED
     s=Simulation(scenario=dict(survivors=[[3,6]],ignitions=[[1,6]],seed=1))
-    monkeypatch.setattr(s, 'automatic_sprinkler', lambda: False)
     s.status='running'
     for _ in range(4):s.tick()
     q=s.route[0];s.heat[q[1]][q[0]]=1.;s.progress=0
@@ -280,6 +292,10 @@ def test_room_risk_building_default_keeps_unknown_and_validates():
     yes=_twin_rooms_scene(field(True))
     assert risk.building_default(yes)[0]=='sprinkler'
     assert _first_target(yes,{'left':'neither'})==(9,2)                         # operator override beats building default
+    yes.meta['costar']['fields'].append(dict(key='gas_range', value=True, field_path='features[1]'))
+    tag, provenance = risk.building_default(yes)
+    assert tag == 'both'
+    assert any(field['key'] == 'gas_range' for field in provenance['fields'])
     s=_twin_rooms_scene()
     for bad in ({'kitchen':'gas_heater'},{'left':'unknown'},{'left':'propane'},['left']):
         with pytest.raises(ValueError,match='room_risk'):

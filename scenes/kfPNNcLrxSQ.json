@@ -1,0 +1,30 @@
+{
+  "model": "kfPNNcLrxSQ",
+  "floor_label": "Floor 1",
+  "property_id": null,
+  "residential_listing_id": 214324685,
+  "floor_plan_id": null,
+  "resolution": 0.25,
+  "exits": [
+    {
+      "id": "exit-entry",
+      "label": "Unit entry door",
+      "segment": [
+        [
+          2.933,
+          -10.105
+        ],
+        [
+          4.066,
+          -10.105
+        ]
+      ],
+      "evidence": [
+        "Pano 28 face 1: framed entry door with peephole and electronic lock; pano 27 face 3 looks toward the same entry from the laundry hall",
+        "Schematic DXF/PNG: opening at the end of the entrance hall beside pano 28"
+      ],
+      "verified": "Manual source plan and panorama inspection",
+      "beyond": "Building corridor beyond the unit door assumed available; outside the scan"
+    }
+  ]
+}
