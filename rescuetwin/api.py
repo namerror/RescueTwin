@@ -28,6 +28,10 @@ TICK = .2
 RUN_SPEED = float(os.environ.get('RESCUETWIN_RUN_SPEED', '1'))
 if not math.isfinite(RUN_SPEED) or RUN_SPEED <= 0:
     raise ValueError('RESCUETWIN_RUN_SPEED must be a positive, finite number')
+# Wall-clock pace only: every tick still advances the same TICK of simulated time, so results are unchanged.
+# The operator can change it at runtime (POST /api/speed); the env value is the startup default.
+SPEED_CHOICES = (1, 2, 4, 8)
+run_speed = RUN_SPEED
 
 scenes = available()
 
@@ -120,6 +124,7 @@ def frame_timeout_check():
 async def lifespan(app):
     async def clock():
         global sim
+        next_due = 0.   # wall-clock time the next paced simulation step may run
         while True:
             tick_started = time.monotonic()
             fast = paired is not None and paired.status == 'running'
@@ -130,7 +135,12 @@ async def lifespan(app):
                 continue
             if current.status == 'running':
                 frame_timeout_check()
-                current.tick(TICK)
+                # Deadline pacing: one TICK of simulated time per TICK/run_speed of wall time, measured from the
+                # previous step. A camera-frame wait overlaps that interval instead of adding to it, and the pace
+                # never exceeds the requested speed. tick() itself is a no-op while a frame is outstanding.
+                if fast or (not current.needs_frame() and tick_started >= next_due):
+                    current.tick(TICK)
+                    next_due = tick_started + TICK / run_speed
             elif current.hazards_running:
                 # Upstream PR #1: hazards can be previewed while the robot mission is idle or paused.
                 current.hazards(TICK)
@@ -141,9 +151,14 @@ async def lifespan(app):
             if fast:
                 await asyncio.sleep(TICK / 8 if current.needs_frame() else 0)
             else:
-                active = current.status == 'running' or current.hazards_running
-                interval = TICK / RUN_SPEED if active and not current.needs_frame() else TICK
-                await asyncio.sleep(max(0., interval - (time.monotonic() - tick_started)))
+                now = time.monotonic()
+                if current.status == 'running':
+                    # Waiting on a frame: re-check often so the clock resumes as soon as it lands.
+                    wait = TICK / 8 if current.needs_frame() else min(TICK, max(0., next_due - now))
+                else:
+                    interval = TICK / run_speed if current.hazards_running else TICK
+                    wait = max(0., interval - (now - tick_started))
+                await asyncio.sleep(wait)
 
     async def reason():
         """Hosted supervisor: proposes goals; the controller validates and executes. Any failure or rejection falls
@@ -232,6 +247,7 @@ def busy():
 def state():
     s=sim.state();s['paired']=paired.public() if paired else None
     s['vision_installed'] = VISION_AVAILABLE
+    s['run_speed'] = run_speed
     return s
 
 @app.get('/api/observations')
@@ -333,6 +349,19 @@ def agent_toggle(body:AgentToggle):
         agent_status['pause_clock']=body.pause_clock
         sim.log(PAUSE_LABEL if body.pause_clock else 'Real-time mode: the mission clock runs during model inference.')
     return agent_info()
+
+class Speed(BaseModel):
+    speed: float
+
+@app.post('/api/speed')
+def set_speed(body: Speed):
+    """Playback pace (1x, 2x, 4x, 8x). Changes wall-clock pace only, never the simulated timestep."""
+    global run_speed
+    if body.speed not in SPEED_CHOICES:
+        raise HTTPException(422, f'speed must be one of {SPEED_CHOICES}')
+    run_speed = float(body.speed)
+    return dict(run_speed=run_speed, choices=SPEED_CHOICES,
+                note='Wall-clock pace only; camera frames, inference and compute can limit the achieved pace.')
 
 @app.get('/api/perception')
 def perception_status():
