@@ -20,3 +20,5 @@ frontend/public/models/FemaleChild.glb
 frontend/public/models/MaleOlder.glb
 frontend/public/models/FemaleOlder.glb
 frontend/public/models/.survivor-*.tmp
+
+shared-scenes.json
