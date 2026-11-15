@@ -345,12 +345,14 @@ def fetch_matterpak(model, root):
         try:
             with zipfile.ZipFile(RangeFile(links[0])) as archive:
                 entries = archive.infolist()
-                if sum(i.file_size for i in entries) > 2_000_000_000:
-                    raise ValueError('Archive exceeds 2 GB unpacked limit')
                 for entry in entries:
                     if not (dest/entry.filename).resolve().is_relative_to(dest) or (entry.external_attr >> 16) & 0o170000 == 0o120000:
                         raise ValueError('Unsafe archive entry')
                 obj, keep = matterpak_members([i.filename for i in entries])
+                # Point clouds are skipped, so only the extracted members count toward the limit.
+                kept = set(keep)
+                if sum(i.file_size for i in entries if i.filename in kept) > 2_000_000_000:
+                    raise ValueError('Extracted MatterPak members exceed 2 GB unpacked limit')
                 for name in keep:
                     target = dest/name
                     target.parent.mkdir(parents=True, exist_ok=True)
