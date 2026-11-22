@@ -1,0 +1,56 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Enabled: true
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Cell Size: 0.25
+      Name: Floor grid
+      Plane Cell Count: 12
+      Value: true
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Length: 0.4
+      Name: Robot axes
+      Reference Frame: base_footprint
+      Value: true
+    - Class: rviz_default_plugins/Camera
+      Enabled: true
+      Image Rendering: background
+      Name: Robot RGB
+      Topic:
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Value: /rescuetwin/rgbd/image
+      Value: true
+      Visibility:
+        Floor grid: false
+        Robot axes: false
+        Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Robot depth
+      Min Value: 0.08
+      Max Value: 8
+      Normalize Range: false
+      Topic:
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Value: /rescuetwin/rgbd/depth_image
+      Value: true
+  Global Options:
+    Fixed Frame: base_footprint
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+Window Geometry:
+  Width: 1100
+  Height: 740

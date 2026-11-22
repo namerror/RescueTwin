@@ -29,3 +29,5 @@ shared-scenes.json
 /vexcel_resources/
 /.aws/
 /.claude/launch.json
+
+.vscode/*
