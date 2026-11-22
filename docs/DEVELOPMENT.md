@@ -7,8 +7,7 @@ See [Data and setup](DATA.md) for authorized scene inputs and [Architecture](ARC
 `./setup.sh` manages the pinned Python environment and npm installation. After dependency changes use `./setup.sh --install`. For manual installation:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[test,scene,vision]'
+uv sync --locked --inexact --python 3.12.3 --link-mode hardlink --extra test --extra scene --extra vision
 cd frontend
 npm ci
 npm run build
@@ -30,6 +29,8 @@ npm run dev
 ```
 
 The registry uses `RESCUETWIN_DATA` (default `data/prepared`). Explicit `RESCUETWIN_SCENE` selects a scene; otherwise the configured `RESCUETWIN_MODEL_ID` is preferred, then the first valid local sponsor scene, then the synthetic fixture. `.env` is read by the launcher; export variables when starting services directly.
+
+The desktop GPU stack is constrained in `pyproject.toml` to PyTorch 2.11.0, torchvision 0.26.0, Triton 3.6.0 and matching CUDA libraries. Keep these constraints aligned with the other local GPU projects so uv can share cached package files.
 
 Dependency updates must include `uv.lock` or frontend `package-lock.json` as appropriate. Keep artifacts under ignored `data/` or frontend build/cache directories.
 
