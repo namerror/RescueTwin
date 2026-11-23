@@ -15,6 +15,7 @@ import os
 import numpy as np
 
 from . import occupancy, risk
+from .hazards import HazardField
 
 Cell = tuple[int, int]
 
@@ -38,21 +39,9 @@ CAMERA_FOV = math.radians(90)
 CAMERA_HEIGHT_M = 1.0
 SCAN_RATE = math.radians(90)  # rad/s rotate-in-place at room observation points (image mode)
 PERCEPTION_PERIOD = 0.4      # s of simulated time between rendered frames (image mode)
-# Fire model from upstream PR #1 (floor2-hazard-preview), illustrative, not calibrated fire behaviour.
-# Upstream's coefficients are per 0.5 m cell; diffusion is rescaled by (0.5 / resolution)^2 so the model
-# behaves the same in metres on any grid (identical to upstream at 0.5 m).
-UPSTREAM_IGNITION_HEAT = 0.9
 HAZARD_SENSOR_RADIUS_M = 1.0
-# Ignition threshold, burn rate, fuel load, smoke yield.
-MATERIALS = {
-    'inert': (1., 0., 0., 0.),
-    'light': (.24, 1.05, .65, .48),
-    'wood': (.31, .85, 1., .40),
-    'upholstery': (.19, 1.25, 1.15, .72),
-}
 HAZARD_PREVIEW_LIMIT_S = 600.0
 FLAME_VISIBLE_HEAT = 0.3           # flames are drawn and visible to sensing at or above this heat
-IGNITION_RADIUS_M = 0.3
 DEDUP_M = 0.75               # detections closer than this are the same potential survivor
 FATAL_HEAT_DOSE = 12.0       # normalized heat-seconds above the escort heat limit (demo)
 PAIR_M = 0.75                # robot must reach this close to start an escort
@@ -222,25 +211,15 @@ class Simulation:
         self.mode=mode;self.perception_mode=perception;self.time=0.;self.status='idle'
         self.robot=tuple(self.scene.robot_start or self.scene.exits[0]);self.heading=0.;self.progress=0.
         self.scan_remaining=0.
-        self.free=self.scene.free_mask()
-        self.diffusion_edges = (
-            self.free[1:, :] & self.free[:-1, :],
-            self.free[:, 1:] & self.free[:, :-1],
-        )
-        H,W=self.free.shape
-        self.heat=np.zeros((H,W));self.smoke=np.zeros((H,W));self.fire=self.grid()
-        profiles=np.empty((4,H,W))
-        profiles[:]=np.array(MATERIALS[self.scene.default_material])[:,None,None]
-        for (x,y),material in self.scene.materials.items():
-            profiles[:,y,x]=MATERIALS[material]
-        self.ignition_threshold,self.burn_rate,fuel,self.smoke_yield=profiles
-        self.fuel=np.where(self.free,fuel,0.)
-        exchange=self.grid()
-        for x,y in set(map(tuple,self.scene.exits)) | self.scene.vents:
-            exchange[y,x]=1.
-        self.heat_decay=.04+.16*exchange
-        self.smoke_decay=.015+.24*exchange
-        self.ignition_cells=set();self.hazard_time=0.;self.hazards_running=False
+        self.hazard_field = HazardField(self.scene, self.scenario['ignitions'], self.scenario['seed'])
+        self.free = self.hazard_field.free
+        self.heat = self.hazard_field.heat
+        self.smoke = self.hazard_field.smoke
+        self.fire = self.hazard_field.fire
+        self.fuel = self.hazard_field.fuel
+        self.ignition_cells = self.hazard_field.ignitions
+        H, W = self.free.shape
+        self.hazards_running = False
         self.observed=np.zeros((H,W));self.belief_heat=np.zeros((H,W));self.belief_smoke=np.zeros((H,W));self.last_seen=np.full((H,W),-1.);self.hazard_seen=np.full((H,W),-1.);self.heat_sampled_at=np.full((H,W),-1.);self.smoke_sampled_at=np.full((H,W),-1.)
         self.route=[];self.goal=None;self.visited=set();self.escort={}  # person ID to confirmed detection ID
         self.detections=[];self.next_detection=0;self.version=0
@@ -268,18 +247,6 @@ class Simulation:
         self.rooms_state={r['id']:dict(id=r['id'],name=r['name'],label=r.get('label'),status='unvisited',observed_fraction=0.,
                                         viewpoints_tried=0,reason=None) for r in self.scene.rooms}
         self.room_of={tuple(c):r['id'] for r in self.scene.rooms for c in r['cells']}
-        radius = IGNITION_RADIUS_M / self.scene.resolution
-        reach = math.floor(radius + 1e-9)
-        for x, y in self.scenario['ignitions']:
-            for yy in range(max(0, y - reach), min(H, y + reach + 1)):
-                for xx in range(max(0, x - reach), min(W, x + reach + 1)):
-                    if math.hypot(xx - x, yy - y) <= radius + 1e-9 and line_visible(self.scene, (x, y), (xx, yy)):
-                        self.heat[yy, xx] = UPSTREAM_IGNITION_HEAT
-                        self.ignition_cells.add((xx, yy))
-        self.ignition_mask=np.zeros((H,W),bool)
-        for xx,yy in self.ignition_cells:self.ignition_mask[yy,xx]=True
-        self.fire=np.where(self.ignition_mask,self.heat,0.)
-        self.ignition_strength = self.fire.copy()
         self.sprinkler_heads = []
         self.sprinkler_coverage = []
         self.active_sprinklers = set()
@@ -372,29 +339,16 @@ class Simulation:
                     *(person['position'] for person in self.survivors)}
         debris = next((cell for cell in neighbours if cell not in occupied), None)
         self.scene = replace(self.scene, walls=(self.scene.walls - breached) | ({debris} if debris else set()))
-        for x, y in breached:
-            self.free[y, x] = True
+        self.hazard_field.update_floor(self.scene.free_mask())
         if debris is not None:
-            x, y = debris
-            self.free[y, x] = False
-            self.heat[y, x] = self.smoke[y, x] = self.fuel[y, x] = 0.
-            self.fire[y, x] = 0.
-            self.ignition_strength[y, x] = 0.
-        self.diffusion_edges = (
-            self.free[1:, :] & self.free[:-1, :],
-            self.free[:, 1:] & self.free[:, :-1],
-        )
+            self.hazard_field.clear_cell(debris)
         self.sprinkler_coverage = [self.sprinkler_reach(origin) for origin in self.sprinkler_heads]
         affected = {origin, *neighbours}
         for wall_cell in breached:
             affected.update(self.scene.neighbors(wall_cell))
         if debris:
             affected.discard(debris)
-        for x, y in affected:
-            self.ignition_cells.add((x, y))
-            self.heat[y, x] = max(self.heat[y, x], UPSTREAM_IGNITION_HEAT)
-            self.fire[y, x] = max(self.fire[y, x], UPSTREAM_IGNITION_HEAT)
-            self.smoke[y, x] = max(self.smoke[y, x], .35)
+        self.hazard_field.ignite(affected, initial_smoke=.35, sustained=False)
         injured = 0
         for person in self.survivors:
             if person['status'] in ('evacuated', 'casualty') or person['position'] not in affected:
@@ -454,44 +408,14 @@ class Simulation:
         self.active_sprinklers = active
         return bool(active)
 
-    def hazards(self,dt):
-        """Advance finite fuel, wall-confined diffusion and ambient exchange."""
-        spraying = self.update_sprinklers()
-        dt = dt * HAZARD_TIME_SCALE   # demo pacing; see HAZARD_TIME_SCALE
-        scale = (.2 / self.scene.resolution) ** 2
-        kh, ks = .30 * scale, .50 * scale
-        steps = max(1, math.ceil(dt * (4 * max(kh, ks) + .255) / .8))
-        step = dt / steps
-        cooling = 1.
-        if spraying:
-            cooling = np.exp(-SPRAY_COOLING_RATE * self.spray_strength * step / HAZARD_TIME_SCALE)
-        for _ in range(steps):
-            self.hazard_time += step
-            heat = self.heat * cooling if spraying else self.heat
-            smoke = self.smoke
-            if spraying:
-                self.ignition_strength *= cooling
-            source = self.ignition_strength if self.hazard_time <= 12 + 1e-8 else 0.
-            burn = np.minimum(self.fuel / step,
-                              .2 * self.burn_rate * np.maximum(0., heat - self.ignition_threshold) * self.fuel)
-            self.fuel = np.maximum(0., self.fuel - burn * step)
-            release = 5 * burn
-            self.fire = np.maximum(source, np.clip(release, 0., 1.))
-            self.heat = np.maximum(source, np.clip(heat + step * (
-                kh * self._laplacian(heat) + release - self.heat_decay * heat), 0., 1.))
-            self.smoke = np.clip(smoke + step * (
-                ks * self._laplacian(smoke) + release * self.smoke_yield - self.smoke_decay * smoke), 0., 1.)
+    @property
+    def hazard_time(self):
+        return self.hazard_field.time
 
-    def _laplacian(self,field):
-        vertical, horizontal = self.diffusion_edges
-        flux_y = (field[:-1, :] - field[1:, :]) * vertical
-        flux_x = (field[:, :-1] - field[:, 1:]) * horizontal
-        out = np.zeros_like(field)
-        out[1:, :] += flux_y
-        out[:-1, :] -= flux_y
-        out[:, 1:] += flux_x
-        out[:, :-1] -= flux_x
-        return out
+    def hazards(self, dt):
+        spraying = self.update_sprinklers()
+        cooling = SPRAY_COOLING_RATE * self.spray_strength / HAZARD_TIME_SCALE if spraying else None
+        self.hazard_field.advance(dt * HAZARD_TIME_SCALE, cooling)
 
     # ---------------------------------------------------------------- sensing
     def camera_pose(self):

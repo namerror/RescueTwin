@@ -63,7 +63,7 @@ def copy_material(source, destination):
     destination.write_text('\n'.join(lines) + '\n')
 
 
-def build_world(scene, spawn):
+def validate_floor(scene, spawn):
     mesh = scene['mesh']
     if (scene['schema'] != 'rescuetwin.scene/1' or mesh['format'] != 'obj'
             or not mesh['textured'] or not mesh['validation']['passed']
@@ -88,6 +88,16 @@ def build_world(scene, spawn):
     cell = (math.floor((x - ox) / res), math.floor((y - oy) / res))
     if not (0 <= cell[0] < width and 0 <= cell[1] < height) or cell in blocked:
         raise ValueError('spawn must be on the prepared free floor')
+    return offset, blocked, cell
+
+
+def build_world(scene, spawn):
+    offset, blocked, _ = validate_floor(scene, spawn)
+    mesh = scene['mesh']
+    x, y, yaw = spawn
+    grid = scene['grid']
+    ox, oy = grid['origin']
+    res, width, height = grid['resolution'], grid['width'], grid['height']
 
     sdf = ET.Element('sdf', version='1.8')
     world = element(sdf, 'world', name='rescuetwin')

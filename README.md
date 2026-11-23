@@ -67,9 +67,10 @@ Building scans and property records are real; people, robot, fire, smoke, and ca
 
 ## Quickstart
 
-To try the robotics policy API on a public floor without sponsor data, follow
-the [Gazebo quickstart](ros2_sim/README.md). The steps below launch the browser
-workbench for rehearsals in building scans.
+For Gazebo and the robotics policy API, run `./setup.sh --gazebo` to choose a
+floor and place an ignition. See the [Gazebo quickstart](ros2_sim/README.md) for
+one-time prerequisites. The steps below launch the browser workbench for
+rehearsals in building scans.
 
 **The demo data was provided by Matterport/CoStar and cannot be published with this repository.** Start with authorized sponsor access and a private reviewed scene manifest ([setup details](docs/DATA.md)).
 

@@ -19,8 +19,12 @@ import numpy as np
 from pydantic import BaseModel, Field, FiniteFloat
 import uvicorn
 
-from .core import Scene, Simulation
+from .core import Scene
+from .gazebo_hazards import ParticleLayout, ParticlePublisher
+from .hazards import HazardField
 from .policy_motion import Clearance, Motion, SPEED, TURN
+
+HAZARD_STEP_NS = 200_000_000
 
 
 class LeaseRequest(BaseModel):
@@ -63,7 +67,7 @@ def yaw(rotation):
     return math.atan2(2 * (w*z + x*y), 1 - 2 * (y*y + z*z))
 
 
-def pack_frame(rgb, depth, calibration):
+def pack_frame(rgb, depth, calibration, source='gazebo_geometric_rgbd'):
     if (rgb.width, rgb.height) != (depth.width, depth.height):
         return None
     if (calibration.width, calibration.height) != (rgb.width, rgb.height):
@@ -84,7 +88,7 @@ def pack_frame(rgb, depth, calibration):
                 mount=dict(parent='base_link', xyz_m=[.075, 0., .19], rpy_rad=[0., 0., 0.]),
                 rgb=base64.b64encode(color.tobytes()).decode(),
                 depth=base64.b64encode(metres.tobytes()).decode(),
-                source='gazebo_geometric_rgbd')
+                source=source)
 
 
 class Runtime:
@@ -95,9 +99,30 @@ class Runtime:
                       height=grid['height'], origin=tuple(grid['origin']),
                       resolution=grid['resolution'], walls={tuple(c) for c in grid['blocked']},
                       exits=[tuple(config['exit_cell'])])
-        self.hazards = Simulation(scene, dict(survivors=[], ignitions=config['ignitions'],
-                                              seed=config['seed']))
-        self.hazard_scenario = self.hazards.scenario
+        raw_ignitions = config['ignitions']
+        if not isinstance(raw_ignitions, list) or len(raw_ignitions) > 20:
+            raise ValueError('Expected a list of at most 20 ignition cells')
+        if any(not isinstance(cell, (list, tuple)) or len(cell) != 2
+               or any(type(value) is not int for value in cell) for cell in raw_ignitions):
+            raise ValueError('Ignitions must be [column, row] integer pairs')
+        self.hazard_ignitions = tuple(map(tuple, raw_ignitions))
+        self.hazard_seed = config['seed']
+        self.hazard_visuals = config.get('hazard_visuals')
+        reserved = set(scene.exits)
+        if 'spawn_cell' in config:
+            reserved.add(tuple(config['spawn_cell']))
+        if len(set(self.hazard_ignitions)) != len(self.hazard_ignitions):
+            raise ValueError('Duplicate ignition cells')
+        for cell in self.hazard_ignitions:
+            if not scene.free(cell):
+                raise ValueError(f'Ignition {cell} must be on a free map cell')
+            if cell in reserved:
+                raise ValueError(f'Ignition {cell} must keep the robot spawn and egress clear')
+        if type(self.hazard_seed) is not int:
+            raise ValueError('Hazard seed must be an integer')
+        if self.hazard_visuals and (self.hazard_visuals['version'] != 1
+                or not 1.5 <= self.hazard_visuals['ceiling_m'] <= 6):
+            raise ValueError('Invalid hazard visuals configuration')
         self.clearance = Clearance(scene)
         self.motion = Motion(self.clearance)
         self.lock = threading.Lock()
@@ -106,8 +131,7 @@ class Runtime:
         self.clock_at = self.pose_at = self.twist_at = 0.
         self.pose = self.twist = None
         self.pose_ns = self.twist_ns = None
-        self.hazard_tick = None
-        self.samples = None
+        self.reset_hazards()
         self.frames_pending = OrderedDict()
         self.frame = None
         self.frame_receipt = 0.
@@ -142,7 +166,8 @@ class Runtime:
                 return
             self.frames_pending.pop(capture)
         try:
-            frame = pack_frame(record['rgb'], record['depth'], record['info'])
+            source = 'gazebo_particle_rgbd' if self.hazard_visuals else 'gazebo_geometric_rgbd'
+            frame = pack_frame(record['rgb'], record['depth'], record['info'], source)
         except (ValueError, BufferError, TypeError):
             return
         if frame is not None:
@@ -151,21 +176,52 @@ class Runtime:
                     self.frame = dict(frame, stamp_ns=capture, frame_id=str(capture))
                     self.frame_receipt = time.monotonic()
 
+    def reset_hazards(self):
+        scene = self.clearance.scene
+        self.hazards = HazardField(scene, self.hazard_ignitions, self.hazard_seed)
+        self.particle_layout = (ParticleLayout(scene, self.hazard_visuals['ceiling_m'])
+                                if self.hazard_visuals else None)
+        self.hazard_tick = None
+        self.samples = None
+
+    def observe_clock(self, current):
+        if self.clock_ns is not None and current < self.clock_ns:
+            self.motion.finish('blocked', 'simulation_clock_reset')
+            self.motion.lease_until = 0.
+            self.reset_hazards()
+            self.pose = self.twist = None
+            self.pose_ns = self.twist_ns = None
+            self.frame = None
+            self.frames_pending.clear()
+        if current != self.clock_ns:
+            self.clock_ns, self.clock_at = current, time.monotonic()
+
+    def advance_hazards(self):
+        if self.clock_ns is None:
+            return False
+        if self.hazard_tick is None:
+            self.hazard_tick = self.clock_ns
+            return True
+        # Consume a bounded number of missed steps per tick and use exact simulation intervals.
+        steps = min((self.clock_ns - self.hazard_tick) // HAZARD_STEP_NS, 10)
+        if self.hazard_ignitions:
+            for _ in range(steps):
+                self.hazards.advance(HAZARD_STEP_NS / 1e9)
+        else:
+            self.hazards.time += steps * HAZARD_STEP_NS / 1e9
+        self.hazard_tick += steps * HAZARD_STEP_NS
+        return steps > 0
+
     def update_samples(self):
         if self.latest_pose() is None:
             self.samples = None
             return
-        if self.hazard_tick is None:
-            self.hazard_tick = self.clock_ns
-        # Consume a bounded number of missed steps per tick and use exact simulation intervals.
-        for _ in range(min((self.clock_ns - self.hazard_tick) // 200_000_000, 10)):
-            self.hazards.hazards(.2)
-            self.hazard_tick += 200_000_000
-        x, y = self.hazards.scene.cell(*self.pose[:2])
-        if not self.hazards.scene.free((x, y)):
+        scene = self.clearance.scene
+        x, y = scene.cell(*self.pose[:2])
+        if not scene.free((x, y)):
             self.samples = None
             return
-        self.samples = dict(stamp_ns=self.clock_ns, unit='normalized_simulation',
+        self.samples = dict(stamp_ns=self.hazard_tick, unit='normalized_simulation',
                             heat=float(self.hazards.heat[y, x]), smoke=float(self.hazards.smoke[y, x]))
 
     def app(self):
@@ -258,7 +314,7 @@ class Runtime:
         return app
 
 
-def serve(path, port):
+def serve(path, port, particle_publisher=None):
     import rclpy
     from geometry_msgs.msg import TwistStamped
     from nav_msgs.msg import Odometry
@@ -269,6 +325,8 @@ def serve(path, port):
     from rclpy.qos import qos_profile_sensor_data
 
     runtime = Runtime(json.loads(path.read_text()))
+    if runtime.hazard_visuals and particle_publisher is None:
+        raise ValueError('The prepared ignition run requires the Gazebo particle publisher')
     rclpy.init()
     node = rclpy.create_node('rescuetwin_policy_gateway')
     output = node.create_publisher(TwistStamped, '/rescuetwin/guarded_velocity', 10)
@@ -276,16 +334,7 @@ def serve(path, port):
     def clock(message):
         current = message.clock.sec * 1_000_000_000 + message.clock.nanosec
         with runtime.lock:
-            if runtime.clock_ns is not None and current < runtime.clock_ns:
-                runtime.motion.finish('blocked', 'simulation_clock_reset')
-                runtime.motion.lease_until = 0.
-                runtime.hazards = Simulation(runtime.clearance.scene, runtime.hazard_scenario)
-                runtime.hazard_tick = None
-                runtime.pose = runtime.twist = None
-                runtime.frame = None
-                runtime.frames_pending.clear()
-            if current != runtime.clock_ns:
-                runtime.clock_ns, runtime.clock_at = current, time.monotonic()
+            runtime.observe_clock(current)
 
     def pose(message):
         xyz, rotation = message.pose.pose.position, message.pose.pose.orientation
@@ -302,7 +351,10 @@ def serve(path, port):
         with runtime.lock:
             runtime.seq += 1
             linear, angular = runtime.motion.tick(runtime.latest_pose(), runtime.twist or (0., 0.))
+            updated = runtime.advance_hazards()
             runtime.update_samples()
+            if updated and publisher:
+                publisher.submit(runtime.particle_layout.snapshot(runtime.hazards))
         message = TwistStamped()
         message.header.stamp = node.get_clock().now().to_msg()
         message.twist.linear.x, message.twist.angular.z = float(linear), float(angular)
@@ -333,14 +385,20 @@ def serve(path, port):
     with os.fdopen(fd, 'w') as file:
         json.dump(dict(url=f'http://127.0.0.1:{port}/policy/v1/runs/{runtime.run_id}',
                        token=runtime.token), file)
-    thread.start()
+    publisher = None
     try:
+        if runtime.hazard_visuals:
+            publisher = ParticlePublisher(particle_publisher)
+        thread.start()
         server.run()
     except KeyboardInterrupt:
         pass
     finally:
         rclpy.try_shutdown()
-        thread.join(timeout=2)
+        if thread.is_alive():
+            thread.join(timeout=2)
+        if publisher:
+            publisher.close()
         descriptor.unlink(missing_ok=True)
 
 
@@ -348,8 +406,9 @@ def main():
     parser = ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--port', type=int, default=8091)
+    parser.add_argument('--particle-publisher', type=Path)
     args = parser.parse_args()
-    serve(args.config, args.port)
+    serve(args.config, args.port, args.particle_publisher)
 
 
 if __name__ == '__main__':

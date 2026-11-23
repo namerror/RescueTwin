@@ -7,22 +7,31 @@ from pathlib import Path
 import tempfile
 import xml.etree.ElementTree as ET
 
-from prepare_world import build_world, element
+from prepare_world import build_world, element, validate_floor
+from hazard_particles import add_emitters, write_assets
 
 
-def synthetic():
+PUBLIC_SPAWN = (1.55, 1.5, 0.)
+DEMO_IGNITION = (13, 6)
+
+
+def public_floor():
     width, height = 20, 12
     blocked = [[x, y] for y in range(height) for x in range(width)
                if x in (0, width - 1) or y in (0, height - 1)
                or (x == 9 and y not in (5, 6))]
-    scene = dict(schema='rescuetwin.scene/1', checks={'passed': True},
+    return dict(name='Public two-room floor', schema='rescuetwin.scene/1', checks={'passed': True},
                  frame={'units': 'm', 'up': '+z'},
                  mesh=dict(format='obj', textured=True, validation={'passed': True},
                            file='unused.obj', transform=[[1, 0, 0, 0], [0, 1, 0, 0],
                                                          [0, 0, 1, 0], [0, 0, 0, 1]]),
                  grid=dict(width=width, height=height, origin=[0., 0.], resolution=.25),
                  blocked={'wall': blocked}, exits=[{'cell': [1, 1]}])
-    world = build_world(scene, (1.55, 1.5, 0.))
+
+
+def synthetic():
+    scene = public_floor()
+    world = build_world(scene, PUBLIC_SPAWN)
     structure = world.find('world/model/link')
     structure.remove(structure.find('visual'))
     for collision in structure.findall('collision'):
@@ -79,38 +88,67 @@ def instrument_robot(models, target):
     (target / 'model.config').write_bytes((source.parent / 'model.config').read_bytes())
 
 
+def validate_ignitions(scene, blocked, spawn_cell, ignitions):
+    grid = scene['grid']
+    exits = {tuple(exit['cell']) for exit in scene['exits']}
+    if not isinstance(ignitions, list) or len(ignitions) > 20:
+        raise ValueError('Use at most 20 ignition cells')
+    used = set()
+    for point in ignitions:
+        if (not isinstance(point, (tuple, list)) or len(point) != 2
+                or any(type(value) is not int for value in point)):
+            raise ValueError('Ignitions need integer column and row coordinates')
+        x, y = point
+        cell = (x, y)
+        if not (0 <= x < grid['width'] and 0 <= y < grid['height']) or cell in blocked:
+            raise ValueError(f'Ignition {cell} must be on a free map cell')
+        if cell == spawn_cell or cell in exits:
+            raise ValueError(f'Ignition {cell} must keep the robot spawn and egress clear')
+        if cell in used:
+            raise ValueError(f'Duplicate ignition {cell}')
+        used.add(cell)
+
+
 def prepare(output, models, floor, ignitions, seed):
     if output.exists():
         raise ValueError('choose a fresh output directory')
     if floor is None:
         scene, tree = synthetic()
+        spawn = PUBLIC_SPAWN
     else:
         provenance = json.loads((floor / 'source.json').read_text())
         bundle = Path(provenance['bundle'])
         scene = json.loads((bundle / 'scene.json').read_text())
         # Generate map and physics from the same input rather than relying on a stale SDF.
-        tree = build_world(scene, provenance['spawn_xy_yaw'])
+        spawn = provenance['spawn_xy_yaw']
+        tree = build_world(scene, spawn)
     world = tree.find('world')
     sensor_system = element(world, 'plugin', filename='gz-sim-sensors-system',
                             name='gz::sim::systems::Sensors')
-    element(sensor_system, 'render_engine', 'ogre')
+    element(sensor_system, 'render_engine', 'ogre2')
     grid = scene['grid']
-    blocked = {tuple(cell) for group in scene['blocked'].values() for cell in group}
-    if any(tuple(p) in blocked or not (0 <= p[0] < grid['width'] and 0 <= p[1] < grid['height'])
-           for p in ignitions):
-        raise ValueError('ignitions must be on free map cells')
+    _, blocked, spawn_cell = validate_floor(scene, spawn)
+    validate_ignitions(scene, blocked, spawn_cell, ignitions)
+    config = dict(
+        map=dict(width=grid['width'], height=grid['height'], resolution=grid['resolution'],
+                 origin=grid['origin'], blocked=sorted(blocked), frame='map'),
+        exit_cell=scene['exits'][0]['cell'], spawn_cell=spawn_cell, seed=seed, ignitions=ignitions)
+    if ignitions:
+        add_emitters(world, grid, ignitions)
+        height = scene['mesh'].get('wall_height')
+        ceiling = height if isinstance(height, (int, float)) and 1.5 <= height <= 6 else 2.4
+        config['hazard_visuals'] = dict(version=1, ceiling_m=ceiling)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
         staged = Path(temporary) / 'run'
         instrument_robot(models, staged / 'models/turtlebot3_burger')
         if floor is not None:
             (staged / 'scan').symlink_to((floor / 'scan').resolve(), target_is_directory=True)
+        if ignitions:
+            write_assets(staged / 'hazard_textures')
         ET.indent(tree)
         tree.write(staged / 'world.sdf')
-        (staged / 'policy.json').write_text(json.dumps(dict(
-            map=dict(width=grid['width'], height=grid['height'], resolution=grid['resolution'],
-                     origin=grid['origin'], blocked=sorted(blocked), frame='map'),
-            exit_cell=scene['exits'][0]['cell'], seed=seed, ignitions=ignitions)))
+        (staged / 'policy.json').write_text(json.dumps(config))
         staged.rename(output)
 
 

@@ -1,7 +1,9 @@
+import json
 import os
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, Shutdown
 from launch.substitutions import LaunchConfiguration
@@ -32,7 +34,12 @@ def start(context):
     if gui == 'false':
         args.append('-s')
     else:
-        args.extend(['--render-engine-gui', LaunchConfiguration('render_engine').perform(context)])
+        engine = LaunchConfiguration('render_engine').perform(context)
+        if policy_python:
+            sensors = ET.parse(world).find("world/plugin[@name='gz::sim::systems::Sensors']/render_engine")
+            if sensors is not None:
+                engine = sensors.text
+        args.extend(['--render-engine-gui', engine])
     config_dir = Path(get_package_share_directory('rescuetwin_sim')) / 'config'
     config = config_dir / ('policy_bridge.yaml' if policy_python else 'bridge.yaml')
     actions = [
@@ -52,6 +59,11 @@ def start(context):
         ),
     ]
     if policy_python:
+        policy_config = json.loads((world.parent / 'policy.json').read_text())
+        particle_args = []
+        if policy_config.get('hazard_visuals'):
+            publisher = Path(get_package_prefix('rescuetwin_sim')) / 'lib/rescuetwin_sim/hazard_particle_publisher'
+            particle_args = ['--particle-publisher', str(publisher)]
         actions.extend([
             Node(
                 package='ros_gz_bridge', executable='parameter_bridge', name='rescuetwin_camera_bridge',
@@ -72,7 +84,7 @@ def start(context):
         actions.append(ExecuteProcess(
             cmd=[policy_python, '-m', 'rescuetwin.policy_runtime', '--config',
                  str(world.parent / 'policy.json'), '--port',
-                 LaunchConfiguration('policy_port').perform(context)],
+                 LaunchConfiguration('policy_port').perform(context), *particle_args],
             output='screen', on_exit=[Shutdown()],
         ))
     return actions

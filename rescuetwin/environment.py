@@ -5,7 +5,8 @@ import json
 import math
 from pathlib import Path
 
-from .core import MATERIALS, Scene
+from .core import Scene
+from .hazards import MATERIALS
 
 
 def inside(x, y, box):

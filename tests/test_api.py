@@ -35,6 +35,10 @@ def test_operator_websocket_snapshot():
 def test_hazard_preview_runs_without_robot_mission():
     with TestClient(app) as client:
         client.post('/api/control',json={'action':'reset'})
+        scenario = {'survivors': [], 'ignitions': [[25, 18]], 'seed': 23}
+        initial = client.post('/api/scenario', json=scenario).json()
+        assert initial['hazard_time'] == 0 and initial['fire'][18][25] > .8
+        assert not any(map(any, initial['smoke']))
         state=client.post('/api/control',json={'action':'toggle_hazards'}).json()
         assert state['hazards_running'] and state['status']=='paused'
         assert client.post('/api/scenario',json={'survivors':[],'ignitions':[],'seed':1}).status_code==409
@@ -42,7 +46,9 @@ def test_hazard_preview_runs_without_robot_mission():
         assert client.post('/api/control',json={'action':'toggle_hazards'}).status_code==409   # robot running
         paused=client.post('/api/control',json={'action':'pause'}).json()
         assert not paused['hazards_running']
-        client.post('/api/control',json={'action':'reset'})
+        reset = client.post('/api/control',json={'action':'reset'}).json()
+        assert reset['heat'] == initial['heat'] and reset['fire'] == initial['fire']
+        assert reset['smoke'] == initial['smoke']
 
 
 def test_building_use_presets_and_scenario_roundtrip():

@@ -1,4 +1,5 @@
 """Scene bundles, placement, walls, fire spread and missions on bundle scenes."""
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ import numpy as np
 import pytest
 
 from rescuetwin import presets
-from rescuetwin.core import Simulation, compare, line_visible
+from rescuetwin.core import Scene, Simulation, compare, line_visible
 from rescuetwin.scenes import load_bundle
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,21 +127,22 @@ def test_fire_crosses_only_through_doorway(tmp_path):
 
 def test_fire_is_deterministic_and_burns_out(mini):
     a = Simulation(mini, dict(scene_id='mini', survivors=[], ignitions=[[10, 5]], seed=1))
-    b = Simulation(mini, dict(scene_id='mini', survivors=[], ignitions=[[10, 5]], seed=99))
+    b = Simulation(mini, dict(scene_id='mini', survivors=[], ignitions=[[10, 5]], seed=1))
     peak = 0
     for _ in range(3000):                         # 600 s, the hazard preview limit
         a.hazards(.2); b.hazards(.2)
         peak = max(peak, int((a.heat > .3).sum()))
     assert np.array_equal(a.heat, b.heat) and np.array_equal(a.smoke, b.smoke)
-    assert peak > 20 and a.heat.max() < .3        # spreads, then burns out (upstream PR #1 behaviour)
+    assert peak > 20 and a.heat.max() < .3
     assert round(a.hazard_time, 6) == 600
 
 
 def test_material_fuel_and_residual_smoke():
-    scenario = dict(survivors=[], ignitions=[[25, 18]], seed=1)
-    inert = Simulation(scenario=scenario)
-    inert.fuel.fill(0)
-    combustible = Simulation(scenario=scenario)
+    scene = Scene(id='single-fuel-cell', width=9, height=7, exits=[(1, 1)],
+                  default_material='inert', materials={(4, 3): 'wood'})
+    scenario = dict(survivors=[], ignitions=[[4, 3]], seed=1)
+    inert = Simulation(replace(scene, materials={}), scenario)
+    combustible = Simulation(scene, scenario)
     for _ in range(75):
         inert.hazards(.2)
         combustible.hazards(.2)

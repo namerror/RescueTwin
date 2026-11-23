@@ -318,7 +318,9 @@ def serve(python, env, sid, backend, frontend, environment_file=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Install once, prepare missing textured scene data, then run backend + frontend. Root .env is supported; exported variables win.')
+    parser = argparse.ArgumentParser(
+        description='Install once, prepare missing textured scene data, then run backend + frontend. Root .env is supported; exported variables win.',
+        epilog='For Gazebo and its ignition picker, use ./setup.sh --gazebo.')
     parser.add_argument('--install', action='store_true', help='Resynchronize locked dependencies before starting')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--export-scenes', type=Path, metavar='MANIFEST', help='Export prepared scene annotations without starting services')

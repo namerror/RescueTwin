@@ -1,4 +1,5 @@
 """Start a RescueTwin policy simulation and its robot-camera viewer."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -21,15 +22,18 @@ WORLD_RUNS = {
 }
 DEFAULT_PRIVATE_FLOOR = 'data/ros2_sim/first-floor'
 DEFAULT_MODEL_DIR = 'data/ros2_sim/robot/opt/ros/jazzy/share/turtlebot3_gazebo/models'
+DEMO_IGNITION = [13, 6]
 
 
-def prepare_run(run, models, robot, floor):
+def prepare_run(run, models, robot, floor, hazard_demo):
     if not run.exists():
         generator = (Path(get_package_prefix('rescuetwin_sim'))
                      / 'lib/rescuetwin_sim/prepare_policy_run.py')
         command = [sys.executable, str(generator), '--model-dir', str(models), '--output', str(run)]
         if floor is not None:
             command.extend(['--floor', str(floor)])
+        if hazard_demo:
+            command.extend(['--ignition', *map(str, DEMO_IGNITION)])
         try:
             subprocess.run(command, check=True)
         except subprocess.CalledProcessError as error:
@@ -49,6 +53,15 @@ def prepare_run(run, models, robot, floor):
         matches = scan.is_symlink() and scan.resolve() == (floor / 'scan').resolve()
     if not matches:
         raise RuntimeError(f'The selected world or floor differs from the run at {run}. Choose a fresh run_dir.')
+
+    config = json.loads((run / 'policy.json').read_text())
+    if config.get('ignitions') and not config.get('hazard_visuals'):
+        raise RuntimeError('Regenerate the ignition run at a fresh run_dir to enable hazard rendering.')
+    if hazard_demo and config.get('ignitions') != [DEMO_IGNITION]:
+        raise RuntimeError('The public hazard demo requires its preset ignition. Choose a fresh run_dir.')
+    if config.get('ignitions') and not all((run / 'hazard_textures' / name).is_file()
+                                          for name in ('flame.png', 'core.png', 'smoke.png')):
+        raise RuntimeError('Hazard textures are missing. Regenerate the run in a fresh run_dir.')
 
     if (run / 'policy-client.json').exists():
         raise RuntimeError(f'A policy client descriptor already exists at {run}. '
@@ -81,14 +94,17 @@ def start(context):
     if not (os.environ.get('DISPLAY') or (not headless and os.environ.get('WAYLAND_DISPLAY'))):
         raise RuntimeError('Start in a desktop terminal, or run through xvfb-run with headless:=true.')
 
-    run = project_path('run_dir', WORLD_RUNS[world])
+    hazard_demo = argument('hazard_demo') == 'true'
+    if hazard_demo and world != 'public':
+        raise RuntimeError('hazard_demo requires the public world. Prepare a custom ignition run for a private floor.')
+    run = project_path('run_dir', 'data/ros2_sim/public-hazards' if hazard_demo else WORLD_RUNS[world])
     floor = None
     if world == 'private':
         floor = project_path('floor_dir', DEFAULT_PRIVATE_FLOOR)
         if not (floor / 'source.json').is_file() or not (floor / 'scan').is_dir():
             raise RuntimeError(f'Prepared scan required at {floor}. Run prepare_world.py or set floor_dir.')
     prepared = run.exists()
-    prepare_run(run, models, robot, floor)
+    prepare_run(run, models, robot, floor, hazard_demo)
 
     launch_dir = Path(get_package_share_directory('rescuetwin_sim')) / 'launch'
     sim_args = {
@@ -129,6 +145,8 @@ def generate_launch_description():
                               description='Prepared policy output directory, defaults to policy-demo or policy-scan'),
         DeclareLaunchArgument('headless', default_value='false', choices=['true', 'false'],
                               description='Disable both windows while keeping the RGB-D camera active'),
+        DeclareLaunchArgument('hazard_demo', default_value='false', choices=['true', 'false'],
+                              description='Use the public floor with a seeded ignition visible from spawn'),
         DeclareLaunchArgument('policy_python', default_value='.venv/bin/python',
                               description='Python executable with the ros-policy extra'),
         DeclareLaunchArgument('policy_port', default_value='8091',

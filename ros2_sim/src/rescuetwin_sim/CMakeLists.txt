@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.8)
 project(rescuetwin_sim)
 find_package(ament_cmake REQUIRED)
+find_package(gz_transport_vendor REQUIRED)
+find_package(gz_msgs_vendor REQUIRED)
+find_package(gz-transport13 REQUIRED)
+find_package(gz-msgs10 REQUIRED)
+
+add_executable(hazard_particle_publisher src/hazard_particle_publisher.cc)
+target_compile_features(hazard_particle_publisher PRIVATE cxx_std_17)
+target_link_libraries(hazard_particle_publisher PRIVATE gz-transport13::gz-transport13 gz-msgs10::gz-msgs10)
+install(TARGETS hazard_particle_publisher DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
-install(PROGRAMS scripts/prepare_world.py scripts/prepare_policy_run.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/prepare_world.py scripts/prepare_policy_run.py scripts/hazard_particles.py
+  DESTINATION lib/${PROJECT_NAME})
 ament_package()

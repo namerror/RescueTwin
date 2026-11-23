@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RescueTwin · Gazebo setup</title>
+  <style>
+    :root { color-scheme: dark; font: 16px system-ui, sans-serif; color: #e8f0ed; background: #141c20; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1040px; margin: auto; padding: clamp(20px, 5vw, 54px); }
+    h1 { margin: 0 0 24px; font-size: clamp(26px, 5vw, 42px); letter-spacing: -.04em; }
+    label { display: block; color: #ced9d5; margin: 0 0 6px; font-weight: 600; }
+    select, button { font: inherit; padding: 9px 13px; border: 1px solid #536263; border-radius: 7px; color: inherit; background: #27353a; }
+    select { width: 100%; }
+    button { cursor: pointer; font-weight: 650; }
+    button:disabled { opacity: .55; cursor: default; }
+    :focus-visible { outline: 3px solid #99d8cc; outline-offset: 3px; }
+    .tools, .actions, .legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .tools { margin-top: 18px; }
+    .hint { color: #bdcbc8; margin: 14px 0 8px; font-size: .9rem; }
+    .map { overflow: auto; padding: 4px; background: #202b30; border: 1px solid #536263; border-radius: 8px; }
+    canvas { display: block; height: auto; cursor: crosshair; }
+    .legend { gap: 14px; margin: 10px 0 18px; color: #ced9d5; font-size: .88rem; }
+    .legend i { display: inline-block; height: .68rem; width: .68rem; border-radius: 50%; margin-right: .35em; background: var(--swatch); }
+    #launch { background: #b3e3d8; color: #11251f; border-color: #b3e3d8; }
+    #placement, #status { min-height: 1.2em; overflow-wrap: anywhere; }
+    .error { color: #ffae99; }
+    #client { overflow-wrap: anywhere; color: #d2dfdc; }
+    [hidden] { display: none; }
+  </style>
+  <script src="/setup.js" type="module"></script>
+</head>
+<body>
+  <main>
+    <h1>RescueTwin · Gazebo setup</h1>
+    <label for="floor">Floor</label>
+    <select id="floor" disabled></select>
+    <p id="private-help" class="hint" hidden>Compatible private scans appear here after the one-time scene setup in <code>docs/DATA.md</code>.</p>
+    <div class="tools">
+      <button id="demo" type="button" hidden>Fire demo</button>
+      <button id="clear" type="button" disabled>Clear air</button>
+      <span id="count">0 ignitions</span>
+    </div>
+    <p class="hint" id="map-help">Click a floor cell to add or remove an ignition. With the map focused, use the arrow keys and Space.</p>
+    <div class="map">
+      <canvas id="map" tabindex="0" aria-label="Floor map" aria-describedby="map-help placement"></canvas>
+    </div>
+    <div class="legend">
+      <span><i style="--swatch:#374751"></i>Blocked</span>
+      <span><i style="--swatch:#73cfe5"></i>Robot spawn</span>
+      <span><i style="--swatch:#84dbaa"></i>Exit</span>
+      <span><i style="--swatch:#ff8d60"></i>Ignition</span>
+    </div>
+    <p id="placement" role="status"></p>
+    <div class="actions">
+      <button id="launch" type="button" disabled>Launch Gazebo</button>
+      <button id="stop" type="button" hidden>Stop</button>
+    </div>
+    <p id="status" role="status"></p>
+    <p id="client" hidden>Policy client file <code></code></p>
+  </main>
+</body>
+</html>

@@ -30,7 +30,7 @@ FastAPI owns scenario state and the simulation clock. NumPy arrays represent hea
 
 The TypeScript/Three.js frontend renders the textured scan, synthetic people, and hazards. In image mode it renders synchronized RGB and depth from the requested robot pose. The backend detects people using YOLO, projects detections into the static map with depth, and maintains perception-assigned tracks. The browser must remain available to supply frames. Camera imagery comes from the scan renderer, not a live feed.
 
-Fire, smoke, gas incidents, and sprinkler behavior are illustrative simulation mechanisms. Hazard measurements are analytic simulated sensors; YOLO is person detection only. CoStar building-use context can inform room-search priors, while marketed capacity only configures hypothetical workloads.
+The workbench and Gazebo policy runtime share a finite-fuel hazard model. Sustained heating ignites adjacent fuel over open grid edges. Smoke rises into a faster-moving ceiling layer, mixes back down as it accumulates, and dissipates through time and modeled exits or vents. The existing 2D smoke maps and local probes use the lower layer. Gazebo renders a bounded set of flame and smoke particle sources from the same fields and advances hazards on simulation time. Fire, smoke, gas incidents, and sprinkler behavior are illustrative simulation mechanisms. Hazard measurements are analytic simulated sensors. YOLO detects people. CoStar building-use context can inform room-search priors, while marketed capacity only configures hypothetical workloads.
 
 ## Knowledge and safety boundaries
 

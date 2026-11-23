@@ -3,16 +3,18 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import numpy as np
+import pytest
 
 from rescuetwin.policy_motion import Clearance, Motion
 from rescuetwin.policy_runtime import Runtime, pack_frame
 
 
-def runtime():
-    return Runtime(dict(map=dict(frame='map', resolution=.25, origin=[0., 0.],
-                                 width=16, height=12, blocked=[[8, y] for y in range(12)
-                                                               if y not in (5, 6)]),
-                        exit_cell=[1, 1], ignitions=[[2, 2]], seed=7))
+def runtime(**overrides):
+    config = dict(map=dict(frame='map', resolution=.25, origin=[0., 0.],
+                           width=16, height=12, blocked=[[8, y] for y in range(12)
+                                                         if y not in (5, 6)]),
+                  exit_cell=[1, 1], spawn_cell=[3, 4], ignitions=[[2, 2]], seed=7)
+    return Runtime(config | overrides)
 
 
 def test_narrow_doorway_uses_same_clearance_as_velocity_gate():
@@ -88,3 +90,30 @@ def test_frame_preserves_geometry_and_marks_invalid_pixels():
     service.frame = dict(frame, stamp_ns=1, frame_id='1')
     service.clock_ns = 1_000_000_000
     assert service.frame_status() == 'stale'
+
+
+def test_hazards_advance_without_pose_and_reset_to_the_ignition():
+    service = runtime()
+    start = service.hazards.fire.copy()
+    assert start[2, 2] > .8
+    assert not service.advance_hazards()
+    service.observe_clock(100_000_000)
+    assert service.advance_hazards()
+    assert not service.advance_hazards()
+    service.observe_clock(900_000_000)
+    assert service.advance_hazards()
+    service.update_samples()
+    assert service.samples is None
+    assert service.hazards.time == pytest.approx(.8)
+    assert service.hazards.upper_smoke[2, 2] > 0.
+    assert not service.advance_hazards()
+    service.observe_clock(0)
+    assert np.array_equal(start, service.hazards.fire) and not service.hazards.smoke.any()
+
+
+@pytest.mark.parametrize('ignitions', [
+    [[1, 1]], [[3, 4]], [[8, 2]], [[-1, 3]], [[2, 2], [2, 2]], [[2.5, 2]],
+])
+def test_hazards_reject_invalid_ignition_cells(ignitions):
+    with pytest.raises(ValueError, match='[Ii]gnition'):
+        runtime(ignitions=ignitions)
