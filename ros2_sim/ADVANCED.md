@@ -107,6 +107,11 @@ For a different prepared scan, set `floor_dir` and use a fresh `run_dir`.
 In terminal 2, set `client` to `policy-client.json` in the selected run directory
 and choose a goal on that floor.
 
+New policy runs add missing OBJ normals to a local render copy so Ogre 2 can
+display the scan textures. If an existing run shows a white scan, use a fresh
+`run_dir` with the same floor and ignition settings. The setup screen prepares
+a fresh run each time you launch.
+
 To prepare a new scan, use an [authorized local bundle](../docs/DATA.md) with a
 textured OBJ and translation-only registration. Set `bundle` to the bundle path,
 and `x`, `y`, and `yaw` to the reviewed spawn in metres and radians. Check that

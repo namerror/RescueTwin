@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import xml.etree.ElementTree as ET
 
-from prepare_world import build_world, element, validate_floor
+from prepare_world import build_world, element, validate_floor, write_mesh_with_normals
 from hazard_particles import add_emitters, write_assets
 
 
@@ -143,7 +143,16 @@ def prepare(output, models, floor, ignitions, seed):
         staged = Path(temporary) / 'run'
         instrument_robot(models, staged / 'models/turtlebot3_burger')
         if floor is not None:
-            (staged / 'scan').symlink_to((floor / 'scan').resolve(), target_is_directory=True)
+            source_scan = (floor / 'scan').resolve()
+            (staged / 'scan').symlink_to(source_scan, target_is_directory=True)
+            mesh_file = scene['mesh']['file']
+            render_scan = staged / 'scan_render'
+            if write_mesh_with_normals(source_scan / mesh_file, render_scan / mesh_file):
+                for name in scene['assets']:
+                    if name != mesh_file:
+                        (render_scan / name).symlink_to(source_scan / name)
+                world.find("model[@name='scan_floor']/link/visual/geometry/mesh/uri").text = (
+                    f'scan_render/{mesh_file}')
         if ignitions:
             write_assets(staged / 'hazard_textures')
         ET.indent(tree)

@@ -2,6 +2,7 @@
 """Prepare a local Gazebo world from a validated, registered OBJ bundle."""
 import argparse
 import hashlib
+from itertools import pairwise
 import json
 import math
 from pathlib import Path
@@ -61,6 +62,81 @@ def copy_material(source, destination):
         lines[start + 1:start + 1] = [f'{key} {value}' for key, value in defaults.items()
                                     if key not in properties]
     destination.write_text('\n'.join(lines) + '\n')
+
+
+def face_normal(corners, vertices, seen_vertices):
+    indices = [int(corner[0]) for corner in corners]
+    points = [vertices[index - 1 if index > 0 else seen_vertices + index] for index in indices]
+    origin = points[0]
+    edges = [tuple(coord - start for coord, start in zip(point, origin)) for point in points[1:]]
+    # Sum the oriented triangle cross products to support polygon faces too.
+    nx = ny = nz = 0.
+    for (ax, ay, az), (bx, by, bz) in pairwise(edges):
+        nx += ay * bz - az * by
+        ny += az * bx - ax * bz
+        nz += ax * by - ay * bx
+    length = math.hypot(nx, ny, nz)
+    if length == 0:
+        return 0., 0., 1.
+    return nx / length, ny / length, nz / length
+
+
+def write_mesh_with_normals(source, destination):
+    """Write an Ogre 2 render copy if any face corners lack normals."""
+    vertices, normals = [], []
+    missing = False
+    with source.open() as mesh:
+        for line in mesh:
+            fields = line.partition('#')[0].split()
+            if not fields:
+                continue
+            if fields[0] == 'v':
+                vertices.append(tuple(map(float, fields[1:4])))
+            elif fields[0] == 'vn':
+                normals.append(line.rstrip('\r\n') + '\n')
+            elif fields[0] == 'f' and not missing:
+                missing = any(corner.count('/') < 2 or corner.endswith('/') for corner in fields[1:])
+    if not missing:
+        return False
+
+    destination.parent.mkdir()
+    with source.open() as mesh, destination.open('w') as output:
+        # Keep original absolute normal indices and resolve relative ones using
+        # the count at the face's original location.
+        output.writelines(normals)
+        next_normal = len(normals) + 1
+        seen_vertices = seen_normals = 0
+        for line in mesh:
+            body, marker, comment = line.partition('#')
+            tag, *fields = body.split() or ('',)
+            if tag == 'vn':
+                seen_normals += 1
+                continue
+            if tag == 'v':
+                seen_vertices += 1
+            if tag != 'f':
+                output.write(line)
+                continue
+
+            corners = [corner.split('/') for corner in fields]
+            generated = None
+            if any(len(corner) < 3 or not corner[2] for corner in corners):
+                normal = face_normal(corners, vertices, seen_vertices)
+                output.write('vn {:.9g} {:.9g} {:.9g}\n'.format(*normal))
+                generated = str(next_normal)
+                next_normal += 1
+            rewritten = []
+            for corner in corners:
+                position = corner[0]
+                uv = corner[1] if len(corner) > 1 else ''
+                normal = corner[2] if len(corner) > 2 else ''
+                if not normal:
+                    normal = generated
+                elif normal.startswith('-'):
+                    normal = str(seen_normals + int(normal) + 1)
+                rewritten.append(f'{position}/{uv}/{normal}')
+            output.write('f ' + ' '.join(rewritten) + (f' #{comment.rstrip()}' if marker else '') + '\n')
+    return True
 
 
 def validate_floor(scene, spawn):
