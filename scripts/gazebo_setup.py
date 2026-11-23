@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -169,6 +170,7 @@ class Launcher:
         self.bundle_root = bundle_root
         self.state_dir = ros_data / 'launcher'
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.client_path = self.state_dir / 'policy-client.json'
         self.settings_path = self.state_dir / 'last-setup.json'
         self.settings = load_settings(self.settings_path)
         self.floors = {}
@@ -190,12 +192,27 @@ class Launcher:
                 return dict(phase='idle', message='')
             state = dict(phase=session.phase, message=session.message)
             if session.phase == 'running':
-                state['client'] = str(session.run_dir / 'policy-client.json')
+                state['client'] = str(self.client_path)
             return state
 
     def set_status(self, session, phase, message):
         with self.lock:
             session.phase, session.message = phase, message
+
+    def publish_client(self, session):
+        with self.lock:
+            if session.cancel.is_set():
+                return
+            descriptor = session.run_dir / 'policy-client.json'
+            self.client_path.symlink_to(descriptor.relative_to(self.state_dir))
+            session.phase, session.message = 'running', 'Gazebo and the robot camera are ready.'
+            example = shlex.quote(str(ROOT / 'ros2_sim/examples/policy_client.py'))
+            print(f'Policy client file: {self.client_path}\n'
+                  f'Try in a second terminal: python3 {example} velocity 0.10 0 2', flush=True)
+
+    def clear_client(self):
+        if self.client_path.is_symlink():
+            self.client_path.unlink(missing_ok=True)
 
     def start(self, payload):
         if not isinstance(payload, dict) or not isinstance(payload.get('floor'), str):
@@ -227,6 +244,7 @@ class Launcher:
             if session and session.worker.is_alive():
                 session.cancel.set()
                 session.phase, session.message = 'stopping', 'Stopping Gazebo…'
+                self.clear_client()
             return session
 
     def run_command(self, session, arguments, output, env, error, cwd=ROOT):
@@ -346,7 +364,7 @@ class Launcher:
                     if not ready:
                         ready = policy_ready(session.run_dir, port)
                         if ready:
-                            self.set_status(session, 'running', 'Gazebo and the robot camera are ready.')
+                            self.publish_client(session)
                         elif time.monotonic() > deadline:
                             raise SetupError('The robot camera did not become ready.')
         except InterruptedError:
@@ -359,13 +377,20 @@ class Launcher:
                 import traceback
                 traceback.print_exc(file=output)
         finally:
-            if process is not None:
-                stop_process(process)
-            if session.cancel.is_set():
-                phase, message = 'idle', 'Gazebo stopped.'
-            if phase == 'error':
-                message += f' Local log: {log}'
-            self.set_status(session, phase, message)
+            with self.lock:
+                if session.phase == 'running':
+                    session.phase, session.message = 'stopping', 'Stopping Gazebo…'
+                self.clear_client()
+            try:
+                if process is not None:
+                    stop_process(process)
+            finally:
+                with self.lock:
+                    if session.cancel.is_set():
+                        phase, message = 'idle', 'Gazebo stopped.'
+                    elif phase == 'error':
+                        message += f' Local log: {log}'
+                    session.phase, session.message = phase, message
 
 
 def policy_ready(run, port):
@@ -455,6 +480,7 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             parser.exit(1, 'Gazebo setup is already open. Use its browser tab or stop that launcher.\n')
+        launcher.clear_client()
         with ThreadingHTTPServer(('127.0.0.1', 0), make_handler(launcher)) as server:
             url = f'http://127.0.0.1:{server.server_port}'
             print(f'Gazebo setup is open at {url}. Press Ctrl+C to stop.', flush=True)

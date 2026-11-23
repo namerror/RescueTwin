@@ -66,11 +66,14 @@ only needs Python. Run the first command to cross the doorway and confirm it rep
 then sends an explicit stop.
 
 ```bash
-client=data/ros2_sim/policy-demo/policy-client.json
-python3 ros2_sim/examples/policy_client.py "$client" pose 3.2 1.5 0
-sleep 1.1  # Give the previous client's one-second lease time to expire.
-python3 ros2_sim/examples/policy_client.py "$client" velocity -0.12 0 2
+python3 ros2_sim/examples/policy_client.py --client data/ros2_sim/policy-demo/policy-client.json pose 3.2 1.5 0
+python3 ros2_sim/examples/policy_client.py --client data/ros2_sim/policy-demo/policy-client.json velocity -0.12 0 2
 ```
+
+For a custom Python policy, import `Client` from `ros2_sim.examples.policy_client`
+with the repository on your Python import path, and call
+`Client.from_descriptor('data/ros2_sim/policy-demo/policy-client.json')`.
+Use `Client.from_descriptor()` for a run started through `./setup.sh --gazebo`.
 
 Pose goals use `x y yaw` in metres and radians in the map frame. Velocity commands
 use `linear angular duration` in m/s, rad/s, and seconds. The example prints the
@@ -104,8 +107,8 @@ ros2 launch rescuetwin_sim bringup.launch.py world:=private
 ```
 
 For a different prepared scan, set `floor_dir` and use a fresh `run_dir`.
-In terminal 2, set `client` to `policy-client.json` in the selected run directory
-and choose a goal on that floor.
+In terminal 2, pass `--client` followed by the descriptor path printed by the
+launcher and choose a goal on that floor.
 
 New policy runs add missing OBJ normals to a local render copy so Ogre 2 can
 display the scan textures. If an existing run shows a white scan, use a fresh

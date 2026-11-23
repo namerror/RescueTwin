@@ -14,6 +14,16 @@ From the repository root, run:
 
 Use **Stop** in the setup screen to return to the map and move an ignition. RescueTwin remembers the last launched setup for each floor. The screen shows the policy client file when the camera is ready. Closing the browser leaves the simulation running. Ctrl+C in the launcher terminal stops both. If a browser window does not open, use the local URL printed in the terminal.
 
+## Send a velocity command
+
+On the public two-room floor, choose **Clear air** before launching. When the setup screen reports that the robot is ready, open a second terminal at the repository root and run:
+
+```bash
+python3 ros2_sim/examples/policy_client.py velocity 0.10 0 2
+```
+
+The arguments are linear velocity in m/s, angular velocity in rad/s, and duration in seconds. The example finds the active run, sends its bearer token automatically, and requests a stop when it finishes. The launcher terminal also prints a command you can paste from any directory.
+
 ## One-time system setup
 
 Use Ubuntu 24.04 with [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html) and [uv](https://docs.astral.sh/uv/getting-started/installation/). After adding the ROS apt source, install:
@@ -28,9 +38,11 @@ See the [Gazebo command-line reference](ADVANCED.md) for headless setup, custom 
 
 ## Use your own policy
 
-Start with the [Python example](examples/policy_client.py). Read the run URL and
-bearer token from `policy-client.json`, then send the token in the
-`Authorization: Bearer …` header. Keep this file local. The API is intended for a
+Start with `Client.from_descriptor()` in the [Python example](examples/policy_client.py).
+It reads `data/ros2_sim/launcher/policy-client.json`, the stable path shown in the
+setup screen, and attaches the bearer token to requests. Pass a descriptor path
+to `Client.from_descriptor(path)` or use `--client PATH` on the command line to
+select a specific run. Keep the descriptor local. The API is intended for a
 trusted developer on the same machine.
 
 | Route relative to the run URL | Method | What to send or read |

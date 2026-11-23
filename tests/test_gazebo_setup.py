@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+from threading import Event
+import time
 
 import pytest
 
@@ -97,6 +99,66 @@ def test_preparation_failure_reports_error_and_allows_retry(tmp_path, monkeypatc
     launcher.start(request)
     launcher.session.worker.join(1)
     assert launcher.status()['phase'] == 'error'
+
+
+def test_active_client_path_tracks_the_ready_run_and_is_cleared(tmp_path, monkeypatch, capsys):
+    launcher = gazebo_setup.Launcher(tmp_path / 'gazebo', tmp_path / 'prepared')
+    floor, = launcher.catalog()['floors']
+    request = dict(floor=floor['id'], revision=floor['revision'], ignitions=[])
+    ready = Event()
+    exited = Event()
+    credential = 'synthetic-run-token'
+
+    class Process:
+        def poll(self):
+            return 1 if exited.is_set() else None
+
+    def prepare(run_dir, *_):
+        run_dir.mkdir(parents=True)
+        (run_dir / 'policy-client.json').write_text(json.dumps({'token': credential}))
+
+    def wait_until_running():
+        deadline = time.monotonic() + 3
+        while launcher.status()['phase'] == 'starting' and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert launcher.status()['phase'] == 'running'
+
+    monkeypatch.setattr(launcher, 'ensure_tools', lambda *_: ('python', 'models', {}))
+    monkeypatch.setattr(gazebo_setup, 'free_port', lambda: 8091)
+    monkeypatch.setattr(gazebo_setup, 'prepare', prepare)
+    monkeypatch.setattr(gazebo_setup.subprocess, 'Popen', lambda *_, **__: Process())
+    monkeypatch.setattr(gazebo_setup, 'policy_ready', lambda *_: ready.is_set())
+    monkeypatch.setattr(gazebo_setup, 'stop_process', lambda _: None)
+
+    launcher.client_path.symlink_to('missing')
+    launcher.clear_client()
+    assert not launcher.client_path.is_symlink()
+    launcher.start(request)
+    assert 'client' not in launcher.status()
+    assert not launcher.client_path.is_symlink()
+    ready.set()
+    wait_until_running()
+    first = launcher.session.run_dir / 'policy-client.json'
+    assert launcher.client_path.resolve() == first
+    assert launcher.status()['client'] == str(launcher.client_path)
+    output = capsys.readouterr().out
+    assert 'velocity 0.10 0 2' in output
+    assert credential not in output + json.dumps(launcher.status())
+
+    launcher.stop().worker.join(3)
+    assert launcher.status()['phase'] == 'idle'
+    assert not launcher.client_path.is_symlink()
+    assert first.is_file()
+
+    launcher.start(request)
+    wait_until_running()
+    assert launcher.client_path.resolve() == launcher.session.run_dir / 'policy-client.json'
+    assert launcher.client_path.resolve() != first
+    exited.set()
+    launcher.session.worker.join(3)
+    assert launcher.status()['phase'] == 'error'
+    assert 'client' not in launcher.status()
+    assert not launcher.client_path.is_symlink()
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='Node is optional for the standalone launcher')
